@@ -18,8 +18,8 @@
   `tools/test_detect_game.py`（不打开 GUI 的游戏状态检测自测）
 - 新增调研报告 `docs/game-detection-research.md`：四款脚本的窗口类 / 标题 / 进程 / ADB 检测机制
   逆向与静态分析、无法可靠检测的场景与建议
-- 回归测试更新：`tools/regression_test.py` 扩充到 **107 个用例**（含检测规则相关用例），
-  全绿、退出码 0；`docs/qa-report.md` 更新为 v0.6.0 最终版（107 通过 / 0 失败 / 0 跳过）
+- 回归测试更新：`tools/regression_test.py` 扩充到 **111 个用例**（含检测规则相关用例），
+  全绿、退出码 0；`docs/qa-report.md` 更新为 v0.6.0 最终版（111 通过 / 0 失败 / 0 跳过）
 - 本机验证：异环运行中被准确识别「运行中（窗口）」（`UnrealWindow` + 「异环」含尾随空格 +
   `HTGame.exe`），其余三款未运行且无启动器误报；`EnumWindows` 快照 8–14ms
 - 更新 README / 主页（游戏运行检测说明、配置 v4、检测规则、目录结构、常见问题）

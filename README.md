@@ -243,7 +243,7 @@ GameHub/
 │  ├─ preview.py           截图小工具（调试）
 │  ├─ test_detect.py       游戏启动程序自动检测命令行自测
 │  ├─ test_detect_game.py  游戏运行状态检测命令行自测
-│  ├─ regression_test.py   回归测试（标准库 unittest，107 个用例）
+│  ├─ regression_test.py   回归测试（标准库 unittest，111 个用例）
 │  └─ verify_exe.ps1       本地打包 exe 验证
 ├─ docs/                   文档与 GitHub Pages 站点
 │  ├─ index.html           项目主页
@@ -320,7 +320,7 @@ git config --local https.proxy http://127.0.0.1:7897
 - 改动后先跑回归测试（标准库 `unittest`，不需要 pytest，全绿时退出码为 0）：
 
   ```bat
-  python tools/regression_test.py   :: 107 个用例
+  python tools/regression_test.py   :: 111 个用例
   python tools/test_detect.py       :: 只验证游戏启动程序自动检测，不打开 GUI
   python tools/test_detect_game.py  :: 只读查看游戏运行状态检测（窗口 / 进程 / ADB）
   ```
