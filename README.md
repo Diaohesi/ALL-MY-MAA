@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/Diaohesi/ALL-MY-MAA/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/ALL-MY-MAA?label=release&color=4fc3ff"></a>
+  <a href="https://github.com/Diaohesi/ALL-MY-MAA/actions/workflows/build-exe.yml"><img alt="build" src="https://github.com/Diaohesi/ALL-MY-MAA/actions/workflows/build-exe.yml/badge.svg"></a>
   <a href="https://github.com/Diaohesi/ALL-MY-MAA/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/Diaohesi/ALL-MY-MAA?color=b98bff"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D7">
