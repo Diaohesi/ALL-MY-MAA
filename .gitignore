@@ -7,6 +7,11 @@ venv/
 # 本地配置与快捷方式（每台机器不同）
 config.json
 *.lnk
+user_icons/
+
+# 截图 / 调试产物
+docs/tmp-*.png
+tools/_*.py
 
 # PyInstaller
 build/
