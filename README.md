@@ -699,6 +699,7 @@ git config --local https.proxy http://127.0.0.1:7897
 ## 参与开发
 
 - 欢迎提交 [Issue](https://github.com/Diaohesi/All-My-Maa/issues) 反馈问题或建议；
+- 想把本项目交给其他 AI 从零复刻？见 [docs/AI_DEV_PROMPT.md](docs/AI_DEV_PROMPT.md)（总控提示词 + 分阶段提示词 + 集成规格 + 防坑清单 + 验收清单）；
 - 改动后先跑回归测试（标准库 `unittest`，不需要 pytest，全绿时退出码为 0）：
 
   ```bat
