@@ -4,19 +4,57 @@ import ctypes
 import os
 import queue
 import re
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.request
 import webbrowser
+import zipfile
+from ctypes import wintypes
 from tkinter import filedialog, messagebox
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from . import VERSION, daily, detector, render, store
 from . import theme as T
 
 TITLE = "All-My-Maa · 游戏脚本中心"
+
+# v0.10 字体缩放（0.9 小 / 1.0 标准 / 1.12 大 / 1.25 特大）
+_FONT_SCALE = 1.0
+
+
+def _scaled_font(size, family=None):
+    """对话框/旧控件用的缩放字体元组（size 为负的像素字号）。"""
+    try:
+        base = abs(int(size))
+    except (TypeError, ValueError):
+        base = 11
+    return (family or T.UI_FONT, -max(2, int(round(base * _FONT_SCALE))))
+
+
+def titlebar_buttons(maximized):
+    """自定义标题栏按钮状态（纯逻辑，供测试）。"""
+    return {
+        "maximized": bool(maximized),
+        "minimize": "—",
+        "maximize": "❐" if maximized else "□",
+        "close": "✕",
+    }
+
+
+def window_scale_value(value, default=1.0):
+    """font_scale 非法值回退默认。"""
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        return default
+    return scale if scale in [float(item) for item in store.FONT_SCALES] \
+        else default
 
 # 软件更新（只检查/展示，不自动下载安装）
 GITHUB_REPO = "Diaohesi/All-My-Maa"
@@ -128,10 +166,12 @@ class RoundButton(tk.Canvas):
         self._fg_override = None
         self._bg_override = None
         self._accent = accent or T.UI_ACCENT
-        self._radius = radius or T.RADIUS_SM
+        self._radius = radius or T.RADIUS_BUTTON
         self._font = font or tkfont.Font(family=T.UI_FONT, size=-11,
                                          weight="bold")
         self._height = height
+        self._base_height = height
+        self._explicit_width = width
         if width:
             self._width = int(width) * 9 + 26
         else:
@@ -211,6 +251,24 @@ class RoundButton(tk.Canvas):
         self._text = str(text or "")
         self._redraw()
 
+    def apply_scale(self, scale):
+        """v0.10 字体缩放：同步按钮高度/宽度。"""
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = 1.0
+        self._height = max(24, int(round(self._base_height * scale)))
+        super().configure(height=self._height)
+        if self._explicit_width:
+            self._width = max(64, int(round(
+                (int(self._explicit_width) * 9 + 26) * scale)))
+        else:
+            photo_w = self._photo.width() if self._photo is not None else 0
+            self._width = max(64, int(round(
+                (self._font.measure(self._text) + 30 + photo_w) * scale)))
+        super().configure(width=self._width)
+        self._redraw()
+
     # 状态事件
     def _on_enter(self, _event=None):
         if self._state != "disabled":
@@ -287,8 +345,24 @@ class RoundButton(tk.Canvas):
         width = max(4, self.winfo_width())
         height = max(4, self.winfo_height())
         fill, fg, border = self._colors()
-        _round_rect(self, 0.5, 0.5, width - 1, height - 1, self._radius,
-                    fill, border, 1)
+        if self._kind == "primary" and self._state != "disabled":
+            top = _mix(self._accent, "#ffffff", 0.20)
+            bottom = _mix(self._accent, "#000000", 0.10)
+            if self._pressed:
+                top = _mix(top, "#000000", 0.10)
+                bottom = _mix(bottom, "#000000", 0.10)
+            elif self._hover:
+                top = _mix(top, "#ffffff", 0.08)
+            photo = _rounded_gradient_photo(
+                self, width, height, top, bottom, self._radius)
+            if photo is not None:
+                self.create_image(0, 0, image=photo, anchor="nw")
+                _round_rect(self, 0.5, 0.5, width - 1, height - 1,
+                            self._radius, "", self._accent, 1)
+                fill = None
+        if fill is not None:
+            _round_rect(self, 0.5, 0.5, width - 1, height - 1, self._radius,
+                        fill, border, 1)
         if self._photo is not None:
             photo_w = self._photo.width()
             if self._anchor == "w":
@@ -316,7 +390,7 @@ class RoundButton(tk.Canvas):
 
 
 def _mix(color, other, ratio):
-    """把两个 #rrggbb 颜色按比例混合（用于 hover/pressed 态）。"""
+    """把两个 #rrggbb 颜色按比例混合（用于 hover/pressed/渐变）。"""
     try:
         a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
         b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
@@ -324,6 +398,37 @@ def _mix(color, other, ratio):
                              for x, y in zip(a, b))
     except Exception:
         return color
+
+
+_GRADIENT_PHOTO_CACHE = {}
+
+
+def _rounded_gradient_photo(master, width, height, top, bottom, radius):
+    """v0.10 主按钮渐变（Pillow + 圆角遮罩 + ImageTk）。"""
+    try:
+        width, height, radius = int(width), int(height), int(radius)
+        if width < 2 or height < 2:
+            return None
+        key = (master, width, height, top, bottom, radius)
+        if key in _GRADIENT_PHOTO_CACHE:
+            return _GRADIENT_PHOTO_CACHE[key]
+        image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        a = [int(top[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(bottom[i:i + 2], 16) for i in (1, 3, 5)]
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            color = tuple(int(x + (y - x) * ratio) for x, y in zip(a, b))
+            draw.line([(0, row), (width, row)], fill=color + (255,))
+        mask = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, width - 1, height - 1), radius=radius, fill=255)
+        image.putalpha(mask)
+        photo = ImageTk.PhotoImage(image, master=master)
+        _GRADIENT_PHOTO_CACHE[key] = photo
+        return photo
+    except Exception:
+        return None
 
 
 class RoundPanel(tk.Canvas):
@@ -336,8 +441,8 @@ class RoundPanel(tk.Canvas):
                          bd=0, **kwargs)
         self._fill = fill or T.UI_PANEL
         self._border = border or T.UI_BORDER
-        self._radius = radius or T.RADIUS
-        self._pad = pad if pad is not None else T.SPACE_MD
+        self._radius = radius or T.RADIUS_PANEL
+        self._pad = pad if pad is not None else T.SPACE_UI_MD
         self.inner = tk.Frame(self, bg=self._fill)
         self._win = self.create_window(self._pad, self._pad,
                                        window=self.inner, anchor="nw")
@@ -402,7 +507,7 @@ class RoundEntry(tk.Frame):
         width = max(10, canvas.winfo_width())
         canvas.delete("all")
         accent = T.UI_ACCENT
-        _round_rect(canvas, 0.5, 0.5, width - 1, 33.5, T.RADIUS_SM,
+        _round_rect(canvas, 0.5, 0.5, width - 1, 33.5, T.RADIUS_INPUT,
                     T.UI_PANEL_2, accent if self._focused else T.UI_BORDER, 1)
         self._win = canvas.create_window(12, 17, window=self.entry,
                                          anchor="w")
@@ -442,7 +547,7 @@ def _flat_button(parent, text, command, accent=False):
     return tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
                      activebackground=active, activeforeground=fg,
                      relief="flat", bd=0, padx=14, pady=5,
-                     font=(T.UI_FONT, -11), cursor="hand2")
+                     font=_scaled_font(-11), cursor="hand2")
 
 
 class AppDialog(tk.Toplevel):
@@ -498,7 +603,7 @@ class AppDialog(tk.Toplevel):
         entry = tk.Entry(parent, bg=T.UI_PANEL, fg=T.UI_TEXT, insertbackground=T.UI_TEXT,
                          relief="flat", highlightthickness=1,
                          highlightbackground="#2a3547", highlightcolor="#4fc3ff",
-                         font=(T.UI_FONT, -11), width=34)
+                         font=_scaled_font(-11), width=34)
         entry.insert(0, value or "")
         return entry
 
@@ -513,13 +618,13 @@ class AppDialog(tk.Toplevel):
 
         tk.Label(body, text="填写后保存即可，路径会自动记录成相对路径",
                  bg=T.UI_BG, fg=T.UI_TEXT_3,
-                 font=(T.UI_FONT, -10)).grid(
+                 font=_scaled_font(-10)).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         row = 1
         for field, label, hint in self.FIELDS:
             tk.Label(body, text=label, bg=T.UI_BG, fg=T.UI_TEXT_2,
-                     font=(T.UI_FONT, -11), anchor="e", width=14).grid(
+                     font=_scaled_font(-11), anchor="e", width=14).grid(
                 row=row, column=0, sticky="e", pady=4)
             entry = self._entry(body, self.app.get(field, ""))
             entry.grid(row=row, column=1, sticky="we", pady=4)
@@ -536,7 +641,7 @@ class AppDialog(tk.Toplevel):
                     row=row, column=2, padx=(8, 0), pady=4)
             elif hint:
                 tk.Label(body, text=hint, bg=T.UI_BG, fg=T.UI_TEXT_3,
-                         font=(T.UI_FONT, -10), anchor="w").grid(
+                         font=_scaled_font(-10), anchor="w").grid(
                     row=row, column=2, sticky="w", padx=(8, 0))
             row += 1
 
@@ -546,25 +651,25 @@ class AppDialog(tk.Toplevel):
         row += 1
         tk.Label(body, text="检测规则（可选，用于准确判断「游戏运行中」）",
                  bg=T.UI_BG, fg=T.UI_TEXT_3,
-                 font=(T.UI_FONT, -10)).grid(
+                 font=_scaled_font(-10)).grid(
             row=row, column=0, columnspan=3, sticky="w", pady=(2, 4))
         row += 1
         for field, label, hint in self.DETECT_FIELDS:
             tk.Label(body, text=label, bg=T.UI_BG, fg=T.UI_TEXT_2,
-                     font=(T.UI_FONT, -11), anchor="e", width=14).grid(
+                     font=_scaled_font(-11), anchor="e", width=14).grid(
                 row=row, column=0, sticky="e", pady=4)
             entry = self._entry(body, self.detect_initial.get(field, ""))
             entry.grid(row=row, column=1, sticky="we", pady=4)
             self.values[field] = entry
             if hint:
                 tk.Label(body, text=hint, bg=T.UI_BG, fg=T.UI_TEXT_3,
-                         font=(T.UI_FONT, -10), anchor="w").grid(
+                         font=_scaled_font(-10), anchor="w").grid(
                     row=row, column=2, sticky="w", padx=(8, 0))
             row += 1
 
         # 主题色
         tk.Label(body, text="主题色", bg=T.UI_BG, fg=T.UI_TEXT_2,
-                 font=(T.UI_FONT, -11), anchor="e", width=14).grid(
+                 font=_scaled_font(-11), anchor="e", width=14).grid(
             row=row, column=0, sticky="e", pady=6)
         colors = tk.Frame(body, bg=T.UI_BG)
         colors.grid(row=row, column=1, columnspan=2, sticky="w", pady=6)
@@ -726,14 +831,14 @@ class GameCandidateDialog(tk.Toplevel):
         pad = 16
         tk.Label(self, text=f"找到 {len(self.candidates)} 个候选，双击或选中后点「确定」",
                  bg=T.UI_BG, fg=T.UI_TEXT_2,
-                 font=(T.UI_FONT, -11)).pack(anchor="w", padx=pad, pady=(14, 8))
+                 font=_scaled_font(-11)).pack(anchor="w", padx=pad, pady=(14, 8))
         body = tk.Frame(self, bg=T.UI_PANEL, highlightthickness=1,
                         highlightbackground="#2a3547")
         body.pack(fill="both", expand=True, padx=pad)
         self.listbox = tk.Listbox(
             body, bg=T.UI_PANEL, fg=T.UI_TEXT, selectbackground=T.UI_ACCENT_SOFT,
             selectforeground="#ffffff", relief="flat", bd=0, highlightthickness=0,
-            activestyle="none", font=(T.UI_FONT, -11),
+            activestyle="none", font=_scaled_font(-11),
             width=96, height=min(9, max(3, len(self.candidates))))
         scroll = tk.Scrollbar(body, command=self.listbox.yview, width=10,
                               bg=T.UI_PANEL_2, troughcolor=T.UI_BG,
@@ -754,7 +859,7 @@ class GameCandidateDialog(tk.Toplevel):
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         self.listbox.bind("<Double-Button-1>", lambda event: self._confirm())
         tk.Label(self, textvariable=self._path_var, bg=T.UI_BG, fg=T.UI_TEXT_3,
-                 font=(T.UI_FONT, -10), anchor="w", justify="left",
+                 font=_scaled_font(-10), anchor="w", justify="left",
                  wraplength=720).pack(fill="x", padx=pad, pady=(8, 0))
         footer = tk.Frame(self, bg=T.UI_BG)
         footer.pack(fill="x", padx=pad, pady=(12, 14))
@@ -818,13 +923,172 @@ class GameCandidateDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
 
 
+class TitleBar(tk.Canvas):
+    """v0.10 自绘渐变标题栏：图标 + 标题 + 最小化/最大化/关闭，可拖动/双击。"""
+
+    def __init__(self, master, hub, height=None):
+        self.hub = hub
+        self._height = int(height or T.TITLEBAR_H)
+        super().__init__(master, bg=T.UI_GRADIENT_TOP,
+                         highlightthickness=0, bd=0,
+                         height=self._height)
+        self._drag = None
+        self._buttons = {}
+        self._photo = hub._ui_icon_photo("brand", 22)
+        specs = (
+            ("minimize", "—", hub.minimize_window, "ghost"),
+            ("maximize", "□", hub.toggle_maximize, "ghost"),
+            ("close", "✕", hub._on_close, "danger"),
+        )
+        for name, glyph, command, kind in specs:
+            button = RoundButton(self, text=glyph, command=command,
+                                 kind=kind, width=3, height=26,
+                                 radius=9, font=hub.f_small,
+                                 bg=T.UI_GRADIENT_TOP)
+            button._titlebar_name = name
+            self._buttons[name] = button
+        self.bind("<Configure>", lambda event: self._redraw(), add="+")
+        self.bind("<ButtonPress-1>", self._on_press, add="+")
+        self.bind("<B1-Motion>", self._on_motion, add="+")
+        self.bind("<ButtonRelease-1>", self._on_release, add="+")
+        self.bind("<Double-Button-1>", self._on_double, add="+")
+        self._redraw()
+
+    def apply_scale(self, scale=None):
+        try:
+            self._height = int(round(T.TITLEBAR_H * float(scale or 1.0)))
+        except (TypeError, ValueError):
+            self._height = T.TITLEBAR_H
+        super().configure(height=self._height)
+        self._redraw()
+
+    def refresh_buttons(self):
+        state = titlebar_buttons(getattr(self.hub, "_maximized", False))
+        for name, button in self._buttons.items():
+            button.configure(text=state[name])
+        self._redraw()
+
+    def _redraw(self):
+        width = max(100, self.winfo_width())
+        height = max(20, self.winfo_height())
+        self.delete("all")
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            color = _mix(T.UI_GRADIENT_TOP, T.UI_BG, ratio)
+            self.create_rectangle(0, row, width, row + 1, fill=color,
+                                  outline="", tags="bg")
+        self.create_line(0, height - 1, width, height - 1,
+                         fill=T.UI_BORDER, tags="bg")
+        if self._photo is not None:
+            self.create_image(14, height / 2, image=self._photo,
+                              anchor="w", tags="fg")
+        self.create_text(46, height / 2, text=TITLE,
+                         fill=T.UI_TEXT, font=self.hub.f_small,
+                         anchor="w", tags="fg")
+        x = width - 8
+        for name in ("close", "maximize", "minimize"):
+            button = self._buttons[name]
+            self.create_window(x, height / 2, window=button, anchor="e",
+                               tags="fg")
+            x -= (button._width + 4)
+        self.tag_raise("fg")
+        self.tag_lower("bg")
+
+    def _on_press(self, event):
+        self._drag = (event.x_root, event.y_root,
+                      self.hub.root.winfo_x(), self.hub.root.winfo_y())
+
+    def _on_motion(self, event):
+        if not self._drag or getattr(self.hub, "_maximized", False):
+            return
+        start_x, start_y, win_x, win_y = self._drag
+        dx, dy = event.x_root - start_x, event.y_root - start_y
+        self.hub.root.geometry(f"+{win_x + dx}+{win_y + dy}")
+
+    def _on_release(self, _event=None):
+        self._drag = None
+
+    def _on_double(self, _event=None):
+        self.hub.toggle_maximize()
+
+
+class PageHeader(tk.Canvas):
+    """v0.10 页面顶部渐变标题区（图标 + 标题/副标题 + 右侧操作）。"""
+
+    def __init__(self, master, hub, icon_name, title, subtitle,
+                 actions=()):
+        self.hub = hub
+        self._icon_name = icon_name
+        self._title = title
+        self._subtitle = subtitle
+        self._scale = hub._font_scale
+        self._height = int(round(104 * self._scale))
+        super().__init__(master, height=self._height, bg=T.UI_BG,
+                         highlightthickness=0, bd=0)
+        self._photo = hub._ui_icon_photo(
+            icon_name, int(round(ICON_SIZES["page"] * self._scale)))
+        self._buttons = []
+        for text, command, kind in actions:
+            self._buttons.append(hub._button(self, text, command,
+                                             kind=kind))
+        self.bind("<Configure>", lambda event: self._redraw(), add="+")
+        self._redraw()
+
+    def apply_scale(self, scale):
+        self._scale = scale
+        self._height = int(round(104 * scale))
+        super().configure(height=self._height)
+        self._photo = self.hub._ui_icon_photo(
+            self._icon_name, int(round(ICON_SIZES["page"] * scale)))
+        for button in self._buttons:
+            try:
+                button.apply_scale(scale)
+            except Exception:
+                pass
+        self._redraw()
+
+    def _redraw(self):
+        width = max(100, self.winfo_width())
+        height = max(40, self.winfo_height())
+        self.delete("all")
+        top = _mix(T.UI_GRADIENT_TOP, self.hub.settings.get("accent")
+                   or T.UI_ACCENT, 0.10)
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            color = _mix(top, T.UI_BG, ratio)
+            self.create_rectangle(0, row, width, row + 1, fill=color,
+                                  outline="")
+        icon_w = self._photo.width() if self._photo is not None else 0
+        if self._photo is not None:
+            self.create_image(26, height / 2, image=self._photo, anchor="w")
+        text_x = 26 + (icon_w + 12 if icon_w else 0)
+        self.create_text(text_x, height / 2 - 9, text=self._title,
+                         fill=T.UI_TEXT, font=self.hub.f_title, anchor="sw")
+        self.create_text(text_x, height / 2 + 9, text=self._subtitle,
+                         fill=T.UI_TEXT_3, font=self.hub.f_small,
+                         anchor="nw")
+        x = width - 26
+        for button in reversed(self._buttons):
+            self.create_window(x, height / 2, window=button, anchor="e")
+            x -= (button._width + 8)
+
+
 class GameHub:
     """v0.8 主界面：左侧导航 + 主页 / 清日常 / 设置三页（真实 Tk 控件）。"""
 
     def __init__(self, root):
+        global _FONT_SCALE
         self.root = root
         self.apps, self.clash_exe, self.search_root, meta = store.load_state_full()
         self.settings = store._clean_settings(meta.get("settings"))
+        # v0.10：没有显式 accent 时使用淡紫新默认；旧用户选择保留
+        if not meta.get("settings_explicit_accent"):
+            self.settings["accent"] = store.NEW_DEFAULT_ACCENT
+        self._font_scale = window_scale_value(
+            self.settings.get("font_scale"), 1.0)
+        _FONT_SCALE = self._font_scale
+        self._maximized = False
+        self._restore_geometry = ""
         self.daily_order = list(meta.get("daily_order") or store.DEFAULT_DAILY_ORDER)
         # 设置页的「默认超时/完成后关闭脚本」作用于尚未单独保存过 daily 的卡片
         for app in self.apps:
@@ -861,11 +1125,19 @@ class GameHub:
         self._daily_summary = {}
         self._nav_buttons = {}
         self._accent_buttons = []
+        self._page_headers = {}
         self.checking = False
         self.manual_check = False
         self.update_queue = queue.Queue()
         self.software_checking = False
+        self.software_check_manual = False
         self.software_queue = queue.Queue()
+        self.update_download_queue = queue.Queue()
+        self._update_progress_dialog = None
+        self._update_progress_var = None
+        self._update_progress_bar = None
+        self.game_launching = {}
+        self.game_launch_queue = queue.Queue()
         self._toast_after = None
         self._poll_after = None
         self._closing = False
@@ -886,7 +1158,13 @@ class GameHub:
         self._refresh()
         self._schedule_poll()
         if self.settings.get("check_update_on_start", True):
-            self.root.after(900, self._start_update_check)
+            self._startup_check_after = self.root.after(
+                900, self._start_update_check)
+            self._startup_software_after = self.root.after(
+                1800, lambda: self.check_software_update(manual=False))
+        else:
+            self._startup_check_after = None
+            self._startup_software_after = None
         if not self.config_saved:
             self.root.after(300, self._warn_save_failed)
         self._toast("就绪")
@@ -907,20 +1185,28 @@ class GameHub:
             parent=self.root)
 
     def _setup_fonts(self):
-        fam = T.UI_FONT
+        """v0.10：按 font_scale 创建/更新字体；已有 Font 对象原地更新。"""
+        scale = getattr(self, "_font_scale", 1.0) or 1.0
         sizes = T.UI_FONT_SIZES
-        self.f_title = tkfont.Font(family=fam, size=-sizes["title"],
-                                   weight="bold")
-        self.f_page = tkfont.Font(family=fam, size=-sizes["page"],
-                                  weight="bold")
-        self.f_name = tkfont.Font(family=fam, size=-sizes["name"],
-                                  weight="bold")
-        self.f_body = tkfont.Font(family=fam, size=-sizes["body"])
-        self.f_small = tkfont.Font(family=fam, size=-sizes["body"])
-        self.f_tiny = tkfont.Font(family=fam, size=-sizes["aux"])
+
+        def ensure(attr, base, weight="normal"):
+            font = getattr(self, attr, None)
+            size = -max(2, int(round(base * scale)))
+            if font is None:
+                font = tkfont.Font(family=T.UI_FONT, size=size,
+                                   weight=weight)
+            else:
+                font.configure(family=T.UI_FONT, size=size, weight=weight)
+            setattr(self, attr, font)
+
+        ensure("f_title", sizes["title"], "bold")
+        ensure("f_page", sizes["page"], "bold")
+        ensure("f_name", sizes["name"], "bold")
+        ensure("f_body", sizes["body"])
+        ensure("f_small", sizes["body"])
+        ensure("f_tiny", sizes["aux"])
         self.f_aux = self.f_tiny
-        self.f_btn = tkfont.Font(family=fam, size=-sizes["body"],
-                                 weight="bold")
+        ensure("f_btn", sizes["body"], "bold")
 
     def _app_by_key(self, key):
         for app in self.apps:
@@ -1052,11 +1338,13 @@ class GameHub:
             pass
         _dark_titlebar(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.overrideredirect(True)
         self.root.columnconfigure(1, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+        self._build_titlebar()
         self._build_sidebar()
         self.content = tk.Frame(self.root, bg=T.UI_BG)
-        self.content.grid(row=0, column=1, sticky="nsew")
+        self.content.grid(row=1, column=1, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
         self.pages = {}
@@ -1074,6 +1362,147 @@ class GameHub:
                                     anchor="w", font=self.f_small,
                                     padx=18, pady=7)
         self.toast_label.grid(row=1, column=0, sticky="we")
+        self._build_resize_grips()
+        self._setup_borderless()
+        self.root.after_idle(self._setup_borderless)
+        self.root.after(300, self._setup_borderless)
+
+    # ---------------------------------------------------------- 无边框窗口/标题栏
+    def _build_titlebar(self):
+        self.titlebar = TitleBar(
+            self.root, self,
+            height=int(round(T.TITLEBAR_H * self._font_scale)))
+        self.titlebar.grid(row=0, column=0, columnspan=2, sticky="we")
+
+    def _setup_borderless(self):
+        """隐藏原生标题栏后，恢复任务栏/Alt+Tab 行为并启用圆角。"""
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetAncestor(self.root.winfo_id(), 2)
+            try:
+                self.root.attributes("-toolwindow", 0)
+            except Exception:
+                pass
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                0x0020 | 0x0004 | 0x0001)  # framed/noz/no size
+            try:
+                dwm = ctypes.WinDLL("dwmapi")
+                pref = ctypes.c_int(2)
+                dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref),
+                                          ctypes.sizeof(pref))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _build_resize_grips(self):
+        self._resize_dir = None
+        self._resize_data = None
+        specs = (
+            ("n", {"relx": 0.5, "rely": 0, "anchor": "n", "relwidth": 1,
+                   "height": 6, "cursor": "sb_v_double_arrow"}),
+            ("s", {"relx": 0.5, "rely": 1, "anchor": "s", "relwidth": 1,
+                   "height": 6, "cursor": "sb_v_double_arrow"}),
+            ("w", {"relx": 0, "rely": 0.5, "anchor": "w", "width": 6,
+                   "relheight": 1, "cursor": "sb_h_double_arrow"}),
+            ("e", {"relx": 1, "rely": 0.5, "anchor": "e", "width": 6,
+                   "relheight": 1, "cursor": "sb_h_double_arrow"}),
+            ("nw", {"relx": 0, "rely": 0, "anchor": "nw", "width": 10,
+                    "height": 10, "cursor": "size_nw_se"}),
+            ("ne", {"relx": 1, "rely": 0, "anchor": "ne", "width": 10,
+                    "height": 10, "cursor": "size_ne_sw"}),
+            ("sw", {"relx": 0, "rely": 1, "anchor": "sw", "width": 10,
+                    "height": 10, "cursor": "size_nw_se"}),
+            ("se", {"relx": 1, "rely": 1, "anchor": "se", "width": 10,
+                    "height": 10, "cursor": "size_ne_sw"}),
+        )
+        self._grips = []
+        for direction, options in specs:
+            grip = tk.Frame(self.root, bg=T.UI_BG, cursor=options.pop("cursor"))
+            grip.place(**options)
+            grip.bind("<ButtonPress-1>",
+                      lambda event, d=direction: self._resize_start(d, event))
+            grip.bind("<B1-Motion>", self._resize_motion)
+            grip.bind("<ButtonRelease-1>", self._resize_end)
+            grip.lift()
+            self._grips.append(grip)
+
+    def _resize_start(self, direction, event):
+        if self._maximized:
+            return
+        self._resize_dir = direction
+        self._resize_data = (self.root.winfo_x(), self.root.winfo_y(),
+                             self.root.winfo_width(),
+                             self.root.winfo_height(),
+                             event.x_root, event.y_root)
+
+    def _resize_motion(self, event):
+        if not self._resize_dir or not self._resize_data:
+            return
+        x, y, width, height, sx, sy = self._resize_data
+        dx, dy = event.x_root - sx, event.y_root - sy
+        min_w, min_h = T.MIN_W, T.MIN_H
+        if "e" in self._resize_dir:
+            width = max(min_w, width + dx)
+        if "s" in self._resize_dir:
+            height = max(min_h, height + dy)
+        if "w" in self._resize_dir:
+            new_w = max(min_w, width - dx)
+            x += width - new_w
+            width = new_w
+        if "n" in self._resize_dir:
+            new_h = max(min_h, height - dy)
+            y += height - new_h
+            height = new_h
+        self.root.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+
+    def _resize_end(self, _event=None):
+        self._resize_dir = None
+        self._resize_data = None
+
+    def _work_area(self):
+        try:
+            rect = wintypes.RECT()
+            ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0)
+            return (rect.left, rect.top,
+                    rect.right - rect.left, rect.bottom - rect.top)
+        except Exception:
+            return (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight())
+
+    def minimize_window(self):
+        try:
+            self.root.iconify()
+        except Exception:
+            try:
+                hwnd = ctypes.windll.user32.GetAncestor(
+                    self.root.winfo_id(), 2)
+                ctypes.windll.user32.ShowWindow(hwnd, 6)
+            except Exception:
+                pass
+
+    def toggle_maximize(self):
+        if self._maximized:
+            geometry = self._restore_geometry or \
+                f"{T.WIN_W}x{T.WIN_H}+80+60"
+            self.root.geometry(geometry)
+            self._maximized = False
+        else:
+            self._restore_geometry = self.root.geometry()
+            x, y, width, height = self._work_area()
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+            self._maximized = True
+        try:
+            self.titlebar.refresh_buttons()
+        except Exception:
+            pass
 
     def _sidebar_section(self, title):
         tk.Label(self.sidebar, text=title, bg=T.UI_SIDEBAR,
@@ -1082,23 +1511,37 @@ class GameHub:
 
     def _build_sidebar(self):
         sidebar = tk.Frame(self.root, bg=T.UI_SIDEBAR, width=T.SIDEBAR_W)
-        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.grid(row=1, column=0, sticky="ns")
         sidebar.grid_propagate(False)
         sidebar.pack_propagate(False)
         self.sidebar = sidebar
 
-        head = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
-        head.pack(fill="x", padx=20, pady=(18, 6))
+        head = tk.Canvas(sidebar, height=86, bg=T.UI_GRADIENT_SIDEBAR_TOP,
+                         highlightthickness=0, bd=0)
+        head.pack(fill="x")
         logo = self._ui_icon_photo("brand", ICON_SIZES["brand"])
         if logo is not None:
-            tk.Label(head, image=logo, bg=T.UI_SIDEBAR).pack(side="left")
             self._logo_photo = logo
-        text = tk.Frame(head, bg=T.UI_SIDEBAR)
-        text.pack(side="left", padx=(12, 0))
-        self._label(text, "All-My-Maa", color=T.UI_TEXT, font=self.f_page,
-                    bg=T.UI_SIDEBAR).pack(anchor="w")
-        self._label(text, "游戏脚本中心", color=T.UI_TEXT_3,
-                    font=self.f_aux, bg=T.UI_SIDEBAR).pack(anchor="w")
+
+        def paint_head(_event=None):
+            width = max(120, head.winfo_width())
+            height = 86
+            head.delete("all")
+            for row in range(height):
+                ratio = row / max(1, height - 1)
+                head.create_rectangle(
+                    0, row, width, row + 1,
+                    fill=_mix(T.UI_GRADIENT_SIDEBAR_TOP,
+                              T.UI_SIDEBAR, ratio), outline="")
+            if logo is not None:
+                head.create_image(20, height / 2, image=logo, anchor="w")
+            head.create_text(76, height / 2 - 8, text="All-My-Maa",
+                             fill=T.UI_TEXT, font=self.f_page, anchor="w")
+            head.create_text(76, height / 2 + 12, text="游戏脚本中心",
+                             fill=T.UI_TEXT_3, font=self.f_aux, anchor="w")
+
+        head.bind("<Configure>", paint_head, add="+")
+        head.after_idle(paint_head)
 
         self._sidebar_section("导航")
         nav = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
@@ -1149,7 +1592,7 @@ class GameHub:
                      kind="ghost", anchor="w").pack(fill="x", pady=1)
 
         status = RoundPanel(bottom, fill=T.UI_PANEL,
-                            border=T.UI_BORDER_SOFT, pad=T.SPACE_XS)
+                            border=T.UI_BORDER_SOFT, pad=T.SPACE_UI_XS)
         status.pack(fill="x", pady=(4, 6))
         self.sidebar_hub_var = tk.StringVar(value="就绪")
         self.sidebar_count_var = tk.StringVar(value="")
@@ -1221,24 +1664,18 @@ class GameHub:
         page = self.pages["home"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        header = tk.Frame(page, bg=T.UI_BG)
-        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
-                    pady=(T.SPACE_XL, T.SPACE_SM))
-        header.columnconfigure(1, weight=1)
-        self._page_title_box(
-            header, "home", "主页",
-            "选择游戏行或「打开脚本」：未运行则启动，运行中则唤到前台").grid(
-            row=0, column=0, rowspan=2, sticky="w")
-        actions = tk.Frame(header, bg=T.UI_BG)
-        actions.grid(row=0, column=2, rowspan=2, sticky="e")
-        self._button(actions, "添加游戏", self.add_app,
-                     kind="primary").pack(side="left", padx=(0, T.SPACE_XS))
-        self._button(actions, "检查更新", self._on_refresh).pack(
-            side="left", padx=(0, T.SPACE_XS))
-        self._button(actions, "重新识别路径", self.rescan_paths).pack(side="left")
+        header = PageHeader(
+            page, self, "home", "主页",
+            "选择游戏行或「打开脚本」：未运行则启动，运行中则唤到前台",
+            actions=(("添加游戏", self.add_app, "primary"),
+                     ("检查更新", self._on_refresh, "normal"),
+                     ("重新识别路径", self.rescan_paths, "normal")))
+        header.grid(row=0, column=0, sticky="we",
+                    padx=T.SPACE_UI_XL, pady=(T.SPACE_UI_SM, 2))
+        self._page_headers["home"] = header
         area, self.home_inner = self._scroll_area(page)
-        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_XL,
-                  pady=(0, T.SPACE_MD))
+        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_UI_XL,
+                  pady=(0, T.SPACE_UI_MD))
 
     def _rebuild_home(self):
         if not hasattr(self, "home_inner"):
@@ -1256,7 +1693,7 @@ class GameHub:
     def _build_home_row(self, index, app):
         key = app["key"]
         card = RoundPanel(self.home_inner, fill=T.UI_PANEL,
-                          border=T.UI_BORDER, pad=T.SPACE_LG)
+                          border=T.UI_BORDER, pad=T.SPACE_UI_LG)
         card.pack(fill="x", pady=(3, 9))
         row = card.inner
         row.columnconfigure(2, weight=1)
@@ -1264,7 +1701,7 @@ class GameHub:
         icon_label = tk.Label(row, image=icon, bg=T.UI_PANEL)
         if icon is not None:
             icon_label.image = icon
-        icon_label.grid(row=0, column=0, rowspan=2, padx=(0, T.SPACE_MD),
+        icon_label.grid(row=0, column=0, rowspan=2, padx=(0, T.SPACE_UI_MD),
                         pady=2)
 
         name = tk.Label(row, text=app.get("game", ""), bg=T.UI_PANEL,
@@ -1276,13 +1713,13 @@ class GameHub:
 
         status_box = tk.Frame(row, bg=T.UI_PANEL)
         status_box.grid(row=2, column=0, columnspan=2, sticky="w",
-                        pady=(T.SPACE_XS, 0))
+                        pady=(T.SPACE_UI_XS, 0))
         script_status = tk.StringVar(value="脚本 未启动")
         game_status = tk.StringVar(value="游戏 未运行")
         script_status_label = tk.Label(status_box, textvariable=script_status,
                                        bg=T.UI_PANEL, fg=T.UI_TEXT_2,
                                        font=self.f_small)
-        script_status_label.pack(side="left", padx=(0, T.SPACE_MD))
+        script_status_label.pack(side="left", padx=(0, T.SPACE_UI_MD))
         game_status_label = tk.Label(status_box, textvariable=game_status,
                                      bg=T.UI_PANEL, fg=T.UI_TEXT_3,
                                      font=self.f_small)
@@ -1290,19 +1727,19 @@ class GameHub:
 
         buttons = tk.Frame(row, bg=T.UI_PANEL)
         buttons.grid(row=0, column=3, rowspan=3, sticky="e",
-                     padx=(T.SPACE_MD, 0))
+                     padx=(T.SPACE_UI_MD, 0))
         main_btn = self._button(buttons, "打开脚本",
                                 lambda k=key: self.open_script(k),
                                 kind="primary", width=11)
-        main_btn.pack(side="left", padx=(0, T.SPACE_XS))
+        main_btn.pack(side="left", padx=(0, T.SPACE_UI_XS))
         game_btn = self._button(buttons, "启动游戏",
                                 lambda k=key: self.launch_game(k),
                                 width=9)
-        game_btn.pack(side="left", padx=(0, T.SPACE_XS))
+        game_btn.pack(side="left", padx=(0, T.SPACE_UI_XS))
         daily_btn = self._button(buttons, "清日常",
                                  lambda k=key: self.run_daily_single(k),
                                  width=8)
-        daily_btn.pack(side="left", padx=(0, T.SPACE_XS))
+        daily_btn.pack(side="left", padx=(0, T.SPACE_UI_XS))
         more_btn = self._button(buttons, "更多 ▾", lambda: None, width=7)
         more_btn.configure(command=lambda k=key, w=more_btn: self._show_more(k, w))
         more_btn.pack(side="left")
@@ -1425,16 +1862,14 @@ class GameHub:
         page = self.pages["daily"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(3, weight=1)
-        header = tk.Frame(page, bg=T.UI_BG)
-        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
-                    pady=(T.SPACE_XL, 6))
-        header.columnconfigure(0, weight=1)
-        self._page_title_box(
-            header, "daily", "清日常",
-            "使用脚本自身已配置的任务；勾选决定队列，顺序可调；同一时刻只运行一项。").grid(
-            row=0, column=0, rowspan=2, sticky="w")
+        header = PageHeader(
+            page, self, "daily", "清日常",
+            "使用脚本自身已配置的任务；勾选决定队列，顺序可调；同一时刻只运行一项")
+        header.grid(row=0, column=0, sticky="we",
+                    padx=T.SPACE_UI_XL, pady=(T.SPACE_UI_SM, 2))
+        self._page_headers["daily"] = header
         toolbar = tk.Frame(page, bg=T.UI_BG)
-        toolbar.grid(row=1, column=0, sticky="we", padx=T.SPACE_XL,
+        toolbar.grid(row=1, column=0, sticky="we", padx=T.SPACE_UI_XL,
                      pady=(4, 8))
         buttons = (
             ("全选", lambda: self._daily_check_all(True), "normal", 6),
@@ -1448,20 +1883,20 @@ class GameHub:
         for index, (text, command, kind, width) in enumerate(buttons):
             button = self._button(toolbar, text, command, kind=kind,
                                   width=width)
-            button.pack(side="left", padx=(0, T.SPACE_XS if index < 4
-                                          else T.SPACE_SM))
+            button.pack(side="left", padx=(0, T.SPACE_UI_XS if index < 4
+                                          else T.SPACE_UI_SM))
         self._label(page, "⚠ 自动化可能违反游戏条款、存在账号风险；执行期间脚本会抢占鼠标键盘，请确认后使用。",
                     color=T.UI_WARNING, font=self.f_aux,
                     bg=T.UI_BG).grid(row=2, column=0, sticky="w",
-                                     padx=T.SPACE_XL)
+                                     padx=T.SPACE_UI_XL)
         self._daily_area, self.daily_inner = self._scroll_area(page)
         self._daily_area.grid(row=3, column=0, sticky="nsew",
-                              padx=T.SPACE_XL,
-                              pady=(4, T.SPACE_XS))
+                              padx=T.SPACE_UI_XL,
+                              pady=(4, T.SPACE_UI_XS))
         log_panel = RoundPanel(page, fill=T.UI_PANEL,
-                               border=T.UI_BORDER_SOFT, pad=T.SPACE_SM)
-        log_panel.grid(row=4, column=0, sticky="we", padx=T.SPACE_XL,
-                       pady=(0, T.SPACE_MD))
+                               border=T.UI_BORDER_SOFT, pad=T.SPACE_UI_SM)
+        log_panel.grid(row=4, column=0, sticky="we", padx=T.SPACE_UI_XL,
+                       pady=(0, T.SPACE_UI_MD))
         self.daily_log_text = tk.Text(
             log_panel.inner, height=6, bg=T.UI_PANEL, fg=T.UI_TEXT_2,
             insertbackground=T.UI_TEXT, relief="flat", bd=0,
@@ -1511,7 +1946,7 @@ class GameHub:
         key = app["key"]
         settings = self._daily_settings_for(app)
         card = RoundPanel(self.daily_inner, fill=T.UI_PANEL,
-                          border=T.UI_BORDER, pad=T.SPACE_MD)
+                          border=T.UI_BORDER, pad=T.SPACE_UI_MD)
         card.pack(fill="x", pady=(3, 8))
         row = card.inner
         line1 = tk.Frame(row, bg=T.UI_PANEL)
@@ -1523,7 +1958,7 @@ class GameHub:
             selectcolor=T.UI_ACCENT_SOFT, fg=T.UI_TEXT, bd=0,
             highlightthickness=0,
             command=lambda k=key: self._daily_on_check(k))
-        check.grid(row=0, column=0, padx=(0, T.SPACE_XS))
+        check.grid(row=0, column=0, padx=(0, T.SPACE_UI_XS))
         self._daily_vars[key] = var
         icon = self._icon_photo(app.get("icon_path"), 34)
         icon_label = tk.Label(line1, image=icon, bg=T.UI_PANEL)
@@ -1536,12 +1971,12 @@ class GameHub:
         status = tk.StringVar(value="空闲")
         tk.Label(line1, textvariable=status, bg=T.UI_PANEL, fg=T.UI_TEXT_2,
                  font=self.f_small, width=18,
-                 anchor="e").grid(row=0, column=3, padx=(T.SPACE_SM, 10))
+                 anchor="e").grid(row=0, column=3, padx=(T.SPACE_UI_SM, 10))
         self._daily_status[key] = status
         start_btn = self._button(line1, "开始清日常",
                                  lambda k=key: self._daily_start_row(k),
                                  kind="primary", width=10)
-        start_btn.grid(row=0, column=4, padx=(0, T.SPACE_XS))
+        start_btn.grid(row=0, column=4, padx=(0, T.SPACE_UI_XS))
         stop_btn = self._button(line1, "停止",
                                 lambda k=key: self._daily_stop_row(k),
                                 kind="danger", width=6, state="disabled")
@@ -1550,7 +1985,7 @@ class GameHub:
         self._daily_stop_btn[key] = stop_btn
 
         line2 = tk.Frame(row, bg=T.UI_PANEL)
-        line2.pack(fill="x", pady=(T.SPACE_SM, 0))
+        line2.pack(fill="x", pady=(T.SPACE_UI_SM, 0))
         fields = [("instance", "实例", 6), ("task", "任务", 6),
                   ("config", "MAA 配置", 6), ("timeout_min", "超时", 4),
                   ("extra_args", "额外参数", 6)]
@@ -1882,37 +2317,33 @@ class GameHub:
         page = self.pages["settings"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        header = tk.Frame(page, bg=T.UI_BG)
-        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
-                    pady=(T.SPACE_XL, T.SPACE_SM))
-        header.columnconfigure(0, weight=1)
-        self._page_title_box(
-            header, "settings", "设置",
-            "配置会立即持久化到 config.json（保存失败会提示）").grid(
-            row=0, column=0, rowspan=2, sticky="w")
-        self._button(header, "保存设置", self._apply_settings,
-                     kind="primary").grid(row=0, column=1, rowspan=2,
-                                          sticky="e")
+        header = PageHeader(
+            page, self, "settings", "设置",
+            "配置会立即持久化到 config.json（保存失败会提示）",
+            actions=(("保存设置", self._apply_settings, "primary"),))
+        header.grid(row=0, column=0, sticky="we",
+                    padx=T.SPACE_UI_XL, pady=(T.SPACE_UI_SM, 2))
+        self._page_headers["settings"] = header
         area, body = self._scroll_area(page)
-        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_XL,
-                  pady=(0, T.SPACE_MD))
+        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_UI_XL,
+                  pady=(0, T.SPACE_UI_MD))
         self.settings_body = body
         columns = tk.Frame(body, bg=T.UI_BG)
         columns.pack(fill="both", expand=True)
         left_col = tk.Frame(columns, bg=T.UI_BG)
         left_col.pack(side="left", fill="both", expand=True,
-                      padx=(0, T.SPACE_SM))
+                      padx=(0, T.SPACE_UI_SM))
         right_col = tk.Frame(columns, bg=T.UI_BG)
         right_col.pack(side="left", fill="both", expand=True,
-                       padx=(T.SPACE_SM, 0))
+                       padx=(T.SPACE_UI_SM, 0))
 
         def section(title, parent):
             panel = RoundPanel(parent, fill=T.UI_PANEL,
-                               border=T.UI_BORDER, pad=T.SPACE_MD)
+                               border=T.UI_BORDER, pad=T.SPACE_UI_MD)
             panel.pack(fill="x", pady=(3, 9))
             self._label(panel.inner, title, color=T.UI_TEXT,
                         font=self.f_name, bg=T.UI_PANEL).pack(
-                anchor="w", pady=(0, T.SPACE_XS))
+                anchor="w", pady=(0, T.SPACE_UI_XS))
             return panel.inner
 
         # 外观
@@ -1929,12 +2360,41 @@ class GameHub:
             chip.pack(side="left", padx=3, pady=2)
             self._accent_chips[color] = chip
         self._refresh_accent_chips()
+        font_row = tk.Frame(appearance, bg=T.UI_PANEL)
+        font_row.pack(anchor="w", pady=(10, 0))
+        self._label(font_row, "字体大小", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left",
+                                                          padx=(0, 10))
+        self._font_scale_map = {
+            "小 0.9": 0.9, "标准 1.0": 1.0,
+            "大 1.12": 1.12, "特大 1.25": 1.25,
+        }
+        current_scale = self._font_scale
+        current_label = next(
+            (label for label, scale in self._font_scale_map.items()
+             if abs(scale - current_scale) < 1e-6), "标准 1.0")
+        self.font_scale_var = tk.StringVar(value=current_label)
+        scale_menu = tk.OptionMenu(font_row, self.font_scale_var,
+                                   *self._font_scale_map.keys())
+        scale_menu.configure(bg=T.UI_PANEL_2, fg=T.UI_TEXT,
+                             activebackground=T.UI_PANEL_3, relief="flat",
+                             bd=0, highlightthickness=0,
+                             font=self.f_small)
+        scale_menu.pack(side="left")
 
         # 启动器
         launcher = section("启动器", left_col)
         self.check_update_var = tk.BooleanVar(
             value=bool(self.settings.get("check_update_on_start", True)))
         tk.Checkbutton(launcher, text="启动时检查更新", variable=self.check_update_var,
+                       bg=T.UI_PANEL, fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
+                       activebackground=T.UI_PANEL,
+                       activeforeground=T.UI_TEXT,
+                       font=self.f_small).pack(anchor="w", pady=2)
+        self.auto_download_var = tk.BooleanVar(
+            value=bool(self.settings.get("auto_download_update", False)))
+        tk.Checkbutton(launcher, text="发现新版本时自动下载（安装前仍确认）",
+                       variable=self.auto_download_var,
                        bg=T.UI_PANEL, fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
                        activebackground=T.UI_PANEL,
                        activeforeground=T.UI_TEXT,
@@ -1979,7 +2439,7 @@ class GameHub:
         self._button(row, "重新识别", self.rescan_paths, width=8).pack(
             side="right")
         row = tk.Frame(paths, bg=T.UI_PANEL)
-        row.pack(fill="x", pady=(T.SPACE_XS, 2))
+        row.pack(fill="x", pady=(T.SPACE_UI_XS, 2))
         self._label(row, "Clash Verge：", color=T.UI_TEXT_2,
                     font=self.f_small, bg=T.UI_PANEL).pack(side="left")
         self.clash_var = tk.StringVar(value=self.clash_exe or "")
@@ -1987,10 +2447,12 @@ class GameHub:
                                  font=self.f_aux)
         clash_entry.pack(side="left", fill="x", expand=True,
                          padx=(0, 6), pady=2)
-        self._button(row, "浏览", self._browse_clash, width=6).pack(
-            side="left", padx=(0, 6))
-        self._button(row, "自动查找", self._auto_find_clash, width=8).pack(
-            side="left")
+        clash_actions = tk.Frame(paths, bg=T.UI_PANEL)
+        clash_actions.pack(fill="x", pady=(0, 2))
+        self._button(clash_actions, "自动查找", self._auto_find_clash,
+                     width=8).pack(side="right")
+        self._button(clash_actions, "浏览", self._browse_clash,
+                     width=6).pack(side="right", padx=(0, 6))
 
         # 清日常
         daily_frame = section("清日常", right_col)
@@ -2066,9 +2528,9 @@ class GameHub:
         dialog.transient(self.root)
         self._place_dialog(dialog, 620, 540)
         panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
-                           pad=T.SPACE_XL)
-        panel.pack(fill="both", expand=True, padx=T.SPACE_MD,
-                   pady=T.SPACE_MD)
+                           pad=T.SPACE_UI_XL)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_UI_MD,
+                   pady=T.SPACE_UI_MD)
         body = panel.inner
         logo = self._ui_icon_photo("about", ICON_SIZES["about"])
         if logo is not None:
@@ -2084,7 +2546,7 @@ class GameHub:
                     bg=T.UI_PANEL).pack(pady=(4, 10))
 
         links = tk.Frame(body, bg=T.UI_PANEL)
-        links.pack(pady=(0, T.SPACE_SM))
+        links.pack(pady=(0, T.SPACE_UI_SM))
         entries = (
             ("GitHub", lambda: self._open_url(PROJECT_GITHUB, "GitHub")),
             ("项目主页", lambda: self._open_url(PROJECT_PAGES, "项目主页")),
@@ -2104,7 +2566,7 @@ class GameHub:
         text.insert("1.0", _changelog_preview_text(8))
         text.configure(state="disabled")
         footer = tk.Frame(body, bg=T.UI_PANEL)
-        footer.pack(fill="x", pady=(T.SPACE_SM, 0))
+        footer.pack(fill="x", pady=(T.SPACE_UI_SM, 0))
         self._button(footer, "检查软件更新", self.check_software_update,
                      kind="primary").pack(side="left")
         self._button(footer, "关闭", dialog.destroy).pack(side="right")
@@ -2142,7 +2604,9 @@ class GameHub:
                 self._toast("正在检查软件更新，请稍候…")
             return
         self.software_checking = True
-        self._toast("正在检查软件更新…")
+        self.software_check_manual = bool(manual)
+        if manual:
+            self._toast("正在检查软件更新…")
         threading.Thread(target=self._software_update_worker,
                          daemon=True).start()
 
@@ -2160,8 +2624,18 @@ class GameHub:
         except queue.Empty:
             return
         self.software_checking = False
+        manual = self.software_check_manual
+        self.software_check_manual = False
         if info.get("error"):
             self._toast(f"检查软件更新失败：{info['error']}（请检查网络或代理）")
+            return
+        if not info.get("newer"):
+            if manual:
+                self._show_software_update(info)
+            return
+        if self.settings.get("auto_download_update") and info.get("newer"):
+            self._toast(f"发现新版本 v{info.get('version')}，开始自动下载…")
+            self._start_update_download(info)
             return
         self._show_software_update(info)
 
@@ -2172,9 +2646,9 @@ class GameHub:
         dialog.transient(self.root)
         self._place_dialog(dialog, 680, 540)
         panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
-                           pad=T.SPACE_XL)
-        panel.pack(fill="both", expand=True, padx=T.SPACE_MD,
-                   pady=T.SPACE_MD)
+                           pad=T.SPACE_UI_XL)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_UI_MD,
+                   pady=T.SPACE_UI_MD)
         body = panel.inner
         self._label(body, "All-My-Maa 软件更新", color=T.UI_TEXT,
                     font=self.f_page, bg=T.UI_PANEL).pack(anchor="w")
@@ -2195,23 +2669,317 @@ class GameHub:
         text = tk.Text(body, height=12, bg=T.UI_PANEL_2, fg=T.UI_TEXT_2,
                        relief="flat", bd=0, highlightthickness=0,
                        wrap="word", font=self.f_small)
-        text.pack(fill="both", expand=True, pady=(4, T.SPACE_SM))
+        text.pack(fill="both", expand=True, pady=(4, T.SPACE_UI_SM))
         changelog = format_changelog_text(info.get("changelog") or "")
         text.insert("1.0", changelog or "（该版本没有附带更新说明）")
         text.configure(state="disabled")
         footer = tk.Frame(body, bg=T.UI_PANEL)
         footer.pack(fill="x")
         if info.get("newer"):
+            self._button(footer, "下载并更新",
+                         lambda: (dialog.destroy(),
+                                  self._start_update_download(info)),
+                         kind="primary").pack(side="left")
             self._button(footer, "打开发布页",
                          lambda: self._open_url(info.get("url") or RELEASE_PAGE,
-                                                "发布页"),
-                         kind="primary").pack(side="left")
+                                                "发布页")).pack(side="left",
+                                                              padx=(8, 0))
         self._button(footer, "关闭", dialog.destroy).pack(side="right")
-        self._label(body, "本程序不会自动下载或安装更新。", color=T.UI_TEXT_3,
-                    font=self.f_aux, bg=T.UI_PANEL).pack(anchor="w",
-                                                         pady=(6, 0))
+        self._label(body, "下载仅在确认后执行，程序不会静默重启。",
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(6, 0))
         dialog.grab_set()
         self.root.wait_window(dialog)
+
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+
+    # ---------------------------------------------------------- 自动更新
+    def _git_state(self, root=None):
+        root = root or store.APP_DIR
+        is_git = os.path.isdir(os.path.join(root, ".git"))
+        clean = False
+        if is_git:
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", root, "status", "--porcelain"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=0x08000000)
+                clean = proc.returncode == 0 and not proc.stdout.strip()
+            except Exception:
+                clean = False
+        return is_git, clean
+
+    def _start_update_download(self, info):
+        if not getattr(sys, "frozen", False):
+            self._start_source_update(info)
+            return
+        asset = select_update_asset(info)
+        if not asset:
+            self._toast("该版本没有可下载的 exe/zip，已打开发布页")
+            self._open_url(info.get("url") or RELEASE_PAGE, "发布页")
+            return
+        target = sys.executable or ""
+        writable = False
+        try:
+            folder = os.path.dirname(target)
+            probe = os.path.join(folder, ".allmymaa_write_test")
+            with open(probe, "wb"):
+                pass
+            os.remove(probe)
+            writable = True
+        except Exception:
+            writable = False
+        if not can_auto_update(True, writable):
+            messagebox.showwarning(
+                "无法自动更新",
+                "程序所在目录不可写（可能需要管理员权限）。\n"
+                "请打开发布页手动下载更新。", parent=self.root)
+            self._open_url(info.get("url") or RELEASE_PAGE, "发布页")
+            return
+        self._show_download_progress(info, asset)
+        threading.Thread(target=self._download_worker,
+                         args=(info, asset), daemon=True).start()
+
+    def _show_download_progress(self, info, asset):
+        try:
+            self._close_update_progress()
+        except Exception:
+            pass
+        dialog = tk.Toplevel(self.root)
+        dialog.title("下载更新 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 520, 220)
+        panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
+                           pad=T.SPACE_UI_LG)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_UI_MD,
+                   pady=T.SPACE_UI_MD)
+        body = panel.inner
+        self._label(body, f"正在下载 All-My-Maa v{info.get('version')}",
+                    color=T.UI_TEXT, font=self.f_name,
+                    bg=T.UI_PANEL).pack(anchor="w")
+        var = tk.StringVar(value="准备下载…")
+        tk.Label(body, textvariable=var, bg=T.UI_PANEL, fg=T.UI_TEXT_2,
+                 font=self.f_small, anchor="w").pack(fill="x", pady=(8, 6))
+        bar = tk.Canvas(body, height=10, bg=T.UI_PANEL_2,
+                        highlightthickness=0, bd=0)
+        bar.pack(fill="x")
+        self._update_progress_dialog = dialog
+        self._update_progress_var = var
+        self._update_progress_bar = bar
+
+    def _set_update_progress(self, percent, text=None):
+        if self._update_progress_var is None:
+            return
+        percent = max(0, min(100, int(percent)))
+        if text is not None:
+            self._update_progress_var.set(text)
+        else:
+            self._update_progress_var.set(f"正在下载更新… {percent}%")
+        bar = self._update_progress_bar
+        if bar is not None:
+            width = max(10, bar.winfo_width())
+            bar.delete("all")
+            _round_rect(bar, 0, 0, width - 1, 9, 5, T.UI_PANEL_2,
+                        T.UI_BORDER_SOFT, 1)
+            fill_w = int((width - 2) * percent / 100)
+            if fill_w > 2:
+                _round_rect(bar, 1, 1, 1 + fill_w, 8, 4,
+                            T.UI_ACCENT, "", 0)
+
+    def _close_update_progress(self):
+        dialog = self._update_progress_dialog
+        self._update_progress_dialog = None
+        self._update_progress_var = None
+        self._update_progress_bar = None
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+    def _download_worker(self, info, asset):
+        try:
+            folder = tempfile.mkdtemp(prefix="allmymaa_update_")
+            dest = os.path.join(folder, asset["name"])
+            request = urllib.request.Request(
+                asset["url"], headers={"User-Agent": "AllMyMaa-Update"})
+            with urllib.request.urlopen(request, timeout=30) as response, \
+                    open(dest, "wb") as fh:
+                total = int(asset.get("size") or 0)
+                try:
+                    total = total or int(response.headers.get("Content-Length")
+                                         or 0)
+                except (TypeError, ValueError):
+                    pass
+                got = 0
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        self.update_download_queue.put(
+                            ("progress", min(99, int(got * 100 / total))))
+            if total and os.path.getsize(dest) != total:
+                raise OSError("下载大小校验失败")
+            exe_path = dest
+            if asset.get("kind") == "zip":
+                exe_path = self._extract_update_zip(dest)
+            self.update_download_queue.put(
+                ("done", {"info": info, "asset": asset, "exe": exe_path,
+                          "folder": folder}))
+        except Exception as exc:
+            self.update_download_queue.put(("error", str(exc)))
+
+    @staticmethod
+    def _extract_update_zip(path):
+        folder = tempfile.mkdtemp(prefix="allmymaa_unzip_")
+        with zipfile.ZipFile(path) as archive:
+            archive.extractall(folder)
+        candidates = []
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                if name.lower().endswith(".exe"):
+                    full = os.path.join(root, name)
+                    try:
+                        candidates.append((os.path.getsize(full), full))
+                    except OSError:
+                        pass
+        if not candidates:
+            raise OSError("更新包中没有找到 exe")
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def _drain_update_download(self):
+        while True:
+            try:
+                kind, payload = self.update_download_queue.get_nowait()
+            except queue.Empty:
+                return
+            if kind == "progress":
+                self._set_update_progress(payload)
+            elif kind == "error":
+                self._close_update_progress()
+                self._toast(f"下载更新失败：{payload}")
+            elif kind == "done":
+                self._close_update_progress()
+                self._show_install_confirm(payload)
+            elif kind == "source_done":
+                self._toast("源码更新完成")
+                if messagebox.askyesno(
+                        "更新完成", "代码已更新。是否立即重启 Hub？",
+                        parent=self.root):
+                    self._restart_from_source()
+            elif kind == "source_error":
+                self._toast(f"源码更新失败：{payload}")
+
+    def _start_source_update(self, info):
+        is_git, clean = self._git_state()
+        if not should_source_update(is_git, clean):
+            messagebox.showinfo(
+                "无法自动更新",
+                "当前以源码方式运行，且目录不是干净的 git 仓库。\n"
+                "请打开发布页手动更新（不会覆盖你的本地修改）。",
+                parent=self.root)
+            self._open_url(info.get("url") or RELEASE_PAGE, "发布页")
+            return
+        if not messagebox.askyesno(
+                "源码模式更新",
+                "将执行 git pull --ff-only 更新代码，完成后可选择重启 Hub。\n"
+                "确定继续吗？", parent=self.root):
+            return
+        self._toast("正在更新源码…")
+
+        def worker():
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", store.APP_DIR, "pull", "--ff-only"],
+                    capture_output=True, text=True, timeout=120,
+                    creationflags=0x08000000)
+                if proc.returncode != 0:
+                    self.update_download_queue.put(
+                        ("source_error", (proc.stderr or proc.stdout or
+                                          "git pull 失败").strip()[:200]))
+                else:
+                    self.update_download_queue.put(("source_done", ""))
+            except Exception as exc:
+                self.update_download_queue.put(("source_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _restart_from_source(self):
+        hub = os.path.join(store.APP_DIR, "hub.pyw")
+        if not os.path.isfile(hub):
+            self._toast("未找到 hub.pyw，无法自动重启")
+            return
+        try:
+            subprocess.Popen([sys.executable, hub], cwd=store.APP_DIR,
+                             creationflags=0x00000008 | 0x00000200)
+            self._on_close()
+        except Exception as exc:
+            self._toast(f"重启失败：{exc}")
+
+    def _show_install_confirm(self, data):
+        info = data.get("info") or {}
+        exe = data.get("exe") or ""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("安装更新 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 560, 330)
+        panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
+                           pad=T.SPACE_UI_XL)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_UI_MD,
+                   pady=T.SPACE_UI_MD)
+        body = panel.inner
+        self._label(body, f"已下载 All-My-Maa v{info.get('version')}",
+                    color=T.UI_TEXT, font=self.f_page,
+                    bg=T.UI_PANEL).pack(anchor="w")
+        self._label(body, "确认后将退出当前程序，由更新脚本备份并替换 exe，"
+                          "然后启动新版本。",
+                    color=T.UI_TEXT_2, font=self.f_small,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(8, 6))
+        self._label(body, f"更新文件：{os.path.basename(exe)}",
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(anchor="w")
+        footer = tk.Frame(body, bg=T.UI_PANEL)
+        footer.pack(fill="x", pady=(T.SPACE_UI_LG, 0))
+        self._button(footer, "安装并重启",
+                     lambda: (dialog.destroy(),
+                              self._install_frozen_update(exe)),
+                     kind="primary").pack(side="left")
+        self._button(footer, "打开发布页",
+                     lambda: self._open_url(info.get("url") or RELEASE_PAGE,
+                                            "发布页")).pack(side="left",
+                                                          padx=(8, 0))
+        self._button(footer, "取消", dialog.destroy).pack(side="right")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+
+    def _install_frozen_update(self, new_exe):
+        target = sys.executable or ""
+        if not can_auto_update(getattr(sys, "frozen", False), True):
+            self._toast("当前不是打包模式或程序目录不可写，无法自动安装")
+            return
+        try:
+            folder = tempfile.mkdtemp(prefix="allmymaa_updater_")
+            ps1 = os.path.join(folder, "update_gamehub.ps1")
+            with open(ps1, "w", encoding="utf-8-sig") as fh:
+                fh.write(build_updater_script(os.getpid(), new_exe, target))
+            cmd = os.path.join(folder, "update_gamehub.cmd")
+            with open(cmd, "w", encoding="utf-8") as fh:
+                fh.write("@echo off\r\n")
+                fh.write("powershell -NoProfile -ExecutionPolicy Bypass "
+                         f"-File \"{ps1}\"\r\n")
+            subprocess.Popen(["cmd", "/c", cmd],
+                             creationflags=0x00000008 | 0x00000010)
+            self._toast("正在安装更新，程序即将退出…")
+            self.root.after(500, self._on_close)
+        except Exception as exc:
+            self._toast(f"启动更新脚本失败：{exc}")
 
     # ---------------------------------------------------------- 更新日志
     def _open_changelog(self):
@@ -2272,6 +3040,14 @@ class GameHub:
         self.settings_root_var.set(self.search_root)
         self.clash_var.set(self.clash_exe or "")
         self._refresh_accent_chips()
+        try:
+            labels = getattr(self, "_font_scale_map", {})
+            current = next(
+                (label for label, scale in labels.items()
+                 if abs(scale - self._font_scale) < 1e-6), "标准 1.0")
+            self.font_scale_var.set(current)
+        except Exception:
+            pass
 
     def _browse_clash(self):
         path = filedialog.askopenfilename(
@@ -2311,8 +3087,12 @@ class GameHub:
             self._toast("默认超时必须是 1–600 的整数分钟")
             return
         values = dict(self.settings)
+        new_scale = self._font_scale_map.get(
+            self.font_scale_var.get(), self._font_scale)
         values.update({
             "accent": self._accent_var,
+            "font_scale": new_scale,
+            "auto_download_update": bool(self.auto_download_var.get()),
             "check_update_on_start": bool(self.check_update_var.get()),
             "refresh_interval": float(self.refresh_var.get() or 1.5),
             "close_action": self.close_action_var.get() or "exit",
@@ -2334,6 +3114,9 @@ class GameHub:
             pass
         saved = self._save_config()
         self._accent_var = self.settings.get("accent") or self._accent_var
+        scale_changed = abs(new_scale - self._font_scale) > 1e-6
+        if scale_changed:
+            self._apply_font_scale(new_scale)
         self._apply_accent_theme()
         self.show_page(self.page)
         self._schedule_poll()
@@ -2342,6 +3125,60 @@ class GameHub:
         self._refresh_daily_states()
         if saved:
             self._toast("设置已保存")
+
+    def _apply_font_scale(self, scale):
+        """v0.10：字体缩放立即生效（标题栏/按钮/行高/对话框后续创建同步）。"""
+        global _FONT_SCALE
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = 1.0
+        self._font_scale = scale
+        _FONT_SCALE = scale
+        self._setup_fonts()
+        try:
+            self.titlebar.apply_scale(scale)
+            self.titlebar.refresh_buttons()
+        except Exception:
+            pass
+        for header in getattr(self, "_page_headers", {}).values():
+            try:
+                header.apply_scale(scale)
+            except Exception:
+                pass
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, RoundButton):
+                    try:
+                        child.apply_scale(scale)
+                    except Exception:
+                        pass
+                walk(child)
+
+        walk(self.root)
+        # 侧栏高度有限：字体仍按比例，按钮高度最多放大约 1.08 倍，避免底部版本溢出
+        sidebar_scale = min(scale, 1.08)
+
+        def walk_sidebar(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, RoundButton):
+                    try:
+                        child.apply_scale(sidebar_scale)
+                    except Exception:
+                        pass
+                walk_sidebar(child)
+
+        try:
+            walk_sidebar(self.sidebar)
+        except Exception:
+            pass
+        self._rebuild_home()
+        self._rebuild_daily()
+        self._refresh_home_states()
+        self._refresh_daily_states()
+        if self.page == "settings":
+            self._refresh_settings_view()
 
     def _schedule_poll(self):
         if self._poll_after:
@@ -2498,7 +3335,11 @@ class GameHub:
             return
         exe = app.get("game_exe", "")
         saved = True
-        if not exe or not os.path.isfile(exe):
+        try:
+            spec = store.build_game_launch(app)
+        except Exception:
+            spec = {}
+        if not spec.get("exe") and spec.get("strategy") != "maa_adb":
             self._toast(f"正在自动检测「{app.get('game')}」的启动程序…")
             try:
                 candidates = store.find_game_candidates(app)
@@ -2525,12 +3366,67 @@ class GameHub:
             app["game_procs"] = store.proc_names_for_exe(exe)
             saved = self._save_config()
             self._rebuild_home()
-        ok, error = store.launch_exe(exe)
-        if ok:
-            note = "" if saved else "（路径未能保存）"
-            self._toast(f"正在启动游戏：{app.get('game')}{note}")
-        else:
-            self._toast(f"启动游戏失败：{error}")
+            spec = store.build_game_launch(app)
+        if spec.get("exe") and spec.get("strategy") != "maa_adb" and \
+                os.path.normpath(spec["exe"]) != \
+                os.path.normpath(app.get("game_exe") or ""):
+            app["game_exe"] = spec["exe"]
+            app["game_procs"] = store.proc_names_for_exe(spec["exe"])
+            saved = self._save_config()
+            self._rebuild_home()
+        if app.get("key") == "nte" and spec.get("exe"):
+            if os.path.basename(spec["exe"]).lower() != "htgame.exe":
+                self._toast("未找到异环游戏本体 HTGame.exe，将使用启动器")
+        if not spec.get("exe") and spec.get("strategy") != "maa_adb":
+            self._toast(f"未找到 {app.get('game')} 的启动程序")
+            return
+        if spec.get("strategy") == "maa_adb":
+            adb = spec.get("adb") or {}
+            if not spec.get("exe") and not adb.get("path"):
+                hint = (spec.get("fallback") or [{}])[0].get("hint") or \
+                    "请从 MAA/模拟器手动启动游戏"
+                self._toast(hint)
+                return
+        if app.get("key") in self.game_launching:
+            self._toast("正在启动游戏，请稍候…")
+            return
+        self.game_launching[app["key"]] = True
+        hint = spec.get("hint")
+        self._toast(hint or f"正在启动 {app.get('game')}…")
+        if hint:
+            self._toast(hint)
+        key_name = app["key"]
+
+        def worker():
+            try:
+                result = store.launch_game_with_wait(app, spec)
+            except Exception as exc:
+                result = {"ok": False, "reason": f"启动异常：{exc}",
+                          "spec": spec}
+            self.game_launch_queue.put((key_name, result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _drain_game_launch_events(self):
+        while True:
+            try:
+                key, result = self.game_launch_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.game_launching.pop(key, None)
+            app = self._app_by_key(key)
+            game = app.get("game") if app else key
+            if result.get("ok"):
+                self._toast(f"已启动 {game}")
+                self._refresh_home_states()
+                continue
+            fallback = result.get("fallback") or {}
+            hint = fallback.get("hint") if isinstance(fallback, dict) else ""
+            if hint:
+                self._toast(f"{game} 启动超时：{hint}")
+            else:
+                self._toast(f"启动 {game} 失败：{result.get('reason') or '未知错误'}")
+            self._refresh_home_states()
 
     def download_game(self, key):
         app = self._app_by_key(key)
@@ -2913,6 +3809,15 @@ class GameHub:
             self.root.iconify()
             return
         self._closing = True
+        for attr in ("_poll_after", "_toast_after", "_startup_check_after",
+                     "_startup_software_after"):
+            after_id = getattr(self, attr, None)
+            if after_id:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         try:
             self.root.destroy()
         except Exception:
@@ -2923,6 +3828,8 @@ class GameHub:
             self._drain_queue()
             self._drain_daily_events()
             self._drain_software_update()
+            self._drain_update_download()
+            self._drain_game_launch_events()
             self._refresh()
         except Exception:
             pass
@@ -3081,6 +3988,20 @@ def parse_release_payload(payload, current):
         return {"error": "release 信息缺少版本号"}
     if not store.version_key(version):
         return {"error": f"无法识别版本号：{raw}"}
+    assets = []
+    for item in data.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        url = str(item.get("browser_download_url")
+                  or item.get("url") or "").strip()
+        if not name or not url:
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        assets.append({"name": name, "url": url, "size": max(0, size)})
     return {
         "error": "",
         "current": str(current),
@@ -3090,7 +4011,90 @@ def parse_release_payload(payload, current):
         "url": str(data.get("html_url") or RELEASE_PAGE),
         "name": str(data.get("name") or ""),
         "published_at": str(data.get("published_at") or ""),
+        "assets": assets,
     }
+
+
+def select_update_asset(payload):
+    """从 release JSON/解析结果中选择更新包：优先 exe，其次 zip。"""
+    if not isinstance(payload, dict):
+        return None
+    assets = payload.get("assets")
+    if not isinstance(assets, list):
+        return None
+    exes, zips = [], []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "").strip()
+        url = str(asset.get("url") or asset.get("browser_download_url")
+                  or "").strip()
+        if not name or not url:
+            continue
+        try:
+            size = int(asset.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        item = {"name": name, "url": url, "size": max(0, size)}
+        low = name.lower()
+        if low.endswith(".exe"):
+            item["kind"] = "exe"
+            exes.append(item)
+        elif low.endswith(".zip"):
+            item["kind"] = "zip"
+            zips.append(item)
+    for group in (exes, zips):
+        if not group:
+            continue
+        group.sort(key=lambda item: (
+            0 if ("gamehub" in item["name"].lower()
+                  or "allmymaa" in item["name"].lower()) else 1,
+            item["name"].lower()))
+        return group[0]
+    return None
+
+
+def build_updater_script(pid, new_exe, target_exe):
+    """生成等待 PID 退出→备份→覆盖→启动新 exe 的 PowerShell 脚本。"""
+    def quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        pid = 0
+    new_exe = os.path.normpath(str(new_exe))
+    target_exe = os.path.normpath(str(target_exe))
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "try {",
+        f"  Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue",
+        "} catch {}",
+        "Start-Sleep -Milliseconds 400",
+        f"Copy-Item -LiteralPath {quote(target_exe)} "
+        f"-Destination {quote(target_exe + '.bak')} -Force",
+        f"Copy-Item -LiteralPath {quote(new_exe)} "
+        f"-Destination {quote(target_exe + '.new')} -Force",
+        f"Move-Item -LiteralPath {quote(target_exe + '.new')} "
+        f"-Destination {quote(target_exe)} -Force",
+        f"Start-Process -FilePath {quote(target_exe)}",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def can_auto_update(frozen, target_writable):
+    """frozen exe 且目标可写时才允许自替换。"""
+    return bool(frozen and target_writable)
+
+
+def should_source_update(is_git, clean):
+    """源码模式只有干净 git 仓库才允许 git pull 更新。"""
+    return bool(is_git and clean)
+
+
+def update_available(current, latest):
+    """版本门：latest 是否比 current 新。"""
+    return bool(store.is_newer(latest, current))
 
 
 def _script_directory(root):

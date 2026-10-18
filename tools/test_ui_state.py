@@ -82,7 +82,8 @@ def test_settings_roundtrip(tmp):
         app["daily_explicit"] = True
         apps.append(app)
     settings = store._clean_settings({
-        "accent": "#9ae66e", "refresh_interval": 2.0,
+        "accent": "#9ae66e", "font_scale": 1.12,
+        "refresh_interval": 2.0,
         "close_action": "minimize", "daily_default_timeout": 45,
         "daily_show_preview": False, "adb_enabled": True,
     })
@@ -93,10 +94,12 @@ def test_settings_roundtrip(tmp):
             settings=settings), True)
         raw = json.load(open(cfg, encoding="utf-8"))
         check("config settings 落盘", raw["settings"]["accent"], "#9ae66e")
+        check("config font_scale 落盘", raw["settings"]["font_scale"], 1.12)
         check("config daily_order 落盘", raw["daily_order"],
               ["wuwa", "maa", "maaend", "nte"])
         loaded, _clash, _root, meta = store.load_state_full()
     check("重载 settings accent", meta["settings"]["accent"], "#9ae66e")
+    check("重载 font_scale", meta["settings"]["font_scale"], 1.12)
     check("重载 refresh", meta["settings"]["refresh_interval"], 2.0)
     check("重载 close_action", meta["settings"]["close_action"], "minimize")
     check("重载 daily_order", meta["daily_order"],
@@ -250,10 +253,37 @@ def test_theme_tokens():
     check("标题字号范围", 20 <= theme.UI_FONT_SIZES["title"] <= 22, True)
     check("正文字号范围", 11 <= theme.UI_FONT_SIZES["body"] <= 12, True)
     check("辅助字号不小于 10", theme.UI_FONT_SIZES["aux"] >= 10, True)
-    check("圆角 10-12", 10 <= theme.RADIUS <= 12, True)
-    check("小圆角", theme.RADIUS_SM, 8)
+    check("圆角 10-12（旧兼容）", 10 <= theme.RADIUS <= 12, True)
+    check("小圆角（旧兼容）", theme.RADIUS_SM, 8)
+    check("v0.10 面板圆角", theme.RADIUS_PANEL, 16)
+    check("v0.10 按钮圆角 12-14", 12 <= theme.RADIUS_BUTTON <= 14, True)
+    check("v0.10 输入圆角", theme.RADIUS_INPUT, 10)
     check("间距体系", (theme.SPACE_XS, theme.SPACE_SM, theme.SPACE_MD,
                        theme.SPACE_LG), (8, 12, 16, 20))
+    check("v0.10 间距略增", (theme.SPACE_UI_XS, theme.SPACE_UI_SM,
+                             theme.SPACE_UI_MD, theme.SPACE_UI_LG),
+          (10, 14, 18, 22))
+    check("渐变令牌", (theme.UI_GRADIENT_TOP.startswith("#")
+                       and theme.UI_GRADIENT_SIDEBAR_TOP.startswith("#")),
+          True)
+    check("默认强调色淡紫", theme.UI_ACCENT, "#b98bff")
+    check("新默认 accent", store.NEW_DEFAULT_ACCENT, "#b98bff")
+    purple = [color for _name, color in theme.ACCENT_PRESETS
+              if color in ("#b98bff", "#c4a7f5", "#a78bfa")]
+    check("淡紫预设至少 2 个", len(purple) >= 2, True)
+    check("font_scale 默认", store._clean_settings({})["font_scale"], 1.0)
+    for scale in store.FONT_SCALES:
+        check(f"font_scale 合法 {scale}",
+              store._clean_settings({"font_scale": scale})["font_scale"],
+              float(scale))
+    check("font_scale 非法回退",
+          store._clean_settings({"font_scale": 2.0})["font_scale"], 1.0)
+    check("window_scale_value", ui.window_scale_value("1.12"), 1.12)
+    check("window_scale_value 非法", ui.window_scale_value("x"), 1.0)
+    buttons = ui.titlebar_buttons(False)
+    check("标题栏按钮", (buttons["minimize"], buttons["maximize"],
+                         buttons["close"]), ("—", "□", "✕"))
+    check("最大化按钮切换", ui.titlebar_buttons(True)["maximize"], "❐")
     check("默认窗口", (theme.WIN_W, theme.WIN_H), (1180, 760))
     check("最小窗口", (theme.MIN_W, theme.MIN_H), (1000, 640))
     check("侧边栏宽度", theme.SIDEBAR_W, 232)
@@ -366,6 +396,17 @@ def test_ui_icons():
             check(f"{name} 源图 192×192", image.size, (192, 192))
     check("未知图标返回空", ui.icon_path("bogus"), "")
     check("未知图标无回退", ui.resolve_icon_path("bogus"), "")
+    ico = os.path.join(store.ASSETS, "hub.ico")
+    hub_png = os.path.join(store.ASSETS, "hub.png")
+    check("hub.ico 存在", os.path.isfile(ico), True)
+    check("hub.png 存在", os.path.isfile(hub_png), True)
+    if os.path.isfile(ico):
+        with Image.open(ico) as image:
+            check("hub.ico 多尺寸", 256 in image.info.get("sizes", set())
+                  or (256, 256) in image.info.get("sizes", set()), True)
+    if os.path.isfile(hub_png):
+        with Image.open(hub_png) as image:
+            check("hub.png 256", image.size, (256, 256))
 
     real_hub = os.path.join(store.ASSETS, "hub.png")
     real_brand = os.path.join(store.ASSETS, "LinYuxia.png")
@@ -388,6 +429,54 @@ def test_ui_icons():
               ui.icon_path("home"), os.path.join(empty, "page_home.png"))
 
 
+def test_auto_update_logic():
+    print("\n=== v0.10 自动更新纯逻辑 ===")
+    payload = {
+        "assets": [
+            {"name": "AllMyMaa-v0.10.0.zip", "url": "https://x/zip",
+             "size": 900},
+            {"name": "GameHub.exe", "url": "https://x/exe", "size": 500},
+        ]
+    }
+    asset = ui.select_update_asset(payload)
+    check("优先 exe", (asset["name"], asset["kind"]), ("GameHub.exe", "exe"))
+    check("资产大小", asset["size"], 500)
+    zip_only = ui.select_update_asset(
+        {"assets": [{"name": "AllMyMaa.zip", "url": "https://x/z",
+                     "size": 10}]})
+    check("回退 zip", zip_only["kind"], "zip")
+    check("无资产", ui.select_update_asset({}), None)
+    check("坏资产", ui.select_update_asset("bad"), None)
+
+    script = ui.build_updater_script(
+        1234, r"C:\Temp dir\new exe.exe",
+        r"C:\Program Files\All My Maa\GameHub's.exe")
+    check("updater 等待 PID", "Wait-Process -Id 1234" in script, True)
+    check("updater 备份", "GameHub''s.exe.bak" in script, True)
+    check("updater 覆盖目标",
+          "Destination 'C:\\Program Files\\All My Maa\\GameHub''s.exe'"
+          in script, True)
+    check("updater 启动新 exe", "Start-Process -FilePath" in script, True)
+    check("updater 含空格路径引号",
+          "'C:\\Temp dir\\new exe.exe'" in script, True)
+
+    check("can_auto_update true", ui.can_auto_update(True, True), True)
+    check("can_auto_update 非 frozen", ui.can_auto_update(False, True), False)
+    check("can_auto_update 不可写", ui.can_auto_update(True, False), False)
+    check("should_source_update", ui.should_source_update(True, True), True)
+    check("should_source_update 脏仓库",
+          ui.should_source_update(True, False), False)
+    check("should_source_update 非 git",
+          ui.should_source_update(False, True), False)
+    check("版本门", ui.update_available("0.9.1", "0.10.0"), True)
+    check("版本门同版本", ui.update_available("0.10.0", "0.10.0"), False)
+    defaults = store._clean_settings(None)
+    check("auto_download_update 默认", defaults["auto_download_update"], False)
+    check("auto_download_update 清洗",
+          store._clean_settings({"auto_download_update": True})[
+              "auto_download_update"], True)
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -402,6 +491,7 @@ def main():
         test_release_parsing()
         test_format_changelog()
         test_ui_icons()
+        test_auto_update_logic()
     print("\nFAILURES:", failures if failures else "none")
     return 1 if failures else 0
 

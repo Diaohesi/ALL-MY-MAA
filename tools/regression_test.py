@@ -3504,6 +3504,521 @@ class V091IconTests(TempDirTest):
             store.ASSETS = real_assets
 
 
+# ---------------------------------------------------------------- v0.10 异环/启动/字体/更新
+class _FakeGameProc:
+    def __init__(self, pid=1234, exit_code=None):
+        self.pid = pid
+        self._exit = exit_code
+
+    def poll(self):
+        return self._exit
+
+
+class V010GameExeTests(TempDirTest):
+    """v0.10 resolve_game_exe：异环 HTGame 优先/glob/迁移。"""
+
+    @staticmethod
+    def _file(path, size=200 * 1024):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"MZ" + b"0" * max(0, size - 2))
+        return path
+
+    def test_nte_htgame_priority(self):
+        launcher = self._file(os.path.join(self.tmp, "NTELauncher.exe"))
+        body = self._file(os.path.join(self.tmp, *store.NTE_GAME_RELATIVE))
+        app = {"key": "nte", "game": "异环", "game_exe": launcher,
+               "script_exe": os.path.join(self.tmp, "script", "MaaNTE.exe"),
+               "game_procs": ["ntelauncher.exe"]}
+        resolved = store.resolve_game_exe(app)
+        self.assertEqual(os.path.normpath(resolved), os.path.normpath(body))
+        self.assertEqual(os.path.normpath(app["game_exe"]),
+                         os.path.normpath(body))
+        self.assertEqual([name.upper() for name in app["game_procs"]],
+                         ["HTGAME.EXE"])
+        # 已是 HTGame.exe -> 原样；其它游戏不改写
+        self.assertEqual(store.resolve_game_exe(
+            {"key": "nte", "game_exe": body}), body)
+        self.assertEqual(store.resolve_game_exe(
+            {"key": "wuwa", "game_exe": launcher}), launcher)
+
+    def test_nte_glob_and_missing(self):
+        self._file(os.path.join(self.tmp, "NTELauncher.exe"))
+        globbed = self._file(os.path.join(self.tmp, "Game", "Bin",
+                                          "HTGame.exe"))
+        app = {"key": "nte", "game": "异环",
+               "game_exe": os.path.join(self.tmp, "NTELauncher.exe")}
+        self.assertEqual(os.path.normpath(store.resolve_game_exe(app)),
+                         os.path.normpath(globbed))
+        # 找不到：保留原值，不写回（用独立临时目录避免扫描到上面的 HTGame）
+        with tempfile.TemporaryDirectory(prefix="gh_nte_missing_") as other:
+            launcher = self._file(os.path.join(other, "NTELauncher.exe"))
+            app2 = {"key": "nte", "game_exe": launcher}
+            self.assertEqual(store.resolve_game_exe(app2), launcher)
+            self.assertEqual(app2["game_exe"], launcher)
+
+    def test_nte_candidate_scoring(self):
+        hints = store.GAME_EXE_HINTS["nte"]
+        self.assertEqual(hints[0].lower(), "htgame.exe")
+        base = os.path.join(self.tmp, "异环")
+        launcher = self._file(os.path.join(base, "NTELauncher.exe"))
+        body = self._file(os.path.join(base, *store.NTE_GAME_RELATIVE))
+        keywords = store.GAME_KEYWORDS["nte"]
+        hit_body = store._score_exe_path(body, 0, keywords, hints)
+        hit_launcher = store._score_exe_path(launcher, 0, keywords, hints)
+        self.assertTrue(hit_body)
+        self.assertTrue(hit_launcher)
+        self.assertGreater(hit_body["score"], hit_launcher["score"])
+
+    def test_nte_candidate_discovery_htgame_first(self):
+        # 按 ok-ww/MXU 实际布局：<安装根>/Client/WindowsNoEditor/.../HTGame.exe
+        with tempfile.TemporaryDirectory(prefix="gh_nte_cands_") as root:
+            self._file(os.path.join(root, "NTELauncher.exe"))
+            body = self._file(os.path.join(root, *store.NTE_GAME_RELATIVE))
+            with mock.patch.object(store, "_iter_registry_entries",
+                                   return_value=[]), \
+                    mock.patch.object(store, "_fs_scan_roots",
+                                      return_value=[(root, "异环")]):
+                candidates = store.find_game_candidates(
+                    {"key": "nte", "game": "异环"})
+            self.assertTrue(candidates)
+            self.assertEqual(os.path.basename(candidates[0]["path"]),
+                             "HTGame.exe")
+            self.assertEqual(os.path.normpath(candidates[0]["path"]),
+                             os.path.normpath(body))
+
+    def test_load_migration_nte(self):
+        root = os.path.join(self.tmp, "cfgroot")
+        os.makedirs(root, exist_ok=True)
+        launcher = self._file(os.path.join(root, "NTELauncher.exe"))
+        body = self._file(os.path.join(root, *store.NTE_GAME_RELATIVE))
+        search = os.path.join(self.tmp, "search_root")
+        os.makedirs(search, exist_ok=True)
+        cfg = os.path.join(self.tmp, "config.json")
+        _write_json(cfg, {"version": 4, "root": root,
+                          "apps": {"nte": {"game_exe": launcher,
+                                           "daily": {}}}})
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search):
+            apps, _clash, _root, _meta = store.load_state_full()
+        nte = next(app for app in apps if app["key"] == "nte")
+        self.assertEqual(os.path.normpath(nte["game_exe"]),
+                         os.path.normpath(body))
+        raw = json.load(open(cfg, "r", encoding="utf-8"))
+        self.assertEqual(os.path.basename(raw["apps"]["nte"]["game_exe"]),
+                         "HTGame.exe")
+        # 找不到 HTGame 时保留启动器
+        root2 = os.path.join(self.tmp, "cfgroot2")
+        os.makedirs(root2, exist_ok=True)
+        launcher2 = self._file(os.path.join(root2, "NTELauncher.exe"))
+        cfg2 = os.path.join(self.tmp, "config2.json")
+        _write_json(cfg2, {"version": 4, "root": root2,
+                           "apps": {"nte": {"game_exe": launcher2,
+                                            "daily": {}}}})
+        with mock.patch.object(store, "CONFIG", cfg2), \
+                mock.patch.object(store, "SEARCH_ROOT", search):
+            apps2, _c, _r, _m = store.load_state_full()
+        nte2 = next(app for app in apps2 if app["key"] == "nte")
+        self.assertEqual(os.path.basename(nte2["game_exe"]),
+                         "NTELauncher.exe")
+
+
+class V010GameLaunchTests(TempDirTest):
+    """v0.10 build_game_launch：四款策略/exe/args/cwd/wait/fallback。"""
+
+    @staticmethod
+    def _file(path, size=200 * 1024):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"MZ" + b"0" * max(0, size - 2))
+        return path
+
+    def test_wuwa_direct_game_exe(self):
+        body = self._file(os.path.join(self.tmp, "Wuthering Waves Game",
+                                       "Wuthering Waves.exe"))
+        launcher = self._file(os.path.join(self.tmp, "launcher.exe"))
+        app = {"key": "wuwa", "game": "鸣潮", "game_exe": launcher,
+               "script_exe": os.path.join(self.tmp, "ok-ww.exe")}
+        spec = store.build_game_launch(app)
+        self.assertEqual(spec["strategy"], "exe")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(body))
+        self.assertEqual(spec["args"], ["-krqlv=hd"])
+        self.assertEqual(os.path.normpath(spec["cwd"]),
+                         os.path.normpath(os.path.dirname(body)))
+        self.assertFalse(spec["elevated"])
+        self.assertEqual(spec["wait"]["timeout_s"], 120)
+        self.assertEqual(spec["wait"]["any_of"][0]["class_re"],
+                         "^UnrealWindow$")
+        self.assertEqual(spec["fallback"][0]["type"], "exe")
+        self.assertEqual(os.path.normpath(spec["fallback"][0]["exe"]),
+                         os.path.normpath(launcher))
+        # ok-ww devices.json 中的 pc_full_path 也可发现
+        dev = os.path.join(self.tmp, "dev")
+        pc_exe = self._file(os.path.join(dev, "Game",
+                                         "Wuthering Waves.exe"))
+        script = os.path.join(dev, "ok-ww", "working", "main.py")
+        self._file(script, size=16)
+        _write_json(os.path.join(dev, "ok-ww", "configs", "devices.json"),
+                    {"devices": [{"pc_full_path": pc_exe}]})
+        spec2 = store.build_game_launch(
+            {"key": "wuwa", "script_exe": script})
+        self.assertEqual(os.path.normpath(spec2["exe"]),
+                         os.path.normpath(pc_exe))
+
+    def test_nte_htgame_and_fallback(self):
+        launcher = self._file(os.path.join(self.tmp, "NTELauncher.exe"))
+        body = self._file(os.path.join(self.tmp, *store.NTE_GAME_RELATIVE))
+        spec = store.build_game_launch(
+            {"key": "nte", "game": "异环", "game_exe": launcher})
+        self.assertEqual(spec["strategy"], "exe")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(body))
+        self.assertEqual(spec["args"], [])
+        self.assertEqual(spec["wait"]["timeout_s"], 180)
+        self.assertIn("异环", spec["wait"]["any_of"][0]["title_re"])
+        self.assertEqual(os.path.normpath(spec["fallback"][0]["exe"]),
+                         os.path.normpath(launcher))
+
+    def test_maaend_launcher_first(self):
+        launcher = self._file(os.path.join(self.tmp, "Launcher.exe"))
+        endfield = self._file(os.path.join(self.tmp, "games",
+                                           "Endfield Game", "Endfield.exe"))
+        with mock.patch.object(store, "_hypergryph_installs",
+                               return_value=[]):
+            spec = store.build_game_launch(
+                {"key": "maaend", "game": "终末地", "game_exe": launcher})
+        self.assertEqual(spec["strategy"], "launcher")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(launcher))
+        self.assertEqual(os.path.normpath(spec["cwd"]),
+                         os.path.normpath(self.tmp))
+        self.assertEqual(spec["wait"]["timeout_s"], 180)
+        self.assertEqual(spec["wait"]["any_of"][0]["title_re"], "Endfield")
+        self.assertEqual(os.path.normpath(spec["fallback"][0]["exe"]),
+                         os.path.normpath(endfield))
+        self.assertIn("启动器", spec.get("hint", ""))
+
+    def test_maa_pc_branch(self):
+        exe = self._file(os.path.join(self.tmp, "MAA.exe"))
+        arknights = self._file(os.path.join(self.tmp, "games",
+                                            "Arknights Game",
+                                            "Arknights.exe"))
+        _write_json(os.path.join(self.tmp, "gui.new.json"), {
+            "Configurations": {"Default": {"Gui": {
+                "StartUpSettings": {"PcClientPath": arknights,
+                                    "PcClientWaitSeconds": 90},
+                "ConnectSettings": {"Config": "PC"}}}}})
+        with mock.patch.object(store, "_hypergryph_installs",
+                               return_value=[]):
+            spec = store.build_game_launch({"key": "maa",
+                                            "script_exe": exe})
+        self.assertEqual(spec["strategy"], "maa_pc")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(arknights))
+        self.assertEqual(spec["wait"]["timeout_s"], 90)
+        self.assertEqual(spec["wait"]["any_of"][0]["title_re"], "明日方舟")
+        self.assertEqual(spec["args"], [])
+
+    def test_maa_adb_branch(self):
+        exe = self._file(os.path.join(self.tmp, "MAA.exe"))
+        emu = self._file(os.path.join(self.tmp, "MuMu",
+                                      "MuMuPlayer.exe"))
+        adb = self._file(os.path.join(self.tmp, "adb.exe"))
+        _write_json(os.path.join(self.tmp, "gui.new.json"), {
+            "Gui": {
+                "StartUpSettings": {
+                    "EmulatorPath": emu, "EmulatorWaitSeconds": 45,
+                    "AdbPath": adb, "AdbSerial": "127.0.0.1:16384"},
+                "ConnectSettings": {"Config": "MuMuEmulator12"}}})
+        with mock.patch.object(store, "_hypergryph_installs",
+                               return_value=[]):
+            spec = store.build_game_launch({"key": "maa",
+                                            "script_exe": exe})
+        self.assertEqual(spec["strategy"], "maa_adb")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(emu))
+        self.assertEqual(spec["adb"]["serial"], "127.0.0.1:16384")
+        self.assertEqual(spec["adb"]["path"], os.path.normpath(adb))
+        self.assertEqual(spec["adb"]["package"], "com.hypergryph.arknights")
+        self.assertEqual(spec["wait"]["timeout_s"], 45)
+
+    def test_missing_files_user_pick(self):
+        with mock.patch.object(store, "_hypergryph_installs",
+                               return_value=[]):
+            wuwa = store.build_game_launch({"key": "wuwa", "game": "鸣潮"})
+            nte = store.build_game_launch({"key": "nte", "game": "异环"})
+            maaend = store.build_game_launch({"key": "maaend",
+                                              "game": "终末地"})
+        self.assertEqual(wuwa["exe"], "")
+        self.assertEqual(wuwa["args"], [])
+        self.assertEqual([item["type"] for item in wuwa["fallback"]],
+                         ["user_pick"])
+        self.assertEqual(nte["exe"], "")
+        self.assertEqual([item["type"] for item in nte["fallback"]],
+                         ["user_pick"])
+        self.assertEqual(maaend["strategy"], "launcher")
+        self.assertEqual(maaend["exe"], "")
+        self.assertEqual(maaend["fallback"][0]["type"], "user_pick")
+        # 自定义游戏保持现有 game_exe 直接启动
+        custom = store.build_game_launch(
+            {"key": "custom_1", "game_exe": r"D:\Games\game.exe"})
+        self.assertEqual(custom["strategy"], "exe")
+        self.assertEqual(custom["exe"], r"D:\Games\game.exe")
+        self.assertEqual(custom["wait"]["any_of"], [])
+        self.assertEqual(custom["fallback"][0]["type"], "user_pick")
+
+
+class V010WaitLaunchTests(unittest.TestCase):
+    """v0.10 等待器：成功/超时/提前退出 + 启动→等待→回退（spawn mock）。"""
+
+    def test_wait_success(self):
+        spec = {"wait": {"timeout_s": 5, "poll_ms": 100}}
+        calls = []
+        ok, reason = store.wait_game_launched(
+            {"key": "wuwa"}, spec, state_fn=lambda: True,
+            sleep_fn=lambda seconds: calls.append(seconds),
+            clock_fn=lambda: 0.0)
+        self.assertEqual((ok, reason), (True, ""))
+        self.assertEqual(calls, [])
+
+    def test_wait_timeout(self):
+        spec = {"wait": {"timeout_s": 0.2, "poll_ms": 50}}
+        times = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+        ok, reason = store.wait_game_launched(
+            {"key": "wuwa"}, spec, state_fn=lambda: False,
+            sleep_fn=lambda seconds: None,
+            clock_fn=lambda: next(times, 10.0))
+        self.assertFalse(ok)
+        self.assertIn("超时", reason)
+
+    def test_wait_process_early_exit(self):
+        spec = {"wait": {"timeout_s": 5, "poll_ms": 50}}
+        times = iter([0.0, 0.1, 0.2, 0.3])
+        ok, reason = store.wait_game_launched(
+            {"key": "wuwa"}, spec, state_fn=lambda: False,
+            sleep_fn=lambda seconds: None,
+            clock_fn=lambda: next(times, 10.0),
+            process=_FakeGameProc(exit_code=1))
+        self.assertFalse(ok)
+        self.assertIn("提前退出", reason)
+
+    def test_launch_game_with_wait_and_fallback(self):
+        spec = {"strategy": "exe", "exe": "game.exe", "args": ["-x"],
+                "cwd": r"C:\Game",
+                "wait": {"timeout_s": 1, "poll_ms": 100},
+                "fallback": [{"type": "exe", "exe": "launcher.exe",
+                              "hint": "已打开启动器"}]}
+        calls = []
+
+        def spawn(exe, args=None, cwd=""):
+            calls.append((exe, list(args or []), cwd))
+            return _FakeGameProc(pid=99), ""
+        result = store.launch_game_with_wait(
+            {"key": "wuwa"}, spec, spawn_fn=spawn,
+            state_fn=lambda: True, sleep_fn=lambda seconds: None,
+            clock_fn=lambda: 0.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pid"], 99)
+        self.assertEqual(calls[0], ("game.exe", ["-x"], r"C:\Game"))
+        self.assertEqual(calls, [calls[0]])
+        # 超时 -> 回退启动器
+        calls.clear()
+        times = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+        result2 = store.launch_game_with_wait(
+            {"key": "wuwa"}, spec, spawn_fn=spawn,
+            state_fn=lambda: False, sleep_fn=lambda seconds: None,
+            clock_fn=lambda: next(times, 10.0))
+        self.assertFalse(result2["ok"])
+        self.assertEqual(result2["fallback"]["type"], "exe")
+        self.assertIn("启动器", result2["fallback"]["hint"])
+        self.assertEqual(calls[-1][0], "launcher.exe")
+        self.assertEqual(calls[-1][1], [])
+        # spawn 失败 -> 直接失败，不等待
+        result3 = store.launch_game_with_wait(
+            {"key": "wuwa"}, spec,
+            spawn_fn=lambda *args, **kwargs: (None, "启动失败"),
+            state_fn=lambda: True, sleep_fn=lambda seconds: None,
+            clock_fn=lambda: 0.0)
+        self.assertFalse(result3["ok"])
+        self.assertEqual(result3["reason"], "启动失败")
+
+
+class V010SettingsThemeTests(unittest.TestCase):
+    """v0.10 font_scale / 淡紫默认 / 圆角渐变令牌 / 标题栏纯逻辑。"""
+
+    def test_font_scale_clean_and_mapping(self):
+        self.assertEqual(store.FONT_SCALES, (0.9, 1.0, 1.12, 1.25))
+        self.assertEqual(store._clean_settings({})["font_scale"], 1.0)
+        for scale in store.FONT_SCALES:
+            with self.subTest(scale=scale):
+                self.assertEqual(store._clean_settings(
+                    {"font_scale": scale})["font_scale"], float(scale))
+        for bad in (2.0, 0.8, "1.0", True, None):
+            with self.subTest(bad=bad):
+                self.assertEqual(store._clean_settings(
+                    {"font_scale": bad})["font_scale"], 1.0)
+        self.assertEqual(ui.window_scale_value(0.9), 0.9)
+        self.assertEqual(ui.window_scale_value(1.12), 1.12)
+        self.assertEqual(ui.window_scale_value(2.0), 1.0)
+        self.assertEqual(ui.window_scale_value(None), 1.0)
+        self.assertEqual(ui.window_scale_value("bad"), 1.0)
+        self.assertEqual(ui.window_scale_value("bad", 0.9), 0.9)
+
+    def test_scaled_font(self):
+        with mock.patch.object(ui, "_FONT_SCALE", 1.0):
+            self.assertEqual(ui._scaled_font(-11), (theme.UI_FONT, -11))
+            self.assertEqual(ui._scaled_font("bad"), (theme.UI_FONT, -11))
+        with mock.patch.object(ui, "_FONT_SCALE", 1.12):
+            self.assertEqual(ui._scaled_font(-11), (theme.UI_FONT, -12))
+            self.assertEqual(ui._scaled_font(10), (theme.UI_FONT, -11))
+        with mock.patch.object(ui, "_FONT_SCALE", 1.25):
+            self.assertEqual(ui._scaled_font(-11), (theme.UI_FONT, -14))
+
+    def test_new_theme_tokens(self):
+        self.assertEqual(store.NEW_DEFAULT_ACCENT, "#b98bff")
+        self.assertEqual(theme.UI_ACCENT, "#b98bff")
+        self.assertEqual(theme.ACCENT_PRESETS[0], ("淡紫", "#b98bff"))
+        purple_presets = [color for name, color in theme.ACCENT_PRESETS
+                          if "紫" in name]
+        self.assertGreaterEqual(len(purple_presets), 3)
+        self.assertEqual(theme.RADIUS_PANEL, 16)
+        self.assertEqual(theme.RADIUS_BUTTON, 13)
+        self.assertEqual(theme.RADIUS_INPUT, 10)
+        self.assertEqual((theme.SPACE_UI_XS, theme.SPACE_UI_SM,
+                          theme.SPACE_UI_MD, theme.SPACE_UI_LG,
+                          theme.SPACE_UI_XL), (10, 14, 18, 22, 26))
+        self.assertEqual(theme.TITLEBAR_H, 44)
+        for name in ("UI_GRADIENT_TOP", "UI_GRADIENT_SIDEBAR_TOP",
+                     "UI_GRADIENT_SIDEBAR_BOTTOM"):
+            with self.subTest(name=name):
+                self.assertRegex(getattr(theme, name), r"^#[0-9a-fA-F]{6}$")
+        self.assertNotEqual(theme.UI_GRADIENT_TOP, theme.UI_BG)
+
+    def test_titlebar_buttons_and_close_mapping(self):
+        normal = ui.titlebar_buttons(False)
+        self.assertEqual(normal, {"maximized": False, "minimize": "—",
+                                  "maximize": "□", "close": "✕"})
+        maximized = ui.titlebar_buttons(True)
+        self.assertTrue(maximized["maximized"])
+        self.assertEqual(maximized["maximize"], "❐")
+        self.assertEqual(maximized["close"], "✕")
+        # 关闭行为映射（设置清洗）+ 最小窗口尺寸
+        self.assertEqual(store._clean_settings(
+            {"close_action": "minimize"})["close_action"], "minimize")
+        self.assertEqual(store._clean_settings(
+            {"close_action": "EXIT"})["close_action"], "exit")
+        self.assertEqual(store._clean_settings(
+            {"close_action": "explode"})["close_action"], "exit")
+        self.assertEqual((theme.MIN_W, theme.MIN_H), (1000, 640))
+
+    def test_auto_download_update_settings(self):
+        defaults = store.DEFAULT_SETTINGS
+        self.assertFalse(defaults["auto_download_update"])
+        self.assertEqual(defaults["font_scale"], 1.0)
+        self.assertTrue(store._clean_settings(
+            {"auto_download_update": True})["auto_download_update"])
+        self.assertFalse(store._clean_settings(
+            {"auto_download_update": False})["auto_download_update"])
+        for bad in ("true", 1, None, "yes"):
+            with self.subTest(bad=bad):
+                self.assertFalse(store._clean_settings(
+                    {"auto_download_update": bad})["auto_download_update"])
+
+
+class V010SettingsRoundTripTests(TempDirTest):
+    """v0.10 settings 新增 font_scale / auto_download_update 往返与旧配置兼容。"""
+
+    def test_settings_roundtrip_new_fields(self):
+        apps = [store.make_builtin("maa", self.tmp)]
+        cfg = os.path.join(self.tmp, "config.json")
+        search = os.path.join(self.tmp, "search_root")
+        os.makedirs(search, exist_ok=True)
+        settings = {"accent": "#b98bff", "font_scale": 1.12,
+                    "auto_download_update": True}
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search):
+            self.assertTrue(store.save_state(apps, clash="", root=self.tmp,
+                                             settings=settings))
+            raw = json.load(open(cfg, "r", encoding="utf-8"))
+            self.assertEqual(raw["settings"]["font_scale"], 1.12)
+            self.assertTrue(raw["settings"]["auto_download_update"])
+            self.assertEqual(raw["settings"]["accent"], "#b98bff")
+            _apps, _clash, _root, meta = store.load_state_full()
+        self.assertEqual(meta["settings"]["font_scale"], 1.12)
+        self.assertTrue(meta["settings"]["auto_download_update"])
+        self.assertEqual(meta["settings"]["accent"], "#b98bff")
+        # 旧配置没有新增字段 -> 默认值
+        _write_json(cfg, {"version": 4, "root": self.tmp, "apps": {}})
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search):
+            _a, _c, _r, meta2 = store.load_state_full()
+        self.assertEqual(meta2["settings"]["font_scale"], 1.0)
+        self.assertFalse(meta2["settings"]["auto_download_update"])
+
+
+class V010AutoUpdateTests(unittest.TestCase):
+    """v0.10 自动更新纯逻辑：资产选择 / updater 脚本引号 / 门控 / 版本。"""
+
+    def test_select_update_asset(self):
+        payload = {"assets": [
+            {"name": "notes.txt", "url": "u0"},
+            {"name": "GameHub.exe", "url": "exe", "size": "456"},
+            {"name": "AllMyMaa-v0.10.0.zip", "url": "zip", "size": 789},
+            "not-a-dict",
+        ]}
+        selected = ui.select_update_asset(payload)
+        self.assertEqual(selected["kind"], "exe")
+        self.assertEqual(selected["name"], "GameHub.exe")
+        self.assertEqual(selected["size"], 456)
+        # 无 exe 时选 zip
+        zip_selected = ui.select_update_asset({"assets": [
+            {"name": "other.zip", "url": "z1"},
+            {"name": "AllMyMaa-v0.10.0.zip", "url": "z2"}]})
+        self.assertEqual(zip_selected["kind"], "zip")
+        self.assertEqual(zip_selected["name"], "AllMyMaa-v0.10.0.zip")
+        self.assertIsNone(ui.select_update_asset({}))
+        self.assertIsNone(ui.select_update_asset("bad"))
+        self.assertIsNone(ui.select_update_asset({"assets": [
+            {"name": "notes.txt", "url": "u"}]}))
+        self.assertIsNone(ui.select_update_asset({"assets": [
+            {"name": "no-url.exe"}]}))
+
+    def test_build_updater_script_quotes_paths(self):
+        target = r"C:\Program Files\All My Maa\O'Brien\AllMyMaa.exe"
+        new_exe = r"C:\Temp\new dir\AllMyMaa.exe"
+        script = ui.build_updater_script(4321, new_exe, target)
+        self.assertIn("Wait-Process -Id 4321 -Timeout 60", script)
+        self.assertIn("\r\n", script)
+        self.assertIn("-LiteralPath 'C:\\Program Files\\All My Maa\\"
+                      "O''Brien\\AllMyMaa.exe'", script)
+        self.assertIn(".bak", script)
+        self.assertIn(".new", script)
+        self.assertIn("Move-Item -LiteralPath", script)
+        self.assertIn("Start-Process -FilePath", script)
+        self.assertIn("'C:\\Temp\\new dir\\AllMyMaa.exe'", script)
+        # pid 非法 -> 0
+        self.assertIn("Wait-Process -Id 0 ", ui.build_updater_script(
+            None, new_exe, target))
+
+    def test_update_gates(self):
+        self.assertTrue(ui.can_auto_update(True, True))
+        self.assertFalse(ui.can_auto_update(False, True))
+        self.assertFalse(ui.can_auto_update(True, False))
+        self.assertTrue(ui.should_source_update(True, True))
+        self.assertFalse(ui.should_source_update(True, False))
+        self.assertFalse(ui.should_source_update(False, True))
+        self.assertTrue(ui.update_available("0.9.0", "v0.10.0"))
+        self.assertTrue(ui.update_available("v0.9.0", "0.10.0"))
+        self.assertFalse(ui.update_available("0.10.0", "v0.10.0"))
+        self.assertFalse(ui.update_available("0.10.1", "v0.10.0"))
+        self.assertFalse(ui.update_available("", "v0.10.0"))
+
+
 def main():
     suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)

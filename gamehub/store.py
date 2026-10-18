@@ -118,6 +118,8 @@ DEFAULT_DAILY_ORDER = ["maa", "nte", "wuwa", "maaend"]
 # v0.8 顶层 settings（config.json 可选字段）；加载时缺省补默认、非法值清洗
 DEFAULT_SETTINGS = {
     "accent": "#4fc3ff",
+    "font_scale": 1.0,
+    "auto_download_update": False,
     "check_update_on_start": True,
     "refresh_interval": 1.5,
     "close_action": "exit",
@@ -128,9 +130,12 @@ DEFAULT_SETTINGS = {
     "daily_close_after": True,
 }
 REFRESH_INTERVALS = (1.0, 1.5, 2.0)
+FONT_SCALES = (0.9, 1.0, 1.12, 1.25)
+# v0.10 无 accent 的新默认（保留旧 DEFAULT 供旧测试/渲染兼容；load 时 UI 侧启用）
+NEW_DEFAULT_ACCENT = "#b98bff"
 _ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-ACCENT_PRESETS = ("#4fc3ff", "#b98bff", "#5ee7c7", "#ffe066",
-                  "#ff8f7a", "#ff8fc7", "#9ae66e", "#8fb8ff")
+ACCENT_PRESETS = ("#b98bff", "#c4a7f5", "#a78bfa", "#5ee7c7",
+                  "#ffe066", "#ff8f7a", "#ff8fc7", "#8fb8ff")
 
 # ------------------------------------------------------------------ 通用小工具
 def version_key(text):
@@ -287,11 +292,18 @@ GAME_KEYWORDS = {
 GAME_EXE_HINTS = {
     "maa": ("mumunxmain.exe", "mumuplayer.exe", "mumunxlauncher.exe", "mumu.exe",
             "arknights.exe", "mumuplayer64.exe", "mumumanager.exe", "launcher.exe"),
-    "nte": ("ntelauncher.exe", "ntegame.exe", "nte.exe", "htgame.exe"),
+    # 异环：游戏本体 HTGame.exe 优先，NTELauncher.exe 只是启动器
+    "nte": ("htgame.exe", "ntegame.exe", "nte.exe", "ntelauncher.exe"),
     "wuwa": ("wuthering waves.exe", "launcher.exe", "client-win64-shipping.exe",
              "wutheringwaves.exe"),
     "maaend": ("endfield.exe", "launcher.exe", "endfield launcher.exe"),
 }
+
+# 异环游戏本体（v0.10）：从启动器所在安装根优先寻找该相对路径
+NTE_GAME_EXE = "HTGame.exe"
+NTE_LAUNCHER_EXE = "NTELauncher.exe"
+NTE_GAME_RELATIVE = ("Client", "WindowsNoEditor", "HT", "Binaries",
+                     "Win64", "HTGame.exe")
 
 # 厂商 / 启动器关键词：注册表里常只写「鹰角启动器」这类厂商启动器
 GAME_VENDOR_HINTS = ("hypergryph", "鹰角", "netease", "网易", "kuro", "库洛",
@@ -417,6 +429,8 @@ def _score_exe_path(path, depth, keywords, hints):
         score += 8 * name_hits + 10 * path_hits
     else:
         score = 20 + 14 * name_hits + 10 * path_hits
+    if low == NTE_GAME_EXE.lower():
+        score += 45          # 异环游戏本体优先于 NTELauncher.exe
     if "launcher" in low or "启动器" in low:
         score += 6
     score += (8, 5, 3)[depth] if depth < 3 else 0
@@ -630,6 +644,7 @@ def find_game_candidates(app=None, limit=12):
         keywords, hints = (), ()
     registry_words = tuple(keywords) + GAME_VENDOR_HINTS
     found, scanned = {}, set()
+    scanned_roots = []
 
     def merge(path, name, source, score):
         if not path or not os.path.isfile(path):
@@ -654,6 +669,7 @@ def find_game_candidates(app=None, limit=12):
         if norm in scanned:
             return
         scanned.add(norm)
+        scanned_roots.append(root)
         bonus = min(24, 12 * _kw_hits(hint or "", keywords))
         try:
             hits = _find_game_exes(root, keywords, hints, deadline)
@@ -695,10 +711,617 @@ def find_game_candidates(app=None, limit=12):
 
     result = sorted(found.values(), key=lambda item: (-item["score"],
                                                       item["path"].lower()))
+    # v0.10：异环必须优先游戏本体 HTGame.exe，而不是 NTELauncher.exe
+    try:
+        profile_key = _game_profile(app)[0]
+    except Exception:
+        profile_key = ""
+    if profile_key == "nte":
+        for root in scanned_roots:
+            known = os.path.join(root, *NTE_GAME_RELATIVE)
+            if os.path.isfile(known):
+                merge(known, _candidate_name(known, "异环游戏本体"),
+                      "异环游戏本体", 200)
+        result = sorted(found.values(), key=lambda item: (
+            -item["score"], item["path"].lower()))
+        for item in result:
+            if os.path.basename(item["path"]).lower() == NTE_GAME_EXE.lower():
+                item["score"] += 100
+        result.sort(key=lambda item: (-item["score"], item["path"].lower()))
     try:
         return result[:max(1, int(limit))]
     except (TypeError, ValueError):
         return result[:12]
+
+
+def _apply_resolved_game_exe(app, path):
+    """把解析到的游戏本体写回 app（game_exe + game_procs）。"""
+    norm = os.path.normpath(path)
+    app["game_exe"] = norm
+    try:
+        app["game_procs"] = proc_names_for_exe(norm)
+    except Exception:
+        pass
+    return norm
+
+
+def resolve_game_exe(app, deadline_seconds=1.9):
+    """解析「启动游戏」应使用的 exe；异环强制/优先 HTGame.exe。
+
+    - 已是 HTGame.exe 直接返回；
+    - 从 game_exe 安装根、脚本目录先找已知相对路径，再做 ≤4 层、限时 glob；
+    - 找到写回 app["game_exe"] 并返回；找不到保留原值（调用方提示）。
+    其它游戏直接返回现有 game_exe，不改变旧行为。
+    """
+    if not isinstance(app, dict):
+        return ""
+    current = str(app.get("game_exe") or "").strip()
+    if str(app.get("key") or "") != "nte":
+        return current
+    if current and os.path.isfile(current) \
+            and os.path.basename(current).lower() == NTE_GAME_EXE.lower():
+        return _apply_resolved_game_exe(app, current)
+
+    roots, seen = [], set()
+    bases = []
+    if current:
+        bases.append(os.path.dirname(current))
+    script_exe = str(app.get("script_exe") or "").strip()
+    if script_exe:
+        bases.append(os.path.dirname(script_exe))
+    for base in bases:
+        for candidate in (base, os.path.dirname(base)):
+            if not candidate:
+                continue
+            try:
+                norm = os.path.normpath(candidate)
+            except (TypeError, ValueError):
+                continue
+            if norm.lower() in seen or not os.path.isdir(norm):
+                continue
+            seen.add(norm.lower())
+            roots.append(norm)
+
+    # 1) 已知相对路径
+    for root in roots:
+        known = os.path.join(root, *NTE_GAME_RELATIVE)
+        if os.path.isfile(known):
+            return _apply_resolved_game_exe(app, known)
+
+    # 2) 受限深度 glob（≤4 层，限时 <2s，限制目录数量）
+    deadline = time.monotonic() + max(0.2, float(deadline_seconds))
+    scanned = 0
+    for root in roots:
+        stack = [(root, 0)]
+        while stack:
+            if time.monotonic() > deadline or scanned >= 1200:
+                break
+            folder, depth = stack.pop()
+            scanned += 1
+            try:
+                with os.scandir(folder) as iterator:
+                    entries = list(iterator)
+            except OSError:
+                continue
+            for entry in entries:
+                if time.monotonic() > deadline:
+                    break
+                try:
+                    low = entry.name.lower()
+                    if entry.is_file(follow_symlinks=False):
+                        if low == NTE_GAME_EXE.lower():
+                            return _apply_resolved_game_exe(app, entry.path)
+                    elif entry.is_dir(follow_symlinks=False):
+                        if depth < 4 and low not in GAME_SCAN_SKIP \
+                                and not low.startswith("."):
+                            stack.append((entry.path, depth + 1))
+                except OSError:
+                    continue
+    return current
+
+
+def _migrate_nte_game_exe(apps):
+    """仅纠正内置异环明确的 NTELauncher.exe 错误配置。"""
+    for app in apps or []:
+        if app.get("key") != "nte":
+            continue
+        current = str(app.get("game_exe") or "").strip()
+        if not current or os.path.basename(current).lower() != \
+                NTE_LAUNCHER_EXE.lower():
+            continue
+        resolved = resolve_game_exe(app)
+        if resolved and os.path.basename(resolved).lower() == \
+                NTE_GAME_EXE.lower():
+            return True
+    return False
+
+
+GAME_LAUNCH_TIMEOUTS = {
+    "wuwa": 120,
+    "nte": 180,
+    "maaend": 180,
+    "maa": 120,
+}
+
+
+def _read_json_file(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _json_first_value(data, key, max_depth=8):
+    """在嵌套 JSON 中找第一个 key 对应的标量/对象（tolerant，用于 MAA 配置）。"""
+    if max_depth < 0:
+        return None
+    if isinstance(data, dict):
+        if key in data:
+            return data.get(key)
+        for value in data.values():
+            found = _json_first_value(value, key, max_depth - 1)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _json_first_value(item, key, max_depth - 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _normalize_roots(app):
+    roots = []
+    for path in (app.get("game_exe"), app.get("script_exe")):
+        if not path:
+            continue
+        try:
+            root = os.path.dirname(os.path.abspath(path))
+        except (TypeError, ValueError):
+            continue
+        for _ in range(8):
+            if root and root not in roots:
+                roots.append(root)
+            parent = os.path.dirname(root)
+            if not parent or parent == root:
+                break
+            root = parent
+    return roots
+
+
+def _first_file(candidates):
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.normpath(path)
+    return ""
+
+
+def _find_relative(roots, relatives):
+    for root in roots:
+        for rel in relatives:
+            path = os.path.join(root, *rel.split("\\"))
+            if os.path.isfile(path):
+                return os.path.normpath(path)
+    return ""
+
+
+def _okww_devices_pc_exe(app):
+    """ok-ww devices.json 中的 pc_full_path（源码/配置发现路径）。"""
+    roots = _normalize_roots(app)
+    for root in roots:
+        for name in ("devices.json", os.path.join("configs", "devices.json")):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            data = _read_json_file(path)
+            target = _json_first_value(data, "pc_full_path")
+            if isinstance(target, str) and os.path.isfile(target) \
+                    and os.path.basename(target).lower().endswith(".exe"):
+                return os.path.normpath(target)
+    return ""
+
+
+def _hypergryph_installs():
+    """注册表里所有「鹰角启动器」InstallLocation（终末地/明日方舟各一个）。"""
+    installs = []
+    if not winreg:
+        return installs
+    try:
+        entries = _iter_registry_entries(("鹰角", "hypergryph"), time.monotonic() + 1.5)
+    except Exception:
+        entries = []
+    seen = set()
+    for entry in entries:
+        install = str(entry.get("install") or "").strip()
+        icon = str(entry.get("icon") or "").strip()
+        exe = icon or os.path.join(install, "Launcher.exe")
+        if not exe or not os.path.isfile(exe):
+            continue
+        norm = os.path.normpath(exe).lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        installs.append({"install": install or os.path.dirname(exe),
+                         "launcher": os.path.normpath(exe),
+                         "name": str(entry.get("name") or "")})
+    return installs
+
+
+def _maa_settings(app):
+    """读取 MAA gui.new.json/gui.json 的启动相关键（容错）。"""
+    roots = _normalize_roots(app)
+    data = None
+    for root in roots:
+        for name in ("gui.new.json", "gui.json",
+                     os.path.join("config", "gui.new.json"),
+                     os.path.join("config", "gui.json")):
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                data = _read_json_file(path)
+                if data is not None:
+                    break
+        if data is not None:
+            break
+    settings = {"pc_path": "", "pc_add": "", "pc_wait": 60,
+                "emu_path": "", "emu_add": "", "emu_wait": 60,
+                "adb_path": "", "adb_serial": "", "package": "",
+                "mode": "", "config": ""}
+
+    def truthy(value):
+        return value is True or (isinstance(value, str)
+                                 and value.strip().lower() in ("true", "pc"))
+
+    if isinstance(data, dict):
+        pc = _json_first_value(data, "PcClientPath")
+        emu = _json_first_value(data, "EmulatorPath")
+        pc_add = _json_first_value(data, "PcClientAddCommand")
+        emu_add = _json_first_value(data, "EmulatorAddCommand")
+        pc_wait = _json_first_value(data, "PcClientWaitSeconds")
+        emu_wait = _json_first_value(data, "EmulatorWaitSeconds")
+        adb_path = _json_first_value(data, "AdbPath")
+        adb_serial = _json_first_value(data, "AdbSerial") or \
+            _json_first_value(data, "Serial")
+        package = _json_first_value(data, "PackageName")
+        connect = _json_first_value(data, "ConnectConfig")
+        is_pc = _json_first_value(data, "IsPCConnectConfig")
+        settings.update({
+            "pc_path": str(pc or "").strip(),
+            "pc_add": str(pc_add or "").strip(),
+            "pc_wait": int(pc_wait) if isinstance(pc_wait, (int, float)) else 60,
+            "emu_path": str(emu or "").strip(),
+            "emu_add": str(emu_add or "").strip(),
+            "emu_wait": int(emu_wait) if isinstance(emu_wait, (int, float)) else 60,
+            "adb_path": str(adb_path or "").strip(),
+            "adb_serial": str(adb_serial or "").strip(),
+            "package": str(package or "").strip(),
+            "config": str(connect or "").strip(),
+            "mode": "pc" if (truthy(is_pc) or truthy(connect)) else "emulator",
+        })
+    return settings
+
+
+def _maa_launch_spec(app):
+    settings = _maa_settings(app)
+    roots = _normalize_roots(app)
+    pc_exe = settings["pc_path"]
+    if not (pc_exe and os.path.isfile(pc_exe)):
+        pc_exe = _find_relative(roots, (
+            r"games\Arknights Game\Arknights.exe",
+            r"Arknights Game\Arknights.exe",
+        ))
+    if not pc_exe:
+        for install in _hypergryph_installs():
+            candidate = os.path.join(install["install"],
+                                     "games", "Arknights Game",
+                                     "Arknights.exe")
+            if os.path.isfile(candidate):
+                pc_exe = os.path.normpath(candidate)
+                break
+    if not pc_exe:
+        current = str(app.get("game_exe") or "")
+        if os.path.isfile(current) and os.path.basename(current).lower() \
+                == "arknights.exe":
+            pc_exe = os.path.normpath(current)
+    launcher = _find_relative(roots, (r"Launcher.exe",))
+    if not launcher:
+        for install in _hypergryph_installs():
+            if "arknights" in (install["install"] + install["name"]).lower() \
+                    or "明日方舟" in install["name"]:
+                launcher = install["launcher"]
+                break
+    mode = settings["mode"]
+    has_emulator = bool(settings["emu_path"] or settings["adb_path"])
+    if mode == "pc" or (not settings["config"] and not has_emulator
+                        and pc_exe):
+        if pc_exe:
+            return {
+                "strategy": "maa_pc", "exe": pc_exe,
+                "args": ([settings["pc_add"]] if settings["pc_add"] else []),
+                "cwd": os.path.dirname(pc_exe), "elevated": False,
+                "wait": {"timeout_s": max(10, settings["pc_wait"]),
+                         "poll_ms": 500,
+                         "any_of": [
+                             {"type": "win", "class_re": "^UnityWndClass$",
+                              "title_re": "明日方舟"},
+                             {"type": "proc", "names": ["Arknights.exe"]},
+                         ]},
+                "fallback": ([{"type": "exe", "exe": launcher,
+                               "hint": "已打开鹰角启动器，请点击开始游戏"}]
+                             if launcher else []) +
+                            [{"type": "user_pick",
+                              "reason": "未找到 MAA PC 客户端 Arknights.exe"}],
+            }
+    emu = settings["emu_path"]
+    if not (emu and os.path.isfile(emu)):
+        emu = ""
+    adb = settings["adb_path"]
+    if not (adb and os.path.isfile(adb)):
+        adb = ""
+    serial = settings["adb_serial"]
+    package = settings["package"] or "com.hypergryph.arknights"
+    return {
+        "strategy": "maa_adb", "exe": emu,
+        "args": ([settings["emu_add"]] if settings["emu_add"] else []),
+        "cwd": os.path.dirname(emu) if emu else "",
+        "elevated": False,
+        "adb": {"path": adb, "serial": serial, "package": package},
+        "wait": {"timeout_s": max(10, settings["emu_wait"]),
+                 "poll_ms": 500,
+                 "any_of": [{"type": "adb_pkg", "package": package}]},
+        "fallback": ([{"type": "exe", "exe": launcher,
+                       "hint": "已打开鹰角启动器，请点击开始游戏"}]
+                     if launcher else []) +
+                    [{"type": "user_pick",
+                      "reason": "未找到模拟器/ADB，请从 MAA 或模拟器手动启动"}],
+    }
+
+
+def build_game_launch(app):
+    """v0.10 数据化游戏启动规格（策略/exe/args/cwd/wait/fallback）。"""
+    app = app or {}
+    key = str(app.get("key") or "")
+    roots = _normalize_roots(app)
+    current = str(app.get("game_exe") or "")
+    timeout = GAME_LAUNCH_TIMEOUTS.get(key, 120)
+    if key == "wuwa":
+        exe = ""
+        if current and os.path.basename(current).lower() \
+                == "wuthering waves.exe" and os.path.isfile(current):
+            exe = os.path.normpath(current)
+        if not exe:
+            exe = _okww_devices_pc_exe(app)
+        if not exe:
+            exe = _find_relative(roots, (
+                r"Wuthering Waves Game\Wuthering Waves.exe",
+                r"Wuthering Waves.exe",
+            ))
+        launcher = ""
+        if current and os.path.basename(current).lower() == "launcher.exe" \
+                and os.path.isfile(current):
+            launcher = os.path.normpath(current)
+        if not launcher:
+            launcher = _find_relative(roots, (r"launcher.exe",))
+        exe = exe or launcher
+        return {
+            "strategy": "exe", "exe": exe,
+            "args": ["-krqlv=hd"] if exe else [],
+            "cwd": os.path.dirname(exe) if exe else "",
+            "elevated": False,
+            "wait": {"timeout_s": timeout, "poll_ms": 500,
+                     "any_of": [
+                         {"type": "win", "class_re": "^UnrealWindow$",
+                          "title_re": r"^\s*鸣潮\s*$"},
+                         {"type": "proc", "names": ["Client-Win64-Shipping.exe"]},
+                     ]},
+            "fallback": ([{"type": "exe", "exe": launcher,
+                           "hint": "已打开游戏启动器，请点击开始游戏"}]
+                         if launcher else []) +
+                        [{"type": "user_pick",
+                          "reason": "未找到 Wuthering Waves.exe"}],
+        }
+    if key == "nte":
+        resolved = resolve_game_exe(app)
+        exe = ""
+        if resolved and os.path.basename(resolved).lower() == "htgame.exe":
+            exe = resolved
+        if not exe:
+            exe = _find_relative(roots, (
+                r"Client\WindowsNoEditor\HT\Binaries\Win64\HTGame.exe",))
+        launcher = current if current and os.path.isfile(current) \
+            and os.path.basename(current).lower() != "htgame.exe" else ""
+        if not launcher:
+            launcher = _find_relative(roots, (r"NTELauncher.exe",))
+        exe = exe or launcher
+        return {
+            "strategy": "exe", "exe": exe, "args": [],
+            "cwd": os.path.dirname(exe) if exe else "", "elevated": False,
+            "wait": {"timeout_s": timeout, "poll_ms": 500,
+                     "any_of": [
+                         {"type": "win", "class_re": "^UnrealWindow$",
+                          "title_re": r"^\s*(异环|NTE)\s*$"},
+                         {"type": "proc", "names": ["HTGame.exe"]},
+                     ]},
+            "fallback": ([{"type": "exe", "exe": launcher,
+                           "hint": "已打开异环启动器，请登录后点击开始游戏"}]
+                         if launcher else []) +
+                        [{"type": "user_pick",
+                          "reason": "未找到 HTGame.exe"}],
+        }
+    if key == "maaend":
+        endfield = _find_relative(roots, (
+            r"games\Endfield Game\Endfield.exe",
+            r"Endfield Game\Endfield.exe",
+            r"Endfield.exe",
+        ))
+        launcher = current if current and os.path.isfile(current) else ""
+        install_root = os.path.dirname(launcher) if launcher else ""
+        if not endfield:
+            for install in _hypergryph_installs():
+                candidate = os.path.join(install["install"], "games",
+                                         "Endfield Game", "Endfield.exe")
+                if os.path.isfile(candidate):
+                    endfield = os.path.normpath(candidate)
+                    launcher = launcher or install["launcher"]
+                    install_root = install["install"]
+                    break
+        return {
+            "strategy": "launcher", "exe": launcher or endfield,
+            "args": [], "cwd": install_root or
+            (os.path.dirname(launcher) if launcher else ""),
+            "elevated": False,
+            "wait": {"timeout_s": timeout, "poll_ms": 500,
+                     "any_of": [
+                         {"type": "win", "class_re": "^UnityWndClass$",
+                          "title_re": "Endfield"},
+                         {"type": "proc", "names": ["Endfield.exe"]},
+                     ]},
+            "hint": "请在鹰角启动器中点击「开始游戏」",
+            "fallback": ([{"type": "exe", "exe": endfield,
+                           "hint": "已尝试直接启动 Endfield（可能白屏），"
+                                   "如异常请改用启动器"}]
+                         if endfield else []) +
+                        [{"type": "user_pick",
+                          "reason": "未找到 Endfield 启动器/本体"}],
+        }
+    if key == "maa":
+        return _maa_launch_spec(app)
+    # 自定义游戏：保持现有 game_exe 直接启动
+    return {
+        "strategy": "exe", "exe": current, "args": [],
+        "cwd": os.path.dirname(current) if current else "",
+        "elevated": False,
+        "wait": {"timeout_s": timeout, "poll_ms": 500,
+                 "any_of": []},
+        "fallback": [{"type": "user_pick", "reason": "未找到游戏启动程序"}],
+    }
+
+
+class _NoProcess:
+    """ShellExecute/startfile 启动的进程没有 PID 句柄，用于统一等待接口。"""
+
+    pid = None
+
+    def poll(self):
+        return None
+
+
+def _spawn_game_process(exe, args=None, cwd=""):
+    if not exe:
+        return None, "未找到游戏启动程序"
+    args = [str(item) for item in (args or []) if str(item)]
+    try:
+        if str(exe).lower().endswith(".lnk"):
+            os.startfile(exe)
+            return _NoProcess(), ""
+        proc = subprocess.Popen(
+            [exe] + args, cwd=cwd or os.path.dirname(exe),
+            close_fds=True,
+            creationflags=0x00000008 | 0x00000200)
+        return proc, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def wait_game_launched(app, spec, *, state_fn=None, sleep_fn=None,
+                       clock_fn=None, process=None):
+    """复用 detector 轮询等待游戏窗口/进程；返回 (ok, reason)。"""
+    import time as _time
+    sleep_fn = sleep_fn or _time.sleep
+    clock_fn = clock_fn or _time.monotonic
+    wait = spec.get("wait") or {}
+    timeout = float(wait.get("timeout_s") or GAME_LAUNCH_TIMEOUTS.get(
+        app.get("key"), 120))
+    poll = max(0.05, float(wait.get("poll_ms") or 500) / 1000.0)
+    deadline = clock_fn() + timeout
+    if state_fn is None:
+        def state_fn():
+            from . import detector
+            probe = dict(app)
+            if spec.get("exe"):
+                probe["game_exe"] = spec["exe"]
+            try:
+                state = detector.detect_game_state(
+                    probe, adb_enabled=bool(spec.get("strategy") == "maa_adb"))
+                return bool(state.get("running"))
+            except Exception:
+                return False
+    import time as _time
+    start = clock_fn()
+    while clock_fn() < deadline:
+        if state_fn():
+            return True, ""
+        if process is not None:
+            try:
+                if process.poll() is not None:
+                    return False, "启动进程提前退出"
+            except Exception:
+                pass
+            if clock_fn() - start > 30:
+                process = None
+        sleep_fn(poll)
+    return False, f"等待游戏窗口超时（{int(timeout)}s）"
+
+
+def launch_game_with_wait(app, spec=None, *, spawn_fn=None, state_fn=None,
+                          sleep_fn=None, clock_fn=None):
+    """按 game_launch 启动→等待→失败回退；返回结果 dict。"""
+    spec = spec or build_game_launch(app)
+    if not spec or not spec.get("strategy"):
+        return {"ok": False, "reason": "无启动规格", "spec": spec}
+    spawn_fn = spawn_fn or _spawn_game_process
+    if spec["strategy"] == "maa_adb":
+        adb = spec.get("adb") or {}
+        adb_path = adb.get("path") or ""
+        serial = adb.get("serial") or ""
+        package = adb.get("package") or ""
+        if adb_path and os.path.isfile(adb_path) and package:
+            try:
+                args = [adb_path]
+                if serial:
+                    args += ["-s", serial]
+                args += ["shell", "am", "start", "-n",
+                         f"{package}/com.u8.sdk.U8UnityContext"]
+                subprocess.Popen(args, creationflags=0x08000000)
+            except Exception as exc:
+                return {"ok": False, "reason": f"ADB 启动失败：{exc}",
+                        "spec": spec}
+        emu = spec.get("exe") or ""
+        proc, error = (None, "")
+        if emu:
+            proc, error = spawn_fn(emu, spec.get("args"), spec.get("cwd"))
+        ok, reason = wait_game_launched(app, spec, state_fn=state_fn,
+                                        sleep_fn=sleep_fn,
+                                        clock_fn=clock_fn, process=proc)
+        if ok:
+            return {"ok": True, "spec": spec, "reason": ""}
+        fallback = spec.get("fallback") or []
+        fallback_spec = fallback[0] if fallback else None
+        if fallback_spec and fallback_spec.get("type") == "exe" \
+                and fallback_spec.get("exe"):
+            spawn_fn(fallback_spec["exe"], [], os.path.dirname(
+                fallback_spec["exe"]))
+        return {"ok": False, "spec": spec, "reason": reason,
+                "fallback": fallback_spec, "error": error}
+    proc, error = spawn_fn(spec.get("exe"), spec.get("args"),
+                           spec.get("cwd"))
+    if proc is None:
+        return {"ok": False, "spec": spec, "reason": error or "启动失败"}
+    ok, reason = wait_game_launched(app, spec, state_fn=state_fn,
+                                    sleep_fn=sleep_fn, clock_fn=clock_fn,
+                                    process=proc)
+    if ok:
+        return {"ok": True, "spec": spec, "reason": "", "pid": getattr(
+            proc, "pid", None)}
+    fallback = spec.get("fallback") or []
+    fallback_spec = fallback[0] if fallback else None
+    if fallback_spec and fallback_spec.get("type") == "exe" \
+            and fallback_spec.get("exe"):
+        spawn_fn(fallback_spec["exe"], [], os.path.dirname(
+            fallback_spec["exe"]))
+    return {"ok": False, "spec": spec, "reason": reason,
+            "fallback": fallback_spec, "pid": getattr(proc, "pid", None)}
+
 
 
 def _version_text(value):
@@ -1040,7 +1663,8 @@ def _clean_settings(value):
     if isinstance(accent, str) and _ACCENT_RE.match(accent.strip()):
         out["accent"] = accent.strip().lower()
     for field in ("check_update_on_start", "daily_show_preview",
-                  "adb_enabled", "daily_close_after"):
+                  "adb_enabled", "daily_close_after",
+                  "auto_download_update"):
         if isinstance(value.get(field), bool):
             out[field] = value[field]
     interval = value.get("refresh_interval")
@@ -1051,6 +1675,11 @@ def _clean_settings(value):
     action = str(value.get("close_action") or "").strip().lower()
     if action in ("exit", "minimize"):
         out["close_action"] = action
+    scale = value.get("font_scale")
+    if isinstance(scale, (int, float)) and not isinstance(scale, bool):
+        scale = float(scale)
+        if scale in [float(item) for item in FONT_SCALES]:
+            out["font_scale"] = scale
     clash = value.get("clash_exe")
     if isinstance(clash, str):
         out["clash_exe"] = clash.strip()
@@ -1078,7 +1707,11 @@ def load_state_full():
     if not root or not os.path.isdir(root):
         root = SEARCH_ROOT
     root = os.path.abspath(root)
-    settings = _clean_settings(data.get("settings"))
+    raw_settings = data.get("settings") \
+        if isinstance(data.get("settings"), dict) else {}
+    settings = _clean_settings(raw_settings)
+    explicit_accent = isinstance(raw_settings.get("accent"), str) \
+        and bool(_ACCENT_RE.match(raw_settings.get("accent").strip()))
 
     apps = []
     saved_apps = data.get("apps") if isinstance(data.get("apps"), dict) else {}
@@ -1223,7 +1856,14 @@ def load_state_full():
     builtin_keys = [app["key"] for app in apps if app.get("builtin")]
     meta = {"daily_order": _clean_daily_order(data.get("daily_order"),
                                               builtin_keys),
-            "settings": settings}
+            "settings": settings,
+            "settings_explicit_accent": explicit_accent}
+    # v0.10：内置异环若错误指向 NTELauncher.exe，加载时纠正并保存
+    if _migrate_nte_game_exe(apps):
+        try:
+            save_state(apps, clash, root, meta["daily_order"], settings)
+        except Exception:
+            pass
     return apps, clash, root, meta
 
 

@@ -100,10 +100,10 @@ body::before {
   z-index: -2;
   pointer-events: none;
   background:
-    radial-gradient(620px 440px at 10% -6%, rgba(79, 195, 255, 0.16), transparent 66%),
-    radial-gradient(560px 430px at 90% 0%, rgba(185, 139, 255, 0.14), transparent 66%),
-    radial-gradient(760px 520px at 50% 118%, rgba(94, 231, 199, 0.07), transparent 70%),
-    linear-gradient(180deg, #0a0d13 0%, #0b1018 58%, #0a0d13 100%);
+    radial-gradient(620px 440px at 10% -6%, rgba(185, 139, 255, 0.20), transparent 66%),
+    radial-gradient(560px 430px at 90% 0%, rgba(143, 184, 255, 0.12), transparent 66%),
+    radial-gradient(760px 520px at 50% 118%, rgba(94, 231, 199, 0.06), transparent 70%),
+    linear-gradient(180deg, #0b0f16 0%, #101322 58%, #0b0f16 100%);
 }
 
 body::after {
@@ -244,14 +244,14 @@ section[id] {
 }
 
 .btn-primary {
-  color: #06121d;
-  background: linear-gradient(135deg, #4fc3ff 0%, #8f86ff 100%);
-  box-shadow: 0 12px 26px rgba(79, 195, 255, 0.26);
+  color: #1a1026;
+  background: linear-gradient(135deg, #c4a7f5 0%, #b98bff 60%, #a78bfa 100%);
+  box-shadow: 0 12px 26px rgba(185, 139, 255, 0.30);
 }
 
 .btn-primary:hover {
   transform: translateY(-2px);
-  box-shadow: 0 16px 34px rgba(79, 195, 255, 0.36);
+  box-shadow: 0 16px 34px rgba(185, 139, 255, 0.42);
   filter: brightness(1.06);
 }
 
@@ -263,8 +263,8 @@ section[id] {
 
 .btn-ghost:hover {
   transform: translateY(-2px);
-  border-color: rgba(79, 195, 255, 0.45);
-  background: rgba(79, 195, 255, 0.08);
+  border-color: rgba(185, 139, 255, 0.45);
+  background: rgba(185, 139, 255, 0.08);
 }
 
 .btn-block {
@@ -298,10 +298,12 @@ section[id] {
 }
 
 .brand-logo {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  box-shadow: 0 0 0 1px rgba(79, 195, 255, 0.24), 0 6px 18px rgba(0, 0, 0, 0.45);
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
 }
 
 .brand-name {
@@ -312,9 +314,9 @@ section[id] {
 .brand-ver {
   padding: 1px 7px;
   border-radius: 999px;
-  border: 1px solid rgba(79, 195, 255, 0.28);
-  background: rgba(79, 195, 255, 0.1);
-  color: var(--blue);
+  border: 1px solid rgba(185, 139, 255, 0.32);
+  background: rgba(185, 139, 255, 0.12);
+  color: #d9c8ff;
   font-size: 11px;
   font-weight: 600;
 }
@@ -436,7 +438,7 @@ section[id] {
 }
 
 .hero h1 .grad {
-  background: linear-gradient(120deg, #4fc3ff 8%, #b98bff 62%, #5ee7c7 108%);
+  background: linear-gradient(120deg, #e4d9ff 4%, #c4a7f5 42%, #b98bff 72%, #8fb8ff 108%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -487,13 +489,13 @@ section[id] {
   border-radius: 19px;
   background: linear-gradient(
     140deg,
-    rgba(79, 195, 255, 0.55),
-    rgba(185, 139, 255, 0.35) 45%,
-    rgba(94, 231, 199, 0.25)
+    rgba(185, 139, 255, 0.55),
+    rgba(196, 167, 245, 0.32) 45%,
+    rgba(94, 231, 199, 0.22)
   );
   box-shadow:
     0 40px 90px rgba(0, 0, 0, 0.6),
-    0 0 64px rgba(79, 195, 255, 0.12);
+    0 0 64px rgba(185, 139, 255, 0.16);
 }
 
 .shot-frame img {
@@ -731,8 +733,8 @@ section[id] {
 .feature-tag {
   padding: 2px 9px;
   border-radius: 999px;
-  background: linear-gradient(135deg, #4fc3ff, #5ee7c7);
-  color: #06121d;
+  background: linear-gradient(135deg, #c4a7f5, #b98bff);
+  color: #1a1026;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -937,6 +939,18 @@ section[id] {
 
 .sw-mist {
   --c: #8fb8ff;
+}
+
+.sw-lavender {
+  --c: #b98bff;
+}
+
+.sw-lilac {
+  --c: #c4a7f5;
+}
+
+.sw-violet {
+  --c: #a78bfa;
 }
 
 .sw-note {

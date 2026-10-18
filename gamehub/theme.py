@@ -18,7 +18,7 @@ UI_FONT_SIZES = {
     "body": 11,       # 正文
     "aux": 10,        # 辅助信息（最小 10）
 }
-# 圆角与间距（8/12/16/20 体系）
+# 圆角与间距（8/12/16/20 体系；旧常量保留给回归测试/渲染）
 RADIUS = 12
 RADIUS_SM = 8
 SPACE_XS = 8
@@ -26,6 +26,20 @@ SPACE_SM = 12
 SPACE_MD = 16
 SPACE_LG = 20
 SPACE_XL = 24
+# v0.10 更圆润令牌（UI 实际使用；旧常量保持兼容）
+RADIUS_PANEL = 16
+RADIUS_BUTTON = 13
+RADIUS_INPUT = 10
+SPACE_UI_XS = 10
+SPACE_UI_SM = 14
+SPACE_UI_MD = 18
+SPACE_UI_LG = 22
+SPACE_UI_XL = 26
+TITLEBAR_H = 44
+# 渐变（深色底、轻微）
+UI_GRADIENT_TOP = "#1a1426"
+UI_GRADIENT_SIDEBAR_TOP = "#171226"
+UI_GRADIENT_SIDEBAR_BOTTOM = "#0f1520"
 # 色板：深色 surface 分层 + 柔和描边
 UI_BG = "#0b0f16"
 UI_SIDEBAR = "#0f1520"
@@ -37,8 +51,8 @@ UI_BORDER_SOFT = "#1d2735"
 UI_TEXT = "#e9eef7"
 UI_TEXT_2 = "#a7b4c8"
 UI_TEXT_3 = "#7d8ba1"
-UI_ACCENT = "#4fc3ff"
-UI_ACCENT_SOFT = "#1f3a4f"
+UI_ACCENT = "#b98bff"
+UI_ACCENT_SOFT = "#2b2340"
 UI_SUCCESS = "#4ade80"
 UI_WARNING = "#ffce6b"
 UI_DANGER = "#ff7f7f"
@@ -92,15 +106,15 @@ TXT = (234, 240, 248)
 TXT2 = (154, 168, 188)
 TXT3 = (104, 120, 142)
 
-# 预设主题色
+# 预设主题色（v0.10：淡紫优先）
 ACCENT_PRESETS = [
-    ("蔚蓝", "#4fc3ff"),
-    ("紫罗兰", "#b98bff"),
+    ("淡紫", "#b98bff"),
+    ("丁香紫", "#c4a7f5"),
+    ("紫罗兰", "#a78bfa"),
     ("青碧", "#5ee7c7"),
     ("明黄", "#ffe066"),
     ("橙红", "#ff8f7a"),
     ("玫红", "#ff8fc7"),
-    ("薄荷", "#9ae66e"),
     ("雾蓝", "#8fb8ff"),
 ]
 
