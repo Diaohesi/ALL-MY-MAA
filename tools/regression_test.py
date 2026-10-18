@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -24,7 +25,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gamehub import render, store, theme  # noqa: E402
+from gamehub import detector, render, store, theme  # noqa: E402
 
 ASSETS = os.path.join(REPO_ROOT, "assets")
 
@@ -206,7 +207,7 @@ class ConfigStateTests(TempDirTest):
             self.assertTrue(os.path.isfile(self.cfg), "save_state 未写出配置文件")
 
             raw = json.load(open(self.cfg, "r", encoding="utf-8"))
-            self.assertEqual(raw.get("version"), 3)
+            self.assertEqual(raw.get("version"), 4, "v0.6 起 config 版本为 4")
             self.assertEqual(len(raw.get("custom_apps") or []), 1)
             saved = raw["custom_apps"][0]
             self.assertFalse(os.path.isabs(saved["script_exe"]),
@@ -306,6 +307,131 @@ class ConfigStateTests(TempDirTest):
                                   root=self.user_root)
         self.assertIs(ok, False, "写失败时 save_state 应返回 False")
         self.assertFalse(os.path.exists(bad_cfg))
+
+    # ---------------------------------------------------------- config v4
+    def _detect_sample(self):
+        return {
+            "any_of": [
+                {"type": "win", "class_re": "^UnrealWindow$", "title_re": "异环",
+                 "title_optional": True, "min_client_size": [200, 120]},
+                {"type": "proc", "names": ["HTGame.exe"],
+                 "path_re": "HTGame\\.exe$"},
+            ],
+            "proc_class_check": [{"name": "HTGame.exe",
+                                 "win_class_re": "UnrealWindow"}],
+            "launcher": {"any_of": [
+                {"type": "proc", "names": ["NTELauncher.exe"]}]},
+            "cloud": {"any_of": [
+                {"type": "win", "class_re": "^Qt.*$", "title_re": "云"}]},
+        }
+
+    def test_v4_custom_detect_roundtrip(self):
+        app = self._custom_app()
+        app["detect"] = self._detect_sample()
+        app["detect_custom"] = True
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            self.assertTrue(store.save_state([app], clash="", root=self.user_root))
+            raw = json.load(open(self.cfg, "r", encoding="utf-8"))
+            self.assertEqual(raw.get("version"), 4)
+            saved = raw["custom_apps"][0]
+            self.assertTrue(saved.get("detect_custom"))
+            self.assertIn("detect", saved)
+            apps, _clash, _root = store.load_state()
+
+        custom = [a for a in apps if not a.get("builtin")][0]
+        self.assertTrue(custom.get("detect_custom"))
+        self.assertEqual(custom.get("detect"), store._clean_detect(app["detect"]))
+        self.assertEqual(detector.read_game_rules(custom)["source"], "user")
+
+    def test_v3_migration_only_for_legacy_procs(self):
+        # QA-10 修复：只迁移「空值 / 全部是旧启动器误配」的内置 game_procs
+        data = {
+            "version": 3, "root": self.user_root,
+            "apps": {
+                "nte": {"game_procs": ["NTELAUNCHER.EXE", "LAUNCHER.EXE"]},
+                "maa": {"game_procs": ["LAUNCHER.EXE"]},
+                "wuwa": {"game_procs": ["MUMUPLAYER.EXE"]},
+            },
+            "custom_apps": [{
+                "key": "custom_1", "game": "G", "script": "S",
+                "script_exe": self.script_exe, "script_procs": [],
+                "game_procs": ["MYGAME.EXE"], "game_exe": "",
+                "accent": "#4fc3ff",
+            }],
+        }
+        self.dump_json(self.cfg, data)
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            apps, _clash, _root = store.load_state()
+        by_key = {a["key"]: a for a in apps}
+        # 旧启动器误配 → 迁移为游戏本体进程
+        self.assertEqual(by_key["nte"]["game_procs"], ["HTGAME.EXE"])
+        self.assertEqual(by_key["maa"]["game_procs"], ["ARKNIGHTS.EXE"])
+        # 用户自定义的非启动器进程名（如模拟器）必须保留（QA-10 修复验证）
+        self.assertEqual(by_key["wuwa"]["game_procs"], ["MUMUPLAYER.EXE"])
+        # 自定义卡片不受迁移影响；内置卡片不注入 detect（仍走自动规则）
+        self.assertEqual(by_key["custom_1"]["game_procs"], ["MYGAME.EXE"])
+        self.assertFalse(by_key["maa"].get("detect"))
+
+    def test_v3_custom_procs_preserved_and_empty_filled(self):
+        # QA-10：多进程自定义保留；空/缺失才填默认游戏本体进程
+        data = {
+            "version": 3, "root": self.user_root,
+            "apps": {
+                "maa": {"game_procs": ["MUMUPLAYER.EXE", "EMULATOR.EXE"]},
+                "nte": {"game_procs": []},
+                "wuwa": {},
+            },
+        }
+        self.dump_json(self.cfg, data)
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            apps, _clash, _root = store.load_state()
+        by_key = {a["key"]: a for a in apps}
+        self.assertEqual(by_key["maa"]["game_procs"],
+                         ["MUMUPLAYER.EXE", "EMULATOR.EXE"])
+        self.assertEqual(by_key["nte"]["game_procs"], ["HTGAME.EXE"])
+        self.assertEqual(by_key["wuwa"]["game_procs"],
+                         ["CLIENT-WIN64-SHIPPING.EXE"])
+
+    def test_v3_mixed_legacy_and_custom_procs_kept(self):
+        # 记录迁移语义：只有「全部为旧启动器」才迁移；混合列表整体保留
+        self.dump_json(self.cfg, {
+            "version": 3, "root": self.user_root,
+            "apps": {"maa": {"game_procs": ["LAUNCHER.EXE",
+                                            "MUMUPLAYER.EXE"]}}})
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            apps, _clash, _root = store.load_state()
+        maa = next(a for a in apps if a["key"] == "maa")
+        self.assertEqual(maa["game_procs"],
+                         ["LAUNCHER.EXE", "MUMUPLAYER.EXE"])
+
+    def test_builtin_custom_detect_survives_migration(self):
+        maa = store.make_builtin("maa", self.user_root)
+        maa["detect"] = {"any_of": [
+            {"type": "proc", "names": ["CUSTOM.EXE"]}]}
+        maa["detect_custom"] = True
+        maa["game_procs"] = ["CUSTOM.EXE"]
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            self.assertTrue(store.save_state([maa], clash="", root=self.user_root))
+            apps, _clash, _root = store.load_state()
+        got = next(a for a in apps if a["key"] == "maa")
+        self.assertTrue(got.get("detect_custom"))
+        self.assertEqual(got["game_procs"], ["CUSTOM.EXE"])
+        self.assertEqual(got["detect"]["any_of"][0]["names"], ["CUSTOM.EXE"])
+
+    def test_builtin_without_detect_is_migrated(self):
+        maa = store.make_builtin("maa", self.user_root)
+        maa["game_procs"] = ["LAUNCHER.EXE"]
+        cfg_patch, root_patch = self._ctx()
+        with cfg_patch, root_patch:
+            store.save_state([maa], clash="", root=self.user_root)
+            apps, _clash, _root = store.load_state()
+        got = next(a for a in apps if a["key"] == "maa")
+        self.assertEqual(got["game_procs"], ["ARKNIGHTS.EXE"])
 
 
 # ---------------------------------------------------------------- exe 扫描
@@ -678,6 +804,680 @@ class GameCandidatesTests(TempDirTest):
             all_hits = self._call({"key": "maa"}, limit=9)
         self.assertEqual(len(one), 1)
         self.assertEqual(len(all_hits), 3)
+
+
+# ---------------------------------------------------------------- v0.6 检测规则
+def _win(class_name="", title="", width=800, height=600, pid=1,
+         iconic=False, visible=True, hwnd=1):
+    """构造 snapshot_windows() 风格的窗口字典，供纯函数匹配测试。"""
+    return {"hwnd": hwnd, "class_name": class_name, "title": title,
+            "width": width, "height": height, "pid": pid,
+            "iconic": iconic, "visible": visible}
+
+
+def _clear_detector_caches():
+    detector.reset_cache()
+    detector._AUTO_RULES_CACHE.clear()
+
+
+class DetectRuleCleanTests(unittest.TestCase):
+    """store._clean_detect*：config v4 检测规则 schema 解析/清洗。"""
+
+    def test_win_rule_full_schema(self):
+        cleaned = store._clean_detect_rule({
+            "type": "window", "class_re": " ^UnrealWindow$ ",
+            "title_re": " 异环 ", "title_optional": True, "match": "any",
+            "require_visible": True, "min_client_size": [200.0, 120.0],
+            "proc_names": "HTGame.exe, other.exe",
+            "proc_path_re": r"HTGame\.exe$", "junk": 1,
+        })
+        self.assertEqual(cleaned, {
+            "type": "win", "class_re": "^UnrealWindow$", "title_re": "异环",
+            "proc_path_re": r"HTGame\.exe$", "title_optional": True,
+            "match": "any", "require_visible": True,
+            "min_client_size": [200, 120],
+            "proc_names": ["HTGame.exe", "other.exe"],
+        })
+
+    def test_type_aliases_and_invalid_rules(self):
+        self.assertEqual(
+            store._clean_detect_rule({"type": "window", "class_re": "X"})["type"],
+            "win")
+        self.assertEqual(
+            store._clean_detect_rule({"type": "process",
+                                      "names": ["A.exe"]}), 
+            {"type": "proc", "names": ["A.exe"]})
+        for bad in (None, "win", 3, [], {"type": "bogus"}, {"type": "win"},
+                    {"type": "proc"}, {"type": "adb"}, {}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(store._clean_detect_rule(bad))
+
+    def test_text_helpers(self):
+        # _detect_texts 为历史兼容 helper（仍按空白拆分，供旧调用/测试）
+        self.assertEqual(store._detect_texts("a.exe, b.exe；c.exe d.exe"),
+                         ["a.exe", "b.exe", "c.exe", "d.exe"])
+        self.assertEqual(store._detect_texts([" a ", "", None, 3]), ["a"])
+        self.assertEqual(store._detect_texts(None), [])
+        self.assertEqual(store._detect_texts({"x": 1}), [])
+        self.assertEqual(store._detect_text(None), "")
+        self.assertEqual(store._detect_text("  x  "), "x")
+        # _detect_names 用于进程名/包名：只按逗号/分号/换行拆分
+        self.assertEqual(store._detect_names("A.exe, B B.exe；C.exe"),
+                         ["A.exe", "B B.exe", "C.exe"])
+        self.assertEqual(store._detect_names([" A ", 3, None]), ["A"])
+
+    def test_proc_name_with_space_not_split(self):
+        # QA-12 修复：字符串进程名不再按空白拆成两个
+        cleaned = store._clean_detect_rule({
+            "type": "proc", "names": "Wuthering Waves.exe"})
+        self.assertEqual(cleaned["names"], ["Wuthering Waves.exe"])
+        self.assertEqual(store._clean_detect_rule({
+            "type": "proc", "names": "A.exe, Wuthering Waves.exe"})["names"],
+            ["A.exe", "Wuthering Waves.exe"])
+        win = store._clean_detect_rule({
+            "type": "win", "class_re": "X",
+            "proc_names": "Client-Win64-Shipping.exe, Wuthering Waves.exe"})
+        self.assertEqual(win["proc_names"],
+                         ["Client-Win64-Shipping.exe", "Wuthering Waves.exe"])
+        adb = store._clean_detect_rule({
+            "type": "adb", "pkg": "com.a.b, com.c.d"})
+        self.assertEqual(adb["pkg"], ["com.a.b", "com.c.d"])
+
+    def test_proc_class_check_dict_and_list(self):
+        group = store._clean_detect_group({
+            "proc_class_check": {"name": "HTGame.exe",
+                                 "win_class_re": "UnrealWindow",
+                                 "path_re": "x"}})
+        self.assertEqual(group["proc_class_check"][0]["name"], "HTGame.exe")
+        self.assertEqual(group["proc_class_check"][0]["path_re"], "x")
+        group2 = store._clean_detect_group({
+            "proc_class_check": [{"name": "A.exe", "win_class_re": "C"},
+                                 {"name": "", "win_class_re": "C"},
+                                 "junk"]})
+        self.assertEqual(len(group2["proc_class_check"]), 1)
+        self.assertIsNone(store._clean_detect_group({}))
+
+    def test_full_detect_groups_and_invalid(self):
+        cleaned = store._clean_detect({
+            "any_of": [{"type": "win", "class_re": "X"},
+                       {"type": "bogus"}],
+            "launcher": {"any_of": [{"type": "proc",
+                                     "names": ["L.exe"]}]},
+            "cloud": {"any_of": [{"type": "win", "title_re": "云"}]},
+        })
+        self.assertEqual(len(cleaned["any_of"]), 1)
+        self.assertIn("launcher", cleaned)
+        self.assertIn("cloud", cleaned)
+        self.assertNotIn("source", cleaned)
+        self.assertIsNone(store._clean_detect({}))
+        self.assertIsNone(store._clean_detect(None))
+        self.assertIsNone(store._clean_detect(
+            {"any_of": [{"type": "bogus"}]}))
+
+    def test_min_size_and_flag_edges(self):
+        rule = store._clean_detect_rule({
+            "type": "win", "class_re": "X", "min_client_size": [1],
+            "match": "ANY", "title_optional": False, "require_visible": False})
+        self.assertNotIn("min_client_size", rule)
+        self.assertNotIn("match", rule)          # 只接受小写 any/all
+        self.assertNotIn("title_optional", rule)
+        self.assertNotIn("require_visible", rule)
+        rule2 = store._clean_detect_rule({
+            "type": "win", "class_re": "X",
+            "min_client_size": [200.0, 120.0]})
+        self.assertEqual(rule2["min_client_size"], [200, 120])
+
+
+class DetectorInterfaceRulesTests(TempDirTest):
+    """detector 自动规则：interface.json 解析 / 内置表回退 / 名称反查。"""
+
+    def setUp(self):
+        super().setUp()
+        _clear_detector_caches()
+        self.addCleanup(_clear_detector_caches)
+
+    def _script_dir(self, exe_name="MaaNTE.exe", interface=None,
+                    folder="MaaNTE"):
+        script_dir = os.path.join(self.tmp, folder)
+        os.makedirs(script_dir, exist_ok=True)
+        exe = os.path.join(script_dir, exe_name)
+        with open(exe, "wb") as fh:
+            fh.write(b"stub")
+        if interface is not None:
+            self.dump_json(os.path.join(script_dir, "interface.json"),
+                           interface)
+        return script_dir, exe
+
+    def test_extract_win32_controllers_and_cloud(self):
+        interface = {"controller": [
+            {"type": "win32", "name": "PC",
+             "win32": {"class_regex": "UnrealWindow",
+                       "window_regex": "^异环$"}},
+            {"type": "win32", "name": "PC-2",
+             "win32": {"class_regex": "^Qt.*$", "window_regex": "^异环$"}},
+            {"type": "win32", "name": "PC-dup",
+             "win32": {"class_regex": "UnrealWindow",
+                       "window_regex": "^异环$"}},
+            {"type": "win32", "name": "云·异环",
+             "win32": {"class_regex": "^Qt.*$",
+                       "window_regex": r"^\s*云.*?异环\s*$"}},
+            {"type": "adb", "name": "Android",
+             "adb": {"package_name": "com.x"}},
+        ]}
+        script_dir, _exe = self._script_dir(interface=interface)
+        rules = detector._rules_from_interface("nte", script_dir)
+        win_rules = [rule for rule in rules["any_of"]
+                     if detector._rule_kind(rule) == "window"]
+        self.assertEqual([rule["class_re"] for rule in win_rules],
+                         ["UnrealWindow", "^Qt.*$"], "去重且按 controller 顺序")
+        for rule in win_rules:
+            self.assertEqual(rule["min_client_size"], [200, 120])
+            self.assertEqual(rule["type"], "win")
+        # 内置表的非窗口规则（进程）保留在 any_of
+        self.assertTrue(any(detector._rule_kind(rule) == "proc"
+                            and "HTGame.exe" in (rule.get("names") or [])
+                            for rule in rules["any_of"]))
+        self.assertEqual(rules["launcher"],
+                         detector.BUILTIN_RULES["nte"]["launcher"])
+        cloud = rules["cloud"]["any_of"]
+        self.assertEqual(len(cloud), 1)
+        self.assertEqual(cloud[0]["class_re"], "^Qt.*$")
+
+    def test_missing_invalid_or_no_win32(self):
+        self.assertIsNone(detector._rules_from_interface("nte", ""))
+        self.assertIsNone(detector._rules_from_interface(
+            "nte", os.path.join(self.tmp, "not_here")))
+        bad_dir, _exe = self._script_dir(folder="bad")
+        with open(os.path.join(bad_dir, "interface.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{broken")
+        self.assertIsNone(detector._rules_from_interface("nte", bad_dir))
+        adb_dir, _exe = self._script_dir(
+            folder="adbonly", interface={"controller": [
+                {"type": "adb", "adb": {"package_name": "com.x"}}]})
+        self.assertIsNone(detector._rules_from_interface("nte", adb_dir))
+        empty_dir, _exe = self._script_dir(
+            folder="emptywin", interface={"controller": [
+                {"type": "win32", "win32": {}}]})
+        self.assertIsNone(detector._rules_from_interface("nte", empty_dir))
+
+    def test_read_auto_rules_builtin_fallback_and_deepcopy(self):
+        script_dir, exe = self._script_dir(interface=None)
+        rules = detector.read_auto_rules({"key": "nte", "script_exe": exe})
+        self.assertEqual(rules, detector.BUILTIN_RULES["nte"])
+        rules["any_of"].append({"type": "proc", "names": ["INJECTED.EXE"]})
+        again = detector.read_auto_rules({"key": "nte", "script_exe": exe})
+        self.assertNotIn(["INJECTED.EXE"],
+                         [rule.get("names") for rule in again["any_of"]])
+        # 内置表本身未被污染
+        self.assertNotIn(["INJECTED.EXE"],
+                         [rule.get("names") for rule in
+                          detector.BUILTIN_RULES["nte"]["any_of"]])
+
+    def test_read_auto_rules_infers_by_game_name(self):
+        cases = {"鸣潮": "wuwa", "异环": "nte", "明日方舟": "maa",
+                 "明日方舟终末地": "maaend",
+                 "明日方舟：终末地": "maaend"}   # QA-11 修复：最长/精确匹配
+        for game, expected in cases.items():
+            with self.subTest(game=game):
+                rules = detector.read_auto_rules({"game": game})
+                self.assertEqual(rules, detector.BUILTIN_RULES[expected])
+
+    def test_game_profile_longest_name_match(self):
+        # QA-11 修复：更长的「明日方舟终末地」优先于较短的「明日方舟」
+        self.assertEqual(
+            store._game_profile({"game": "明日方舟终末地"})[0], "maaend")
+        self.assertEqual(
+            store._game_profile({"game": "明日方舟：终末地"})[0], "maaend")
+        self.assertEqual(store._game_profile({"game": "明日方舟"})[0], "maa")
+        self.assertEqual(store._game_profile({"game": "异环"})[0], "nte")
+
+    def test_auto_rules_cache_reuses_and_invalidates_on_mtime(self):
+        script_dir, exe = self._script_dir(interface={"controller": [
+            {"type": "win32", "name": "PC",
+             "win32": {"class_regex": "Before", "window_regex": "X"}}]})
+        app = {"key": "nte", "script_exe": exe}
+        first = detector.read_auto_rules(app)
+        second = detector.read_auto_rules(app)
+        self.assertEqual(first, second)
+        self.assertIsNot(first, second)          # 返回深拷贝，调用方可放心改
+        self.dump_json(os.path.join(script_dir, "interface.json"),
+                       {"controller": [{"type": "win32", "name": "PC",
+                                        "win32": {"class_regex": "After",
+                                                  "window_regex": "Y"}}]})
+        stamp = time.time() + 10
+        os.utime(os.path.join(script_dir, "interface.json"), (stamp, stamp))
+        third = detector.read_auto_rules(app)
+        classes = [rule.get("class_re") for rule in third["any_of"]
+                   if detector._rule_kind(rule) == "window"]
+        self.assertIn("After", classes)
+        self.assertNotIn("Before", classes)
+
+
+class BuiltinRuleTableTests(unittest.TestCase):
+    """内置规则表结构校验（四款内置游戏）。"""
+
+    KEYS = ("maa", "nte", "wuwa", "maaend")
+
+    def _assert_rule(self, rule, where):
+        kind = detector._rule_kind(rule)
+        self.assertIn(kind, ("window", "proc", "adb"), f"{where}: {rule}")
+        if kind == "window":
+            self.assertTrue(rule.get("class_re") or rule.get("title_re"),
+                            f"{where}: 窗口规则缺少类/标题正则")
+        elif kind == "proc":
+            self.assertTrue(rule.get("names"), f"{where}: 进程规则缺少进程名")
+        else:
+            self.assertTrue(rule.get("pkg"), f"{where}: ADB 规则缺少包名")
+
+    def _assert_group(self, group, where):
+        self.assertIsInstance(group, dict, where)
+        self.assertTrue(group.get("any_of"), where)
+        for rule in group["any_of"]:
+            self._assert_rule(rule, where)
+
+    def test_builtin_rules_schema(self):
+        for key in self.KEYS:
+            with self.subTest(key=key):
+                rules = detector.BUILTIN_RULES[key]
+                self.assertTrue(rules.get("any_of"), f"{key}: any_of 为空")
+                for rule in rules["any_of"]:
+                    self._assert_rule(rule, key)
+                for field in ("launcher", "cloud"):
+                    if rules.get(field):
+                        self._assert_group(rules[field], f"{key}.{field}")
+
+    def test_builtin_expected_targets(self):
+        nte_launcher = detector.BUILTIN_RULES["nte"]["launcher"]["any_of"]
+        self.assertTrue(any(rule.get("names") == ["NTELauncher.exe"]
+                            for rule in nte_launcher))
+        wuwa_win = next(rule for rule in detector.BUILTIN_RULES["wuwa"]["any_of"]
+                        if detector._rule_kind(rule) == "window")
+        self.assertTrue(wuwa_win.get("title_optional"))
+        self.assertIn("Client-Win64-Shipping.exe",
+                      wuwa_win.get("proc_names") or [])
+        maa_adb = next(rule for rule in detector.BUILTIN_RULES["maa"]["any_of"]
+                       if detector._rule_kind(rule) == "adb")
+        self.assertIn("com.hypergryph.arknights", maa_adb["pkg"])
+        maaend_proc = next(rule for rule in detector.BUILTIN_RULES["maaend"]["any_of"]
+                           if detector._rule_kind(rule) == "proc")
+        self.assertIn("Endfield.exe", maaend_proc["names"])
+
+
+class WindowMatchTests(unittest.TestCase):
+    """detector 窗口规则纯函数匹配（不枚举真实窗口）。"""
+
+    def test_case_insensitive_class_and_title(self):
+        rule = {"type": "win", "class_re": "^UnityWndClass$",
+                "title_re": r"^\s*(明日方舟|Arknights)"}
+        match = detector._match_win_rule(rule, [_win("unitywndclass", " 明日方舟")])
+        self.assertIsNotNone(match)
+        self.assertEqual(match["hwnd"], 1)
+        self.assertIsNotNone(detector._match_win_rule(
+            rule, [_win("UnityWndClass", "Arknights")]))
+
+    def test_title_optional(self):
+        rule = {"type": "win", "class_re": "^UnrealWindow$",
+                "title_re": "NOMATCH", "title_optional": True}
+        self.assertIsNotNone(detector._match_win_rule(
+            rule, [_win("UnrealWindow", "whatever")]))
+        strict = {"type": "win", "class_re": "^UnrealWindow$",
+                  "title_re": "NOMATCH"}
+        self.assertIsNone(detector._match_win_rule(
+            strict, [_win("UnrealWindow", "whatever")]))
+
+    def test_match_any_vs_all(self):
+        window = [_win("UnityWndClass", "other")]
+        all_rule = {"type": "win", "class_re": "^UnityWndClass$",
+                    "title_re": "明日方舟"}
+        self.assertIsNone(detector._match_win_rule(all_rule, window))
+        any_rule = dict(all_rule, match="any")
+        self.assertIsNotNone(detector._match_win_rule(any_rule, window))
+
+    def test_empty_or_invalid_rule(self):
+        self.assertIsNone(detector._match_win_rule({"type": "win"},
+                                                   [_win("X", "X")]))
+        self.assertIsNone(detector._match_win_rule(
+            {"type": "win", "class_re": "X"}, []))
+        # 非法正则 + 无标题正则 → 无法匹配
+        self.assertIsNone(detector._match_win_rule(
+            {"type": "win", "class_re": "["}, [_win("[", "")]))
+
+    def test_min_client_size_and_iconic(self):
+        rule = {"type": "win", "class_re": "X", "min_client_size": [200, 120]}
+        self.assertIsNone(detector._match_win_rule(
+            rule, [_win("X", "", width=199, height=600)]))
+        self.assertIsNotNone(detector._match_win_rule(
+            rule, [_win("X", "", width=200, height=120)]))
+        # 最小化窗口不做尺寸过滤（避免最小化被判为关闭）
+        self.assertIsNotNone(detector._match_win_rule(
+            rule, [_win("X", "", width=10, height=10, iconic=True)]))
+
+    def test_require_visible(self):
+        rule = {"type": "win", "class_re": "X", "require_visible": True}
+        self.assertIsNone(detector._match_win_rule(
+            rule, [_win("X", "", visible=False)]))
+        self.assertIsNotNone(detector._match_win_rule(
+            rule, [_win("X", "")]))
+        self.assertIsNotNone(detector._match_win_rule(
+            {"type": "win", "class_re": "X"},
+            [_win("X", "", visible=False)]))
+
+    def test_multiple_controllers_union(self):
+        rules = {"any_of": [
+            {"type": "win", "class_re": "^ClassA$"},
+            {"type": "win", "class_re": "^ClassB$"},
+        ]}
+        match = detector._match_detect(
+            rules, [_win("ClassB", "", hwnd=5)], set(), [])
+        self.assertIsNotNone(match)
+        self.assertEqual(match["reason"], "window")
+        self.assertEqual(match["hwnd"], 5)
+
+    def test_window_proc_double_check(self):
+        rule = {"type": "win", "class_re": "UnrealWindow",
+                "proc_names": ["Client-Win64-Shipping.exe"],
+                "proc_path_re": r"Wuthering Waves\\Wuthering Waves Game\\Client"
+                                 r"\\Binaries\\Win64\\Client-Win64-Shipping\.exe$"}
+        window = [_win("UnrealWindow", "", pid=42)]
+        good = r"E:\Wuthering Waves\Wuthering Waves Game\Client\Binaries\Win64" \
+               r"\Client-Win64-Shipping.exe"
+        with mock.patch.object(detector, "_pid_path", return_value=good):
+            self.assertIsNotNone(detector._match_win_rule(rule, window))
+        with mock.patch.object(detector, "_pid_path",
+                               return_value=r"E:\Other\foo.exe"):
+            self.assertIsNone(detector._match_win_rule(rule, window))
+        # 路径取不到 → 用同名进程 pid 集合核对；仍取不到 → 放行
+        with mock.patch.object(detector, "_pid_path", return_value=""), \
+                mock.patch.object(store, "pids_for_procs", return_value={42}):
+            self.assertIsNotNone(detector._match_win_rule(rule, window))
+        with mock.patch.object(detector, "_pid_path", return_value=""), \
+                mock.patch.object(store, "pids_for_procs", return_value={99}):
+            self.assertIsNone(detector._match_win_rule(rule, window))
+        with mock.patch.object(detector, "_pid_path", return_value=""), \
+                mock.patch.object(store, "pids_for_procs", return_value=set()):
+            self.assertIsNotNone(detector._match_win_rule(rule, window))
+
+
+class ProcMatchTests(unittest.TestCase):
+    """detector 进程规则匹配与路径读取降级。"""
+
+    def test_names_case_insensitive_and_empty(self):
+        rule = {"type": "proc", "names": ["htgame.exe"]}
+        self.assertTrue(detector._match_proc_rule(rule, {"HTGAME.EXE"}))
+        self.assertFalse(detector._match_proc_rule(rule, {"OTHER.EXE"}))
+        self.assertFalse(detector._match_proc_rule(rule, set()))
+        self.assertFalse(detector._match_proc_rule(
+            {"type": "proc", "names": []}, {"HTGAME.EXE"}))
+
+    def test_path_re_match_and_mismatch(self):
+        rule = {"type": "proc", "names": ["HTGame.exe"],
+                "path_re": r"\\Binaries\\Win64\\HTGame\.exe$"}
+        with mock.patch.object(store, "pids_for_procs", return_value={7}), \
+                mock.patch.object(detector, "_pid_path", return_value=r"D:\Game"
+                                  r"\Client\WindowsNoEditor\HT\Binaries\Win64"
+                                  r"\HTGame.exe"):
+            self.assertTrue(detector._match_proc_rule(rule, {"HTGAME.EXE"}))
+        with mock.patch.object(store, "pids_for_procs", return_value={7}), \
+                mock.patch.object(detector, "_pid_path",
+                                  return_value=r"D:\Game\other.exe"):
+            self.assertFalse(detector._match_proc_rule(rule, {"HTGAME.EXE"}))
+
+    def test_path_unavailable_degrades_to_name_only(self):
+        rule = {"type": "proc", "names": ["HTGame.exe"],
+                "path_re": r"HTGame\.exe$"}
+        with mock.patch.object(store, "pids_for_procs", return_value=set()):
+            self.assertTrue(detector._match_proc_rule(rule, {"HTGAME.EXE"}))
+        with mock.patch.object(store, "pids_for_procs", return_value={7}), \
+                mock.patch.object(detector, "_pid_path", return_value=""):
+            self.assertTrue(detector._match_proc_rule(rule, {"HTGAME.EXE"}))
+
+
+class GameRulesSourceTests(TempDirTest):
+    """read_game_rules 优先级：用户自定义 > interface/内置自动 > 旧 game_procs。"""
+
+    def setUp(self):
+        super().setUp()
+        _clear_detector_caches()
+        self.addCleanup(_clear_detector_caches)
+
+    def test_user_rules_priority(self):
+        user = {"any_of": [{"type": "win", "class_re": "^UnrealWindow$",
+                            "title_re": "异环"}]}
+        rules = detector.read_game_rules({"key": "nte", "detect": user})
+        self.assertEqual(rules["source"], "user")
+        self.assertEqual(rules["any_of"], store._clean_detect(user)["any_of"])
+
+    def test_invalid_user_rules_fall_back_to_auto(self):
+        app = {"key": "maa",
+               "detect": {"any_of": [{"type": "bogus"},
+                                     {"type": "win"}]}}
+        rules = detector.read_game_rules(app)
+        self.assertEqual(rules["source"], "auto")
+        self.assertEqual(detector._schema_only(rules),
+                         detector._schema_only(detector.BUILTIN_RULES["maa"]))
+
+    def test_legacy_game_procs_fallback(self):
+        app = {"key": "custom_qa_1", "game": "__qa_custom_game__",
+               "game_procs": ["CUSTOM.EXE"]}
+        rules = detector.read_game_rules(app)
+        self.assertEqual(rules["source"], "legacy")
+        proc_rules = [rule for rule in rules["any_of"]
+                      if detector._rule_kind(rule) == "proc"]
+        self.assertEqual(proc_rules[0]["names"], ["CUSTOM.EXE"])
+
+    def test_no_rules(self):
+        app = {"key": "custom_qa_2", "game": "__qa_custom_game__"}
+        rules = detector.read_game_rules(app)
+        self.assertEqual(rules["source"], "none")
+        self.assertEqual(rules["any_of"], [])
+
+    def test_rules_to_fields(self):
+        wuwa = detector.rules_to_fields(detector.BUILTIN_RULES["wuwa"])
+        self.assertEqual(wuwa["win_class"], "^UnrealWindow$")
+        self.assertIn("Wuthering Waves", wuwa["win_title"])
+        self.assertIn("Client-Win64-Shipping.exe", wuwa["detect_procs"])
+        self.assertIn("Wuthering Waves.exe", wuwa["detect_procs"])
+        self.assertEqual(wuwa["adb_pkg"], "")
+        maa = detector.rules_to_fields(detector.BUILTIN_RULES["maa"])
+        self.assertEqual(maa["win_class"], "^UnityWndClass$")
+        self.assertIn("com.hypergryph.arknights", maa["adb_pkg"])
+
+    def test_rules_from_fields_roundtrip(self):
+        fields = {"win_class": "^UnityWndClass$", "win_title": "异环",
+                  "detect_procs": "HTGame.exe, NTEGame.exe",
+                  "adb_pkg": "com.x.y, com.z"}
+        rules = detector.rules_from_fields(**fields)
+        self.assertEqual([detector._rule_kind(rule) for rule in rules["any_of"]],
+                         ["window", "proc", "adb"])
+        self.assertEqual(detector.rules_to_fields(rules), fields)
+        with_base = detector.rules_from_fields(
+            **fields, base=detector.BUILTIN_RULES["nte"])
+        self.assertEqual(with_base["launcher"],
+                         detector.BUILTIN_RULES["nte"]["launcher"])
+        self.assertIn("cloud", with_base)
+
+    def test_rules_equal_ignores_source(self):
+        self.assertTrue(detector.rules_equal(
+            {"any_of": [], "source": "user"}, {"any_of": []}))
+        self.assertFalse(detector.rules_equal(
+            {"any_of": [{"type": "win", "class_re": "A"}]},
+            {"any_of": [{"type": "win", "class_re": "B"}]}))
+
+
+class DetectGameStateTests(unittest.TestCase):
+    """detect_game_state / detect_game 的 running/reason 分支（mock 快照）。"""
+
+    def test_unconfigured(self):
+        state = detector.detect_game_state({"game": "__qa__"},
+                                           windows=[], processes=set())
+        self.assertFalse(state["running"])
+        self.assertEqual(state["reason"], "")
+        self.assertEqual(state["label"], "未配置")
+        self.assertFalse(state["configured"])
+        self.assertEqual(state["source"], "none")
+
+    def test_window_running(self):
+        rules = {"any_of": [{"type": "win", "class_re": "^UnityWndClass$",
+                             "title_re": "明日方舟"}]}
+        state = detector.detect_game_state(
+            {"game_exe": "x"}, windows=[_win("UnityWndClass", "明日方舟",
+                                             hwnd=77)],
+            processes=set(), rules=rules)
+        self.assertTrue(state["running"])
+        self.assertEqual(state["reason"], "window")
+        self.assertEqual(state["label"], "运行中（窗口）")
+        self.assertEqual(state["hwnd"], 77)
+        self.assertTrue(state["configured"])
+
+    def test_proc_running(self):
+        rules = {"any_of": [{"type": "proc", "names": ["HTGame.exe"]}]}
+        state = detector.detect_game_state(
+            {"game": "__qa__"}, windows=[], processes={"HTGAME.EXE"},
+            rules=rules)
+        self.assertTrue(state["running"])
+        self.assertEqual(state["reason"], "proc")
+        self.assertEqual(state["label"], "运行中（进程）")
+
+    def test_launcher_reason_only(self):
+        rules = {"any_of": [{"type": "win", "class_re": "NOMATCH"}],
+                 "launcher": {"any_of": [
+                     {"type": "proc", "names": ["NTELauncher.exe"]}]}}
+        state = detector.detect_game_state(
+            {"game": "__qa__"}, windows=[], processes={"NTELAUNCHER.EXE"},
+            rules=rules)
+        self.assertFalse(state["running"])
+        self.assertEqual(state["reason"], "launcher")
+        self.assertEqual(state["label"], "启动器已开")
+
+    def test_cloud_reason_only(self):
+        rules = {"any_of": [{"type": "win", "class_re": "NOMATCH"}],
+                 "cloud": {"any_of": [
+                     {"type": "win", "class_re": "^Qt.*$",
+                      "title_re": r"^\s*云.*?异环\s*$"}]}}
+        state = detector.detect_game_state(
+            {"game": "__qa__"},
+            windows=[_win("Qt5152QWindowIcon", "云·异环")],
+            processes=set(), rules=rules)
+        self.assertFalse(state["running"])
+        self.assertEqual(state["reason"], "cloud")
+        self.assertEqual(state["label"], "云游戏运行中")
+
+    def test_not_running(self):
+        rules = {"any_of": [{"type": "win", "class_re": "^UnityWndClass$"}]}
+        state = detector.detect_game_state(
+            {"game": "__qa__"}, windows=[], processes=set(), rules=rules)
+        self.assertFalse(state["running"])
+        self.assertEqual(state["reason"], "")
+        self.assertEqual(state["label"], "未运行")
+        self.assertTrue(state["configured"])
+
+    def test_adb_running_when_enabled(self):
+        rules = {"any_of": [{
+            "type": "adb", "pkg": ["com.hypergryph.arknights"],
+            "activity": "com.u8.sdk.U8UnityContext", "serial_re": ".*"}]}
+        devices = [{"serial": "emulator-5554",
+                    "focus": "com.hypergryph.arknights/com.u8.sdk.U8UnityContext"}]
+        with mock.patch.object(detector, "adb_snapshot",
+                               return_value=devices) as snap:
+            state = detector.detect_game_state(
+                {"game": "__qa__"}, windows=[], processes=set(),
+                adb_enabled=True, rules=rules)
+        self.assertTrue(state["running"])
+        self.assertEqual(state["reason"], "adb")
+        self.assertEqual(state["label"], "运行中（ADB）")
+        snap.assert_called_once()
+
+    def test_adb_disabled_skips_snapshot(self):
+        rules = {"any_of": [{"type": "adb",
+                             "pkg": ["com.hypergryph.arknights"]}]}
+        with mock.patch.object(detector, "adb_snapshot",
+                               return_value=[]) as snap:
+            state = detector.detect_game_state(
+                {"game": "__qa__"}, windows=[], processes=set(),
+                adb_enabled=False, rules=rules)
+        self.assertFalse(state["running"])
+        snap.assert_not_called()
+
+    def test_proc_class_check(self):
+        rules = {"any_of": [], "proc_class_check": [
+            {"name": "HTGame.exe", "win_class_re": "UnrealWindow"}]}
+        with mock.patch.object(detector, "_pid_path",
+                               return_value=r"D:\Game\HTGame.exe"):
+            state = detector.detect_game_state(
+                {"game": "__qa__"},
+                windows=[_win("UnrealWindow", "anything", pid=42)],
+                processes=set(), rules=rules)
+        self.assertTrue(state["running"])
+        self.assertEqual(state["reason"], "window")
+        self.assertTrue(state["configured"])
+
+    def test_detect_game_compat_tuple(self):
+        app = {"game": "__qa__", "detect": {
+            "any_of": [{"type": "proc", "names": ["HTGame.exe"]}]}}
+        self.assertEqual(detector.detect_game(
+            app, windows=[], processes={"HTGAME.EXE"}), (True, "proc"))
+        self.assertEqual(detector.detect_game(
+            app, windows=[], processes=set()), (False, ""))
+
+    def test_configured_by_game_exe_only(self):
+        app = {"key": "custom_qa_3", "game": "__qa_custom_game__",
+               "game_exe": r"D:\Game\x.exe"}
+        state = detector.detect_game_state(app, windows=[], processes=set())
+        self.assertTrue(state["configured"])
+        self.assertEqual(state["label"], "未运行")
+
+
+class DetectorSnapshotSmokeTests(unittest.TestCase):
+    """真实窗口/进程快照 smoke：只断言类型/字段，不依赖具体游戏是否运行。"""
+
+    def setUp(self):
+        _clear_detector_caches()
+        self.addCleanup(_clear_detector_caches)
+
+    def test_snapshot_windows_contract(self):
+        windows = detector.snapshot_windows(force=True)
+        self.assertIsInstance(windows, list)
+        self.assertLessEqual(len(windows), detector.MAX_WINDOWS)
+        for win in windows:
+            self.assertEqual(set(win), {"hwnd", "class_name", "title", "width",
+                                        "height", "pid", "iconic", "visible"})
+            self.assertIsInstance(win["hwnd"], int)
+            self.assertIsInstance(win["class_name"], str)
+            self.assertIsInstance(win["title"], str)
+            self.assertIsInstance(win["pid"], int)
+            self.assertGreaterEqual(win["width"], 0)
+            self.assertGreaterEqual(win["height"], 0)
+            self.assertIsInstance(win["iconic"], bool)
+            self.assertIsInstance(win["visible"], bool)
+
+    def test_snapshot_window_cache_ttl(self):
+        first = detector.snapshot_windows(force=True)
+        second = detector.snapshot_windows()
+        self.assertIs(second, first, "TTL 内应复用同一份窗口快照")
+
+    def test_process_path_self(self):
+        path = detector.process_path(os.getpid())
+        self.assertIsInstance(path, str)
+        if path:
+            self.assertTrue(path.lower().endswith(".exe"))
+            self.assertTrue(os.path.isfile(path))
+
+    def test_real_detect_state_contract(self):
+        state = detector.detect_game_state({"key": "maa", "game": "明日方舟"})
+        for field in ("running", "reason", "label", "hwnd", "source",
+                      "configured", "adb_enabled", "rules"):
+            self.assertIn(field, state)
+        self.assertIsInstance(state["running"], bool)
+        self.assertIn(state["reason"], {"", "window", "proc", "adb",
+                                        "launcher", "cloud"})
+        self.assertIsInstance(state["label"], str)
+        self.assertTrue(state["label"])
+        self.assertEqual(state["source"], "auto")
+        self.assertTrue(state["configured"])
+        running, reason = detector.detect_game({"key": "maa", "game": "明日方舟"})
+        self.assertIsInstance(running, bool)
+        self.assertIsInstance(reason, str)
 
 
 def main():

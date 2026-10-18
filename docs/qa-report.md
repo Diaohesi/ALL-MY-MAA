@@ -1,117 +1,146 @@
-# GameHub 回归测试报告（v0.5.0 最终版）
+# GameHub 回归测试报告（v0.6.0 最终版）
 
 | 项目 | 内容 |
 | --- | --- |
 | 仓库 | `D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/ALL-MY-MAA ） |
-| 被测版本 | GameHub Lite **v0.5.0**（功能快照：v0.4.0 基线 + 游戏启动程序自动检测 + 缺陷修复；`gamehub.__init__.VERSION` 当前仍为 `0.4.0`，按发布流程由 release-engineer 在 task-6 统一 bump 为 `0.5.0`） |
-| 基线提交 | `8d7a394`（docs: add maintainer release workflow） |
-| 工作区增量 | `gamehub/store.py` **+440 / -7**、`gamehub/ui.py` **+227 / -29**（feature-dev task-1 交付），新增 `tools/test_detect.py`、`tools/regression_test.py` |
-| 测试脚本 | `tools/regression_test.py`（标准库 `unittest`，无需 pytest） |
+| 被测版本 | GameHub Lite **v0.6.0**（功能快照：v0.5.0 + 游戏运行检测机制 `gamehub/detector.py` + config v4 + QA-10/11/12 修复；`gamehub.__init__.VERSION` 当前仍为 `0.5.0`，按发布流程由 release 任务 bump 为 `0.6.0`） |
+| 代码基线 | `f9bf316`（docs: refresh screenshots for v0.5.0，已发布 v0.5.0） |
+| 工作区增量 | 新增 `gamehub/detector.py`（842 行）、`tools/test_detect_game.py`、`docs/game-detection-research.md`；`gamehub/store.py` **+203 / -5**（config v4、规则清洗、v3→v4 迁移、QA-10/11/12 修复）、`gamehub/ui.py` **+161 / -20**（检测规则输入框、状态展示、自动检测回填） |
+| 测试脚本 | `tools/regression_test.py`（标准库 `unittest`，v0.6 最终版 **111 用例**） |
 | 执行命令 | `python tools/regression_test.py`（任意 CWD 可运行；`-v` 详细输出） |
-| 执行时间 | 2026-10-18（快照：`gamehub/store.py` mtime 13:59:11，`gamehub/ui.py` mtime 13:59:33） |
+| 执行时间 | 2026-10-18（最终快照：`gamehub/store.py` mtime 14:40:58，`gamehub/detector.py` mtime 14:30:43，`gamehub/ui.py` mtime 14:30:22） |
 | 运行环境 | Windows 10/11 · Python 3.13.7 · Pillow 12.2.0 · 字体 msyh.ttc/msyhbd.ttc 存在 |
-| 结果 | **57 个用例：57 通过 / 0 失败 / 0 错误 / 0 跳过；退出码 0（全绿）** |
-| 耗时 | 约 1.25 s |
+| 结果 | **111 个用例：111 通过 / 0 失败 / 0 错误 / 0 跳过；退出码 0（全绿）** |
+| 耗时 | 约 1.8 s |
 
 实际输出结尾：
 
 ```
 ----------------------------------------------------------------------
-Ran 57 tests in 1.251s
+Ran 111 tests in 1.776s
 
 OK
 
 ===== 汇总 =====
-用例数: 57  失败: 0  错误: 0  跳过: 0
+用例数: 111  失败: 0  错误: 0  跳过: 0
 ```
 
-> **本版说明**：feature-dev 已交付 task-1（v0.5 自动检测 + QA-01/02/03/04/05/09 修复）。本报告为**最终回归版**：
-> - 旧测试中断言"旧行为"的 1 条用例已改为期望行为（`_clean_procs([None]) == []`）；
-> - 新增 2 条回归用例（`read_version` 非字符串版本回退、`_clean_icon_path` 引号+索引解析），并升级 `save_state`/`is_newer`/`version_key` 等断言；
-> - 用例总数 55 → **57**，全部通过。
+> **本版更新（107 → 111 用例，QA-10/11/12 修复复核）**
+> - QA-10 修复：v3→v4 迁移只在「`game_procs` 为空 / 全部是旧启动器误配（`NTELAUNCHER.EXE`、`LAUNCHER.EXE`）」时替换为游戏本体进程，用户自定义进程名（如 `MUMUPLAYER.EXE`）保留；新增 3 条回归断言。
+> - QA-11 修复：`_game_profile` 按游戏名反查改为「精确/最长关键词优先」，「明日方舟终末地」→ `maaend`、「明日方舟」→ `maa`；新增/扩展 1 条断言。
+> - QA-12 修复：进程名/包名字符串改用 `_detect_names`，只按逗号/分号/换行拆分，「Wuthering Waves.exe」不再被空白拆成两个；新增 1 条断言。
+> - 原有 107 条全部继续通过；其中 QA-10 相关的旧迁移断言已按修复后的正确行为更新。
 
 ## 一、测试范围与覆盖矩阵
 
-测试只做 **import + Pillow 内存渲染**，不创建 tkinter 窗口、不进入 `mainloop`、不重启正在运行的 Hub、不联网。
-涉及配置读写的用例全部用 `unittest.mock.patch` 把 `store.CONFIG` / `store.SEARCH_ROOT` 指向临时目录，**不会读写仓库里的真实 `config.json`**。
-v0.5 自动检测用例通过 mock 把「注册表 / 常见目录」两个数据源限制在临时目录，**不会扫描本机真实安装**，结果确定可重复；真实扫描由 `tools/test_detect.py` 单独验证（见第二节）。
+测试只做 **import + Pillow 内存渲染 + mock 窗口/进程快照**，不创建 tkinter 窗口、不进入 `mainloop`、不重启 Hub、不联网。配置类用例全部用 `unittest.mock.patch` 把 `store.CONFIG` / `store.SEARCH_ROOT` 指向临时目录，**不读写真实 `config.json`**。
 
 | 测试类 | 用例数 | 覆盖点 | 结果 |
 | --- | --- | --- | --- |
-| `VersionTests` | 3 | `version_key`（带 v 前缀、多段、中文/空/None、前 4 段上限、1.10 数字比较、**-rc/+build 后缀忽略**）；`is_newer` 新旧/相等/空版本；**预发布不算更新 + 数字段零补齐**（QA-04 回归） | 3 通过 |
-| `PathHelperTests` | 5 | `_portable` 根目录内→正斜杠相对路径、根外→保留绝对路径、`_portable`↔`_absolute` 往返；`_absolute` 空值/相对/绝对/不存在 | 5 通过 |
-| `CleanProcsTests` | 5 | `_clean_procs` 英/中文逗号分号、空白、list/tuple、去空项、大写化、`fallback_exe` 兜底；**非 str 项（None/数字/嵌套）被跳过**（QA-05 回归） | 5 通过 |
-| `ProcNameTests` | 1 | `proc_names_for_exe` 路径→大写进程名、空值/None→[] | 1 通过 |
-| `ConfigStateTests` | 7 | `save_state`→`load_state` 往返（自定义卡片 game/script/accent/game_exe/game_procs/script_procs/download/fallback_version/icon/相对路径持久化）；内置卡片 accent/download 往返；v1/v2 纯路径格式兼容；UTF-8 BOM 配置兼容；损坏 JSON 回退默认；Clash 显式保存与自动探测；**保存失败返回 `False` 不静默**（QA-03 回归） | 7 通过 |
-| `FindAppExeTests` | 4 | `find_app_exe` 递归、大小写不敏感、`SEARCH_SKIP` 目录与点目录跳过、`max_depth` 边界、空/不存在 root | 4 通过 |
-| `PickBestExeTests` | 3 | 多版本按文件夹版本号择优、版本相同按 mtime 择优、空列表/None、不可读路径不崩溃 | 3 通过 |
-| `ReadVersionTests` | 8 | `read_version`：MaaNTE/MaaEnd `interface.json`（含/不含 v 前缀）、MAA `cache/version/summary.json`、ok-ww `app.json`、文件缺失回退、JSON 损坏回退；**wuwa 缺 `current_version` 回退 fallback**（QA-01 回归）、**version 为 null/数组/布尔时回退 fallback**（QA-02 回归） | 8 通过 |
-| `ProcessTests` | 3 | `snapshot_processes` 返回集合且包含当前进程名；`pids_for_procs` 含自身 PID；未知进程名→空集合 | 3 通过 |
-| `RenderSmokeTests` | 8 | `render_window` 4 卡整页 **1200×560** RGB（悬停索引 2）、空页渲染；`render_script_button` 三态 **99×44**；`render_game_button` 两态 99×44；`render_dot` **22×22**（size=8→28×28，自定义颜色）；`render_page_arrow` 左右/悬停 **32×32**；`render_hub_icon` 256×256；`hex2rgb`/`accent_rgba` | 8 通过 |
-| `ImportSmokeTests` | 2 | `import gamehub.ui` 通过（只导入模块，不创建窗口/mainloop）、`ui.run`/`GameHub` 存在；`gamehub.VERSION` 为 `x.y.z` 语义化格式 | 2 通过 |
-| `GameCandidatesTests`（v0.5） | 8 | 短英文关键词按单词边界命中（`nte` 不命中 `center`）；`_game_profile` 按 key/游戏名/None 生成关键词与启动程序名提示；`_score_exe_path` 命中/无关 exe 排除/卸载类噪声排除；**`_clean_icon_path` 解析 `"path.exe",0` / `path.exe,0`（QA-09 回归）**；`_find_game_exes` 临时目录树扫描、`GAME_SCAN_SKIP` 跳过、噪声过滤、结果限定临时目录；`find_game_candidates` 常见目录来源（mock 数据源）、注册表 InstallLocation 来源、按 score 降序、`limit` 截断、返回结构 `{path,name,source,score}` | 8 通过 |
-| **合计** | **57** | | **57 通过 / 0 跳过** |
+| `VersionTests` | 3 | `version_key` / `is_newer`（含 `-rc`/零补齐语义） | 3 通过 |
+| `PathHelperTests` | 5 | `_portable` / `_absolute` 路径转换与往返 | 5 通过 |
+| `CleanProcsTests` | 5 | `_clean_procs` 分隔符/大小写/非 str 跳过/fallback | 5 通过 |
+| `ProcNameTests` | 1 | `proc_names_for_exe` | 1 通过 |
+| `ConfigStateTests` | 13 | 配置往返/内置字段/BOM/损坏 JSON/Clash；config v4 与自定义 detect 往返；**v3→v4 迁移：仅旧启动器/空值迁移、自定义/混合进程名保留、空值填默认**（QA-10 修复验证） | 13 通过 |
+| `FindAppExeTests` | 4 | `find_app_exe` 递归/skip/max_depth | 4 通过 |
+| `PickBestExeTests` | 3 | `pick_best_exe` 版本/mtime 择优 | 3 通过 |
+| `ReadVersionTests` | 8 | `read_version` interface.json / app.json / cache / 回退 | 8 通过 |
+| `ProcessTests` | 3 | `snapshot_processes` / `pids_for_procs` | 3 通过 |
+| `RenderSmokeTests` | 8 | `render_window` 1200×560、按钮/dot/page_arrow 尺寸等 | 8 通过 |
+| `ImportSmokeTests` | 2 | `import gamehub.ui`（含 detector 导入链）不建窗口；VERSION 语义化格式 | 2 通过 |
+| `GameCandidatesTests` | 8 | v0.5 游戏启动程序自动检测（mock 注册表/常见目录） | 8 通过 |
+| `DetectRuleCleanTests` | 7 | config v4 规则 schema：`type` 别名、必填字段、非法规则丢弃、文本清洗、`proc_class_check`、`launcher`/`cloud`、`min_client_size`/`title_optional`/`match`/`require_visible` 边界；**字符串进程名含空格不被拆分**（QA-12 修复验证） | 7 通过 |
+| `DetectorInterfaceRulesTests` | 6 | `interface.json` controller[].win32 提取：多 controller 并集、去重、cloud 单列、非 win32 忽略、缺失/损坏回退内置表、深拷贝隔离、**按游戏名最长/精确反查（明日方舟终末地→maaend）**、缓存 mtime 失效 | 6 通过 |
+| `BuiltinRuleTableTests` | 2 | 四款内置游戏规则表结构校验与关键目标 | 2 通过 |
+| `WindowMatchTests` | 8 | 窗口匹配纯函数：大小写/空白/正则、`title_optional`、any/all、空/非法规则、最小客户区、最小化不过滤、`require_visible`、多 controller 并集、窗口+进程双重校验与路径降级 | 8 通过 |
+| `ProcMatchTests` | 3 | 进程名大小写、`path_re` 命中/不命中、路径不可读降级 | 3 通过 |
+| `GameRulesSourceTests` | 7 | 规则优先级 user > auto > legacy > none、非法用户规则回退 auto、字段⇄规则往返、`rules_equal` | 7 通过 |
+| `DetectGameStateTests` | 11 | `detect_game_state` 各 running/reason 分支（window/proc/adb/launcher/cloud/未运行/未配置/proc_class_check/仅 game_exe）与 `detect_game` 元组 | 11 通过 |
+| `DetectorSnapshotSmokeTests` | 4 | 真实窗口快照字段/类型/缓存、`process_path` 自身 pid、真实 `detect_game_state` 契约 | 4 通过 |
+| **合计** | **111** | | **111 通过 / 0 跳过** |
 
-## 二、v0.5「游戏启动程序自动检测」验证说明
+## 二、QA-10/11/12 修复验证（本轮重点）
 
-### 2.1 自动化测试（确定性、无真实安装依赖）
-- 覆盖评分/过滤/扫描/合并/排序/limit/来源标注/词边界/图标路径解析（8 条用例，见上表）。
-- 注册表与常见目录数据源被 mock 到临时目录，**不依赖本机是否安装游戏**，可重复执行。
+| ID | 修复内容 | 回归断言（已通过） |
+| --- | --- | --- |
+| **QA-10** | `load_state` 的 v4 迁移条件改为：仅当内置卡片 `game_procs` 为空，或**全部**命中旧启动器误配集合 `LEGACY_GAME_PROCS = {NTELAUNCHER.EXE, LAUNCHER.EXE}` 时才替换为 `BUILTIN_GAME_PROCS`；用户自定义进程名与混合列表保留 | ① v3 `maa: ["LAUNCHER.EXE"]` → `["ARKNIGHTS.EXE"]`、`nte: ["NTELAUNCHER.EXE","LAUNCHER.EXE"]` → `["HTGAME.EXE"]`；② v3 `wuwa: ["MUMUPLAYER.EXE"]` 升级后**保留** `["MUMUPLAYER.EXE"]`；③ 空列表/缺失字段才填默认（`nte []` → `["HTGAME.EXE"]`、`wuwa 缺失` → `["CLIENT-WIN64-SHIPPING.EXE"]`）；④ 混合 `["LAUNCHER.EXE","MUMUPLAYER.EXE"]` 整体保留（迁移语义为「全部旧启动器才迁移」） |
+| **QA-11** | `store._game_profile` 反查改为「完整名称精确命中（1000+ 分）> 越长关键词越优先」，并新增游戏名归一化（去空格/中英文标点）与宽泛名 stop 词表；`detector.read_auto_rules` 经此不再把「明日方舟终末地」识别为 MAA | `read_auto_rules({"game":"明日方舟终末地"}) == BUILTIN_RULES["maaend"]`；`{"game":"明日方舟：终末地"}` → `maaend`；`{"game":"明日方舟"}` → `maa`；`_game_profile` 直接断言同结果 |
+| **QA-12** | 规则清洗新增 `store._detect_names`：字符串只按 `,，;；\n` 拆分，单个值含空格也整体保留；`proc_names` / `names` / adb `pkg` 均改用该函数 | `_clean_detect_rule({"type":"proc","names":"Wuthering Waves.exe"})["names"] == ["Wuthering Waves.exe"]`；`"A.exe, Wuthering Waves.exe"` 正确拆成 2 个；win 规则 `proc_names` 与 adb `pkg` 同理；`_detect_names` 直接断言 |
 
-### 2.2 真实扫描验证（QA 独立执行，非编造）
-QA 在任务中执行 `python tools/test_detect.py`（命令行自测，无 GUI、不启动 Hub），2026-10-18 本机实际结果如下（与 feature-dev 交付汇报一致）：
+> 说明：`_detect_texts` 作为历史兼容 helper 仍保留（仍按空白拆分），供旧调用/既有测试使用；v0.6 规则清洗路径已全部改用 `_detect_names`。QA-10 的「混合列表整体保留」为修复后的确定语义：若列表中仍有 `LAUNCHER.EXE` 残留，需用户编辑检测规则清理（低风险，不影响发布）。
 
-| 游戏 | 首选候选 | 来源 | 路径 | 候选数 | 耗时 |
-| --- | --- | --- | --- | --- | --- |
-| 明日方舟（maa） | MuMu模拟器 · **MuMuNxMain.exe** | 注册表 | `E:\MuMuPlayer-12.0\nx_main\MuMuNxMain.exe` | 6 | 274 ms |
-| 异环（nte） | 异环 · **NTELauncher.exe** | 注册表 | `D:\Neverness To Everness\NTELauncher.exe` | 3 | 186 ms |
-| 鸣潮（wuwa） | 鸣潮 · **Wuthering Waves.exe** | 注册表 | `E:\Wuthering Waves\Wuthering Waves Game\Wuthering Waves.exe` | 4 | 197 ms |
-| 明日方舟终末地（maaend） | 鹰角启动器 · **Endfield.exe** | 注册表 | `E:\Hypergryph Launcher\games\Endfield Game\Endfield.exe` | 1 | 175 ms |
+## 三、v0.6 游戏运行检测（detector）验证说明
 
-- 四个游戏全部命中，首选候选均为游戏/启动器主程序；单游戏耗时 **175–274 ms**，远低于 `GAME_DETECT_BUDGET = 1.8s` 预算。
-- 候选排序合理（如明日方舟首选 MuMuNxMain.exe，其次 Launcher/Arknights.exe；鸣潮首选游戏本体，其次 launcher/Client-Win64-Shipping）。
+### 3.1 规则与匹配（自动化、确定性）
+- **规则 schema**：config v4 规则清洗覆盖 `type` 别名、非法/空规则丢弃、文本分割（进程名不再按空白拆分）、`proc_class_check`、`launcher`/`cloud`、`min_client_size`、`title_optional`、`match`、`require_visible`。
+- **规则来源**：MaaNTE/MaaEnd 读取脚本 `interface.json` 的 `controller[].win32`（多 Win32 controller 取并集、去重、云 controller 进 `cloud`），缺失/损坏回退内置表；ok-ww/MAA 使用内置表；按游戏名最长/精确反查；缓存按 interface mtime 失效。
+- **窗口匹配**：class/title 正则大小写不敏感、`title_optional`、`match any/all`、最小客户区、最小化窗口不过滤、`require_visible`、多 controller 并集；窗口+进程双重校验（`proc_names` + `proc_path_re`）在路径不可读时降级用同名进程 PID 集合核对。
+- **进程匹配**：进程名大小写不敏感；`path_re` 命中/不命中；PID/路径读不到时降级只比进程名。
+- **优先级与回退**：用户自定义 `detect`（`source=user`）> interface/内置自动规则（`auto`）> 旧 `game_procs`（`legacy`）> 无规则（`none`）。
+- **状态分支**：`running/reason/label` 覆盖 window/proc/adb/launcher/cloud/未运行/未配置；`launcher`/`cloud` 只影响文案不计入 `running`；ADB 默认关闭，开启时才调用 `adb_snapshot`。
 
-### 2.3 UI 集成（代码走查，GUI 手工验证由 Lead 集成阶段完成）
-- 「编辑卡片」对话框的「游戏启动程序」行提供「浏览 / **自动检测**」；点击后按当前编辑的游戏名/关键词调用 `find_game_candidates`，无候选时 `messagebox` 提示"未检测到…可手动浏览"，有候选时弹出候选选择对话框，选中后回填 `game_exe` 输入框（代码：`ui.py` `_auto_detect_game` / `GameCandidateDialog`）。
-- 右键「启动游戏」时若 `game_exe` 未配置或文件不存在：先提示"正在自动检测…"→ 有候选弹选择框 → 选中后写入 `game_exe`/`game_procs` 并 `_save_config()` 再启动；无候选回退系统文件选择框；取消则不启动（代码：`ui.py` `launch_game`）。
-- 以上 GUI 交互**未在自动化中覆盖**（约束禁止启动 GUI/mainloop），由 Lead 集成验证。
+### 3.2 真实检测证据（QA 独立执行，非编造）
+QA 运行只读 CLI `python tools/test_detect_game.py`（读取真实 config / 脚本 interface / 当前桌面窗口与进程，**不启动、不关闭任何游戏，不写文件**），最终结果：
 
-## 三、缺陷状态（v0.5.0 最终）
+```
+窗口快照: 88 个顶层窗口；进程快照: 158 个进程
+ADB 检测: 关闭（默认）
 
-| ID | 原级别 | 状态 | 说明 / 验证方式 |
+== 明日方舟（maa）==   规则来源: auto；当前状态: 未运行
+  窗口类 ^UnityWndClass$；标题 ^\s*(明日方舟|Arknights)；进程 Arknights.exe；ADB 6 个包名
+== 异环（nte）==       规则来源: auto；当前状态: 运行中（窗口），hwnd=1971636
+  窗口类 UnrealWindow；标题 ^\s*(异环|NTE)\s*$；进程 HTGame.exe
+== 鸣潮（wuwa）==      规则来源: auto；当前状态: 未运行
+  窗口类 ^UnrealWindow$；标题 ^\s*(鸣潮|Wuthering Waves)\s*$；进程 Client-Win64-Shipping.exe, Wuthering Waves.exe
+== 明日方舟终末地（maaend）== 规则来源: auto；当前状态: 未运行
+  窗口类 UnityWndClass；标题 Endfield；进程 Endfield.exe；ADB 5 个包名
+
+本机正在运行的游戏: 异环
+```
+
+- 与 Lead 手工观察一致（本机当前异环正在运行）；自动化测试只断言快照/状态**契约**，不断言具体游戏一定在运行，避免依赖本机状态。
+- ADB 默认关闭且本机未连接模拟器，ADB 分支仅用 mock 验证。
+
+### 3.3 config v4 与真实配置
+- 真实 `config.json` 当前为 **version 4**（由 Lead 的 GUI 验证运行时写入，mtime `14:34:13`；QA 测试全部使用临时配置，运行前后该文件未被 QA 修改）。
+- 迁移表 `store.BUILTIN_GAME_PROCS`：maa→`ARKNIGHTS.EXE`、nte→`HTGAME.EXE`、wuwa→`CLIENT-WIN64-SHIPPING.EXE`、maaend→`ENDFIELD.EXE`；仅对「内置卡片且无自定义 detect，且原 `game_procs` 为空或全部为旧启动器」生效（QA-10 修复后）。
+
+## 四、缺陷清单与状态
+
+| ID | 级别 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| QA-01 | 低 | ✅ **已修复并验证** | `read_version` 异环 `app.json` 缺 `current_version` 时回退 `fallback_version`；`ReadVersionTests.test_wuwa_missing_current_version_falls_back` 断言 `v0.0.1` |
-| QA-02 | 低 | ✅ **已修复并验证** | `interface.json` 的 `version` 为 `null`/数组/布尔时经 `_version_text` 过滤并回退 `fallback_version`；`test_non_string_version_falls_back` 覆盖 3 种脏值 |
-| QA-03 | 中 | ✅ **已修复并验证** | `save_state` 返回 `bool`（成功 `True`/失败 `False`），UI 可提示；`test_custom_app_roundtrip` 断言 `True`，`test_save_state_reports_write_failure` 断言写失败返回 `False` 且不生成文件 |
-| QA-04 | 低 | ✅ **已修复并验证** | `version_key` 先按 `-`/`+` 截断（`v1.0.0-rc1 → (1,0,0)`），`is_newer` 对数字段零补齐（`v6.19 == v6.19.0`，不再误判）；`test_version_key` / `test_is_newer_prerelease_and_zero_padding` |
-| QA-05 | 低 | ✅ **已修复并验证** | `_clean_procs` 跳过非 `str` 项（`[None, 3, ["x"]]` 不再产生 `"NONE"`），保留 `fallback_exe` 兜底；旧断言已更新为 `[]` |
-| QA-06 | 低/风险 | ⏳ **保留（未修复）** | `SEARCH_SKIP`（v0.4）与 `GAME_SCAN_SKIP`（v0.5）仍跳过 `data/resources/config/build/dist` 等常见目录名；属"避免误报/深扫"的设计取舍，未在本次改动中调整。建议后续在 README 常见问题说明，或按"脚本专用跳过表"与"通用扫描"拆分排期 |
-| QA-07 | 低 | ⏳ **保留（未修复）** | `load_state` 对已丢失 exe 的自定义卡片仍以相对路径加载（无 missing 标记），启动时提示"文件不存在"；建议后续加载时标记 `missing` 并在编辑弹窗引导重新选择（低优先级） |
-| QA-08 | 信息 | ℹ️ **保留（设计边界）** | `_portable(path, root)` 在 `path == root` 时返回 `"."`，仅把目录当 exe 路径的异常输入会触发，不排期 |
-| QA-09 | 低 | ✅ **已修复并验证** | `_clean_icon_path` 现在支持 `"C:\x\game.exe",0` / `C:\x\game.exe,0` / 纯路径 / 纯引号路径，非 exe 返回 `""`；`GameCandidatesTests.test_clean_icon_path_quoted_index` |
+| QA-01 / QA-02 | 低 | ✅ 已修复并持续通过 | `read_version` 缺失/非字符串版本回退 `fallback_version` |
+| QA-03 | 中 | ✅ 已修复并持续通过 | `save_state` 返回 bool，写失败不再静默 |
+| QA-04 | 低 | ✅ 已修复并持续通过 | `version_key` 忽略 `-rc`/`+build`，`is_newer` 零补齐 |
+| QA-05 | 低 | ✅ 已修复并持续通过 | `_clean_procs` 跳过非 str 项 |
+| QA-06 | 低/风险 | ⏳ 保留 | 目录扫描跳过 `data/resources/config/build/dist` 等名字（设计取舍）；建议 README FAQ 说明或后续拆分扫描表，不阻塞 v0.6 |
+| QA-07 | 低 | ⏳ 保留 | 自定义卡片 exe 丢失后仍以相对路径加载、无 missing 提示；建议后续排期，不阻塞 v0.6 |
+| QA-08 | 信息 | ℹ️ 保留（边界） | `_portable(path==root)` → `"."`，仅异常输入触发 |
+| QA-09 | 低 | ✅ 已修复并持续通过 | `_clean_icon_path` 支持 `"path.exe",0` |
+| **QA-10** | 低 | ✅ **已修复并验证**（task-13） | v4 迁移不再一刀切覆盖用户自定义 `game_procs`；仅空值/全部旧启动器误配才迁移（回归断言见第二节） |
+| **QA-11** | 低 | ✅ **已修复并验证**（task-13） | 游戏名反查改为精确/最长匹配；「明日方舟终末地」→ `maaend`（回归断言见第二节） |
+| **QA-12** | 低/信息 | ✅ **已修复并验证**（task-13） | 字符串进程名/包名只按逗号/分号/换行拆分，含空格的名字保持完整（回归断言见第二节） |
 
-> 说明：QA-01/02/03/05/09 的修复由 feature-dev 在 task-1 内完成，QA 已将回归断言从"记录旧行为"升级为"期望行为"；其中唯一一条旧断言（`_clean_procs([None]) == ["NONE"]`）已按 Lead 要求改为 `[]` 并补充"非 str 被跳过 + fallback 兜底"断言。
+## 五、未覆盖点与测试限制
 
-## 四、未覆盖点与测试限制
+1. **GUI 手工验证（Lead 集成阶段完成）**：编辑对话框「检测规则」4 个输入框的显示/保存/清空、自动检测选中启动程序后回填检测字段、`launch_game` 依据检测状态切换窗口（含最小化恢复）、状态点颜色（运行中/启动器已开/云游戏/未配置）与 1.5s 轮询缓存表现。本任务禁止启动 GUI/mainloop。
+2. **真实游戏运行态**：本机当前仅**异环**在运行；明日方舟/鸣潮/终末地"运行中"的窗口/进程匹配只做了规则结构与真实快照 smoke，未在实际启动游戏时验证。**模拟器（MAA/ADB 模式）与云游戏窗口需 Lead 手工验证**（ADB 默认关闭且本机未连接模拟器）。
+3. **会启动/聚焦进程的函数**：`launch_exe` / `focus_window` / `bring_to_front` 未测（约束要求不启动进程/不影响用户 Hub）；`adb_snapshot` 的真实 adb 调用未测（仅 mock）。
+4. **联网函数**：`http_get` / `check_latest` 等未测。
+5. **真实 PE 版本资源**：`file_version` 仅覆盖"空 exe 回退"路径。
+6. **其它**：UI 后台线程并发、权限受限目录、异常盘符/网络盘、BOM 与自定义卡片的组合等（沿用 v0.5 报告）。
+7. **版本号**：`VERSION` 当前仍为 `0.5.0`，发布任务 bump 为 `0.6.0` 后建议再跑一次本套件（预期仍 111/111 全绿）。
 
-1. **GUI 交互（由 Lead 集成阶段手工验证）**：编辑对话框「自动检测」按钮、无候选提示、候选选择对话框（列表/双击/确定/取消）、`launch_game` 自动检测→保存配置→启动的完整链路、`GameCandidateDialog` 样式与深色主题。本任务禁止启动 GUI/mainloop，未覆盖。
-2. **真实注册表/磁盘扫描的异常场景**：自动化测试 mock 数据源；真实扫描已用 `tools/test_detect.py` 在本机验证 4 款游戏（结果见 2.2），但未覆盖注册表权限受限、异常盘符/网络盘、扫描超时截断（`GAME_DETECT_BUDGET`）、`max_dirs=300` 上限、`--all` 全量模式。
-3. **联网函数**：`http_get` / `final_url` / `github_latest_tag` / `check_latest` 未测（避免网络依赖与限流）。
-4. **真实 PE 版本资源**：`file_version` 只测"空 exe 无版本→回退"路径，未构造带版本资源的 exe。
-5. **会启动进程/抢焦点的函数**：`launch_exe` / `shell_launch` / `open_path` / `bring_to_front` / `focus_window` 未测（约束要求不启动进程、不影响用户运行中的 Hub）。
-6. **其它**：BOM+自定义卡片组合、渲染回退路径（损坏图标/字体缺失）、UI 后台线程与配置保存并发、ACL 受限目录（`Program Files`）下 `save_state` 的真实表现未覆盖。
+## 六、结论与建议
 
-## 五、结论与建议
-
-- **v0.5.0 最终回归全绿：57/57 通过、0 失败/0 错误/0 跳过、exit 0（约 1.25 s）**，可重复执行、无副作用。
-- 6 项缺陷（QA-01/02/03/04/05/09）已修复并经**新断言**验证；QA-06/07/08 保留为低风险/设计边界项并已说明，不影响发布。
-- 真实自动检测在本机 4 款游戏全部命中，首选候选正确，耗时远低于预算；GUI 集成（自动检测按钮/候选选择/启动游戏链路）由 Lead 在集成阶段手动验证。
-- 发布流程建议：release-engineer 在 task-6 将 `VERSION` bump 为 `0.5.0` 后**再跑一次** `python tools/regression_test.py`（仅版本号变化，预期仍 57/57 全绿）；发布前完成 GUI 手工验证。
-- CI 建议：在 `.github/workflows` 增加 Windows runner 执行 `python tools/regression_test.py`（无需网络）的步骤，守护纯函数/配置/渲染/检测核心回归。
+- **v0.6.0 最终回归全绿：111/111 通过、0 失败/0 错误/0 跳过、exit 0（约 1.8 s）**；可重复执行、无副作用。
+- QA-10/11/12 三项修复均已用新增/更新的回归断言验证；QA-01~05、QA-09 无回归；QA-06/07/08 保留为低风险/设计边界项，不影响 v0.6 发布。
+- 真实检测证据：异环被正确识别为「运行中（窗口）」，其余三款未运行、规则来源均为 auto，与 Lead 手工观察一致。
+- 发布前建议：① Lead 完成 4 款游戏/模拟器/云游戏与检测规则编辑的 GUI 手工验证；② release 任务 bump `VERSION=0.6.0` 后重跑本套件（预期 111/111）；③ CI 增加 Windows runner 执行 `python tools/regression_test.py`（无需网络）。
 
 ## 附录：证据与约束遵守
 
-- 测试全程未修改 `gamehub/`、`README.md`、`CHANGELOG.md`；只写 `tools/regression_test.py`、`docs/qa-report.md`。
-- 未 commit / push；未启动 GUI/mainloop；未重启用户正在运行的 Hub。
-- QA 测试全程用临时目录 + `mock.patch` 隔离配置，未写真实 `config.json`（QA 历次运行前后其 mtime 保持 `13:44:43`；最终检查时 mtime 为 `14:02:40`，来自其它成员并行进行的 GUI/集成验证，与 QA 用例无关）。
-- 自动化用例不联网；自动检测测试的注册表/常见目录数据源已 mock 到临时目录。
+- 真实检测证据由 `python tools/test_detect_game.py`（只读 CLI）采集，输出见 3.2；未启动任何游戏、未启动 GUI。
+- QA 只修改 `tools/regression_test.py`、`docs/qa-report.md`；未修改 `gamehub/`、`README.md`、`CHANGELOG.md` 等文件；未 commit / push。
+- 配置类用例全部使用临时目录 + `mock.patch` 隔离；真实 `config.json` mtime `14:34:13`（Lead GUI 验证写入 v4），QA 运行前后未变化。
+- 测试不联网；v0.6 规则/匹配用例不枚举真实窗口（真实快照仅 smoke 契约），自动检测/注册表数据源在 v0.5 用例中已 mock 到临时目录。

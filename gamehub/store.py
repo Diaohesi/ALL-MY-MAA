@@ -86,6 +86,18 @@ DEFAULT_APPS = [
 ICON_FILES = {"maa": "maa.png", "nte": "nte.png", "wuwa": "wuwa.png",
               "maaend": "maaend.png"}
 
+# 内置游戏的「游戏本体」进程名（v4 迁移时替换旧的启动器进程名误配）
+BUILTIN_GAME_PROCS = {
+    "maa": ["ARKNIGHTS.EXE"],
+    "nte": ["HTGAME.EXE"],
+    "wuwa": ["CLIENT-WIN64-SHIPPING.EXE"],
+    "maaend": ["ENDFIELD.EXE"],
+}
+
+# v0.5 内置卡片把「启动器」误当成游戏本体的旧默认值；
+# v4 迁移只替换这些值，用户手动配置的其它进程名（如 MUMUPLAYER.EXE）保留。
+LEGACY_GAME_PROCS = {"NTELAUNCHER.EXE", "LAUNCHER.EXE"}
+
 # ------------------------------------------------------------------ 通用小工具
 def version_key(text):
     """取版本号里的数字段；忽略 -rc / +build 等后缀，避免预发布号被当正式版。"""
@@ -301,17 +313,40 @@ def _kw_hits(text, keywords):
     return sum(1 for keyword in keywords if _kw_hit(text, keyword))
 
 
+def _normalize_name(text):
+    """游戏名归一化：去空白/中英文标点，用于精确匹配（如「明日方舟：终末地」）。"""
+    return re.sub(r"[\s:：·\-_—/|()（）]+", "", str(text or "").lower())
+
+
 def _game_profile(app):
-    """返回 (key, 关键词, 启动程序名提示)；app 为空时返回全部游戏的合集。"""
+    """返回 (key, 关键词, 启动程序名提示)；app 为空时返回全部游戏的合集。
+
+    按游戏名反查时采用「精确/最长关键词优先」，避免较短的「明日方舟」
+    抢先命中「明日方舟终末地」（QA-11）。
+    """
     app = app or {}
     key = str(app.get("key") or "")
     if key in GAME_KEYWORDS:
         return key, GAME_KEYWORDS[key], GAME_EXE_HINTS.get(key, ())
     game = str(app.get("game") or "").strip()
     if game:
+        low = _normalize_name(game)
+        best_key, best_score = "", 0
         for name, keywords in GAME_KEYWORDS.items():
-            if _kw_hits(game, keywords):
-                return name, keywords, GAME_EXE_HINTS.get(name, ())
+            for keyword in keywords:
+                keyword = str(keyword)
+                if not keyword:
+                    continue
+                score = 0
+                if low and low == _normalize_name(keyword):
+                    score = 1000 + len(_normalize_name(keyword))   # 完整名称精确命中
+                elif _kw_hit(game, keyword):
+                    score = len(keyword)                            # 包含命中，越长越优先
+                if score > best_score:
+                    best_key, best_score = name, score
+        if best_key:
+            return best_key, GAME_KEYWORDS[best_key], \
+                GAME_EXE_HINTS.get(best_key, ())
         tokens = [token for token in re.split(r"[\s·:：,，/|()（）]+", game)
                   if len(token) >= 2 and token.lower() not in _GAME_NAME_STOP]
         if not tokens:
@@ -758,6 +793,144 @@ def bp(path):
     return path.replace("/", os.sep)
 
 
+# ------------------------------------------------------------------ 检测规则（config v4）
+_DETECT_TYPE_ALIASES = {"win": "win", "window": "win", "proc": "proc",
+                        "process": "proc", "adb": "adb"}
+
+
+def _is_legacy_game_proc(name):
+    """旧配置里的进程名是否属于 v0.5 常见的「启动器冒充游戏」误配。"""
+    text = str(name or "").strip().upper()
+    if not text:
+        return False
+    return text in LEGACY_GAME_PROCS or \
+        os.path.basename(text).upper() in LEGACY_GAME_PROCS
+
+
+def _detect_text(value):
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _detect_texts(value):
+    """通用文本列表（历史兼容，保留给旧调用/测试）。"""
+    if isinstance(value, str):
+        value = re.split(r"[,，;；\s]+", value)
+    if not isinstance(value, (list, tuple)):
+        return []
+    items = [_detect_text(item) for item in value]
+    return [item for item in items if item]
+
+
+def _detect_names(value):
+    """进程名/包名列表：字符串只按逗号/分号/换行拆分。
+
+    单个值即使含空格也整体保留（如手写 config 的 "Wuthering Waves.exe"），
+    不再按空白拆成多个进程名（QA-12）；UI/save_state 写的数组路径不受影响。
+    """
+    if isinstance(value, str):
+        parts = re.split(r"[,，;；\n]+", value)
+        return [part.strip() for part in parts if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [item.strip() for item in value
+                if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _clean_detect_rule(rule):
+    """规整单条检测规则；非法/无内容返回 None。"""
+    if not isinstance(rule, dict):
+        return None
+    kind = _DETECT_TYPE_ALIASES.get(str(rule.get("type") or "").strip().lower(), "")
+    if not kind:
+        return None
+    out = {"type": kind}
+    if kind == "win":
+        for field in ("class_re", "title_re", "proc_path_re"):
+            text = _detect_text(rule.get(field))
+            if text:
+                out[field] = text
+        if not out.get("class_re") and not out.get("title_re"):
+            return None
+        if rule.get("title_optional"):
+            out["title_optional"] = True
+        if rule.get("match") in ("any", "all"):
+            out["match"] = rule["match"]
+        if rule.get("require_visible"):
+            out["require_visible"] = True
+        size = rule.get("min_client_size")
+        if (isinstance(size, (list, tuple)) and len(size) == 2
+                and all(isinstance(v, (int, float)) for v in size)):
+            out["min_client_size"] = [int(size[0]), int(size[1])]
+        names = _detect_names(rule.get("proc_names"))
+        if names:
+            out["proc_names"] = names
+    elif kind == "proc":
+        names = _detect_names(rule.get("names"))
+        if not names:
+            return None
+        out["names"] = names
+        path_re = _detect_text(rule.get("path_re"))
+        if path_re:
+            out["path_re"] = path_re
+    elif kind == "adb":
+        pkgs = _detect_names(rule.get("pkg"))
+        if not pkgs:
+            return None
+        out["pkg"] = pkgs
+        for field in ("activity", "serial_re"):
+            text = _detect_text(rule.get(field))
+            if text:
+                out[field] = text
+    else:
+        return None
+    return out
+
+
+def _clean_proc_class_check(value):
+    if not isinstance(value, dict):
+        return None
+    name = _detect_text(value.get("name"))
+    class_re = _detect_text(value.get("win_class_re"))
+    if not name or not class_re:
+        return None
+    out = {"name": name, "win_class_re": class_re}
+    path_re = _detect_text(value.get("path_re"))
+    if path_re:
+        out["path_re"] = path_re
+    return out
+
+
+def _clean_detect_group(value):
+    if not isinstance(value, dict):
+        return None
+    rules = [_clean_detect_rule(rule) for rule in (value.get("any_of") or [])]
+    rules = [rule for rule in rules if rule]
+    checks = value.get("proc_class_check")
+    if isinstance(checks, dict):
+        checks = [checks]
+    checks = [_clean_proc_class_check(item) for item in checks] \
+        if isinstance(checks, (list, tuple)) else []
+    checks = [item for item in checks if item]
+    result = {}
+    if rules:
+        result["any_of"] = rules
+    if checks:
+        result["proc_class_check"] = checks
+    return result or None
+
+
+def _clean_detect(value):
+    """规整 app 的检测规则（any_of / proc_class_check / launcher / cloud）。"""
+    if not isinstance(value, dict):
+        return None
+    result = _clean_detect_group(value) or {}
+    for field in ("launcher", "cloud"):
+        group = _clean_detect_group(value.get(field))
+        if group:
+            result[field] = group
+    return result or None
+
+
 def load_state():
     """读取 config.json，返回 (apps, clash_exe, root)。"""
     data = {}
@@ -791,6 +964,10 @@ def load_state():
                 app["script_procs"] = _clean_procs(saved.get("script_procs"))
             if saved.get("game_procs"):
                 app["game_procs"] = _clean_procs(saved.get("game_procs"))
+            detect = _clean_detect(saved.get("detect"))
+            if detect:
+                app["detect"] = detect          # 用户自定义检测规则优先
+                app["detect_custom"] = True
             for field in ("site", "github", "release", "download", "accent"):
                 if saved.get(field):
                     app[field] = saved[field]
@@ -809,6 +986,18 @@ def load_state():
             best = pick_best_exe(hits)
             if best:
                 app["script_exe"] = best
+
+    # v4 迁移：只纠正「空值 / 全部是旧启动器误配」的内置 game_procs。
+    # 用户手动配置的其它进程名（如 MAA 模拟器用户填的 MUMUPLAYER.EXE）必须保留，
+    # 不能一刀切覆盖；自定义了检测规则的卡片本来就不迁移。
+    for app in apps:
+        defaults = BUILTIN_GAME_PROCS.get(app.get("key", ""))
+        if not defaults or app.get("detect_custom"):
+            continue
+        current = [str(name).strip() for name in (app.get("game_procs") or [])
+                   if str(name).strip()]
+        if not current or all(_is_legacy_game_proc(name) for name in current):
+            app["game_procs"] = list(defaults)
 
     custom = data.get("custom_apps") or []
     if isinstance(custom, list):
@@ -841,6 +1030,10 @@ def load_state():
                 download=item.get("download") or "",
                 icon_path=icon,
             )
+            detect = _clean_detect(item.get("detect"))
+            if detect:
+                app["detect"] = detect          # 自定义游戏的检测规则
+                app["detect_custom"] = True
             apps.append(app)
 
     clash = data.get("clash") or ""
@@ -850,8 +1043,8 @@ def load_state():
 
 
 def save_state(apps, clash, root):
-    """写入 config.json，返回是否成功（失败由调用方负责提示用户）。"""
-    data = {"version": 3, "apps": {}, "custom_apps": []}
+    """写入 config.json（v4），返回是否成功（失败由调用方负责提示用户）。"""
+    data = {"version": 4, "apps": {}, "custom_apps": []}
     if os.path.normpath(root) != os.path.normpath(SEARCH_ROOT):
         data["root"] = root
     if clash:
@@ -866,6 +1059,11 @@ def save_state(apps, clash, root):
         icon = app.get("icon_path", "")
         if icon:
             entry["icon"] = _portable(icon, APP_DIR)
+        if app.get("detect") and (app.get("detect_custom") or not app.get("builtin")):
+            cleaned = _clean_detect(app["detect"])
+            if cleaned:
+                entry["detect"] = cleaned
+                entry["detect_custom"] = True
         if app.get("builtin"):
             for field in ("site", "github", "release", "download", "accent"):
                 if app.get(field):

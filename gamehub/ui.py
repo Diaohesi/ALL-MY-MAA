@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import ImageTk
 
-from . import VERSION, render, store
+from . import VERSION, detector, render, store
 from . import theme as T
 
 TITLE = "游戏脚本中心"
@@ -58,6 +58,14 @@ class AppDialog(tk.Toplevel):
         ("icon", "自定义图标", "可选，png / ico"),
     ]
 
+    # 检测规则（用于判断「游戏运行中」；留空则用脚本自动规则）
+    DETECT_FIELDS = [
+        ("win_class", "检测：窗口类", "正则，如 ^UnrealWindow$"),
+        ("win_title", "检测：窗口标题", "正则，如 异环"),
+        ("detect_procs", "检测：进程名", "多个用逗号分隔"),
+        ("adb_pkg", "检测：ADB 包名", "可选，多个用逗号分隔"),
+    ]
+
     def __init__(self, master, app=None, on_save=None, on_delete=None):
         super().__init__(master)
         self.title("编辑游戏卡片" if app else "添加游戏")
@@ -71,6 +79,11 @@ class AppDialog(tk.Toplevel):
         self.values = {}
         self.accent = self.app.get("accent") or T.ACCENT_PRESETS[0][1]
         self._chip_refs = []
+        try:
+            self.detect_initial = detector.rules_to_fields(
+                detector.read_game_rules(self.app))
+        except Exception:
+            self.detect_initial = {}
         self._build()
         self.minsize(640, 0)
         self.grab_set()
@@ -118,6 +131,28 @@ class AppDialog(tk.Toplevel):
                 self._button(body, "浏览", lambda f=field: self._browse(f)).grid(
                     row=row, column=2, padx=(8, 0), pady=4)
             elif hint:
+                tk.Label(body, text=hint, bg="#0f141d", fg="#4d5c74",
+                         font=("Microsoft YaHei", -9), anchor="w").grid(
+                    row=row, column=2, sticky="w", padx=(8, 0))
+            row += 1
+
+        # 检测规则（可选）
+        tk.Frame(body, bg="#243044", height=1).grid(
+            row=row, column=0, columnspan=3, sticky="we", pady=(10, 2))
+        row += 1
+        tk.Label(body, text="检测规则（可选，用于准确判断「游戏运行中」）",
+                 bg="#0f141d", fg="#68788e",
+                 font=("Microsoft YaHei", -10)).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        row += 1
+        for field, label, hint in self.DETECT_FIELDS:
+            tk.Label(body, text=label, bg="#0f141d", fg="#9aa8bc",
+                     font=("Microsoft YaHei", -11), anchor="e", width=14).grid(
+                row=row, column=0, sticky="e", pady=4)
+            entry = self._entry(body, self.detect_initial.get(field, ""))
+            entry.grid(row=row, column=1, sticky="we", pady=4)
+            self.values[field] = entry
+            if hint:
                 tk.Label(body, text=hint, bg="#0f141d", fg="#4d5c74",
                          font=("Microsoft YaHei", -9), anchor="w").grid(
                     row=row, column=2, sticky="w", padx=(8, 0))
@@ -199,9 +234,34 @@ class AppDialog(tk.Toplevel):
         except Exception:
             pass
         if dialog.result:
+            path = os.path.normpath(dialog.result)
             entry = self.values["game_exe"]
             entry.delete(0, "end")
-            entry.insert(0, os.path.normpath(dialog.result))
+            entry.insert(0, path)
+            self._fill_detect_suggestion(path)
+
+    def _fill_detect_suggestion(self, exe_path):
+        """自动检测选中启动程序后，把脚本自带的检测规则填进空着的输入框。"""
+        script_entry = self.values.get("script_exe")
+        script_exe = script_entry.get().strip() if script_entry is not None else ""
+        try:
+            rules = detector.read_auto_rules({
+                "key": self.app.get("key", ""),
+                "game": self.app.get("game", ""),
+                "script_exe": script_exe,
+            })
+            suggestion = detector.rules_to_fields(rules)
+        except Exception:
+            suggestion = {}
+        if not suggestion.get("detect_procs"):
+            suggestion["detect_procs"] = os.path.basename(exe_path)
+        for field in ("win_class", "win_title", "detect_procs", "adb_pkg"):
+            entry = self.values.get(field)
+            if entry is None or entry.get().strip():
+                continue
+            value = suggestion.get(field, "")
+            if value:
+                entry.insert(0, value)
 
     def _center(self):
         self.update_idletasks()
@@ -364,6 +424,8 @@ class GameHub:
         self.latest = {}
         self.starting = {}
         self.running = {}
+        self.game_states = {}
+        self.adb_enabled = detector.ADB_ENABLED
         self.hover = ("none",)
         self.toast_msg = "就绪 · 等待启动"
         self.toast_after = None
@@ -589,9 +651,17 @@ class GameHub:
         return "on" if self.running.get(key, {}).get("script") else "off"
 
     def _game_state(self, app):
-        if not app.get("game_exe") and not app.get("game_procs"):
-            return "unset"
-        return "on" if self.running.get(app["key"], {}).get("game") else "off"
+        """返回缓存的检测状态 dict（running/reason/label/hwnd/source…）。"""
+        state = self.game_states.get(app["key"])
+        if state is None:
+            try:
+                state = detector.detect_game_state(app, adb_enabled=self.adb_enabled)
+            except Exception:
+                state = {"running": False, "reason": "", "label": "未运行",
+                         "hwnd": None, "configured": False, "source": "none",
+                         "rules": {}}
+            self.game_states[app["key"]] = state
+        return state
 
     def _update_versions(self):
         for app in self.apps:
@@ -604,13 +674,23 @@ class GameHub:
 
     def _refresh(self):
         names = store.snapshot_processes()
+        windows = detector.snapshot_windows()
         for app in self.apps:
             key = app["key"]
             prev = self.running.get(key, {"script": False, "game": False})
+            prev_game = self.game_states.get(key) or {}
             script_on = bool(app.get("script_procs")) and bool(
                 names & set(app["script_procs"]))
-            game_on = bool(app.get("game_procs")) and bool(
-                names & set(app["game_procs"]))
+            try:
+                game_state = detector.detect_game_state(
+                    app, windows=windows, processes=names,
+                    adb_enabled=self.adb_enabled)
+            except Exception:
+                game_state = {"running": False, "reason": "", "label": "未运行",
+                              "hwnd": None, "configured": False,
+                              "source": "none", "rules": {}}
+            self.game_states[key] = game_state
+            game_on = bool(game_state.get("running"))
             self.running[key] = {"script": script_on, "game": game_on}
             if prev["script"] != script_on:
                 if script_on and key in self.starting:
@@ -618,8 +698,10 @@ class GameHub:
                     self._toast(f"已启动 {app['game']} · {app['script']}")
                 elif not script_on and prev["script"]:
                     self._toast(f"{app['game']} 的脚本已退出")
-            if prev["game"] != game_on and game_on:
-                self._toast(f"{app['game']} 已启动游戏")
+            if game_on and not prev_game.get("running"):
+                self._toast(f"{app['game']} {game_state.get('label') or '已启动'}")
+            elif prev_game.get("running") and not game_on:
+                self._toast(f"{app['game']} 已退出")
         for i in range(len(self._page_apps)):
             self._repaint_card(i)
 
@@ -651,8 +733,24 @@ class GameHub:
             "missing": ("缺失", T.HEX_ERR),
             "off": ("未启动", T.HEX_TXT2),
         }[state]
-        game_state = self._game_state(app)
-        game_label = {"on": "运行中", "off": "未运行", "unset": "未配置"}[game_state]
+        gstate = self._game_state(app)
+        if not gstate.get("configured"):
+            game_state = "unset"
+        elif gstate.get("running"):
+            game_state = "on"
+        elif gstate.get("reason") == "launcher":
+            game_state = "launcher"
+        elif gstate.get("reason") == "cloud":
+            game_state = "cloud"
+        else:
+            game_state = "off"
+        game_label = {
+            "on": gstate.get("label") or "运行中",
+            "launcher": "启动器已开",
+            "cloud": "云游戏运行中",
+            "off": "未运行",
+            "unset": "未配置",
+        }[game_state]
 
         # 两段状态居中排版
         st1 = f"脚本 {label}"
@@ -675,14 +773,19 @@ class GameHub:
                                   (T.HEX_ERR if state == "missing" else None),
                                   state in ("on", "starting", "missing")))
         self.canvas.itemconfigure(card["script_status"], text=st1, fill=color)
+        if game_state in ("on", "cloud"):
+            game_dot_color, game_dot_on, game_color = T.HEX_OK, True, T.HEX_OK
+        elif game_state == "launcher":
+            game_dot_color, game_dot_on, game_color = T.HEX_WAIT, True, T.HEX_WAIT
+        elif game_state == "unset":
+            game_dot_color, game_dot_on, game_color = None, False, T.HEX_TXT3
+        else:
+            game_dot_color, game_dot_on, game_color = None, False, T.HEX_TXT2
         self.canvas.itemconfigure(
             card["game_dot"],
-            image=self._dot_photo(T.HEX_OK if game_state == "on" else None,
-                                  game_state == "on"))
+            image=self._dot_photo(game_dot_color, game_dot_on))
         self.canvas.itemconfigure(
-            card["game_status"], text=st2,
-            fill=T.HEX_OK if game_state == "on" else T.HEX_TXT3 if game_state == "unset"
-            else T.HEX_TXT2)
+            card["game_status"], text=st2, fill=game_color)
 
         # 按钮
         script_hover = hover[0] == "scriptbtn" and hover[1] == i
@@ -902,12 +1005,20 @@ class GameHub:
 
     def launch_game(self, i):
         app = self._page_apps[i]
-        procs = app.get("game_procs") or []
-        if procs and store.snapshot_processes() & set(procs):
-            if store.bring_to_front(procs):
+        try:
+            state = detector.detect_game_state(app, adb_enabled=self.adb_enabled)
+        except Exception:
+            state = {"running": False, "reason": "", "label": "未运行", "hwnd": None}
+        self.game_states[app["key"]] = state
+        if state.get("running"):
+            hwnd = state.get("hwnd")
+            if hwnd and detector.focus_window(hwnd):
+                self._toast(f"已切换到 {app['game']}")
+            elif store.bring_to_front(app.get("game_procs") or []):
                 self._toast(f"已切换到 {app['game']}")
             else:
-                self._toast(f"{app['game']} 正在运行中（窗口未找到）")
+                self._toast(f"{app['game']} {state.get('label') or '运行中'}"
+                            "（窗口未找到）")
             return
         exe = app.get("game_exe", "")
         saved = True
@@ -1026,6 +1137,32 @@ class GameHub:
         except Exception:
             return path
 
+    def _apply_detect_fields(self, app, data):
+        """把编辑框里的检测规则写入 app；与原有规则一致则保持自动规则。"""
+        fields = ("win_class", "win_title", "detect_procs", "adb_pkg")
+        try:
+            current = detector.read_game_rules(app)
+            initial = detector.rules_to_fields(current)
+        except Exception:
+            current, initial = {}, {}
+        values = {field: (data.get(field) or "").strip() for field in fields}
+        if all(values[field] == (initial.get(field) or "").strip()
+               for field in fields):
+            return
+        self.game_states.pop(app.get("key"), None)
+        if not any(values.values()):
+            app.pop("detect", None)
+            app["detect_custom"] = False
+            return
+        try:
+            app["detect"] = detector.rules_from_fields(
+                win_class=values["win_class"], win_title=values["win_title"],
+                detect_procs=values["detect_procs"], adb_pkg=values["adb_pkg"],
+                base=current)
+            app["detect_custom"] = True
+        except Exception:
+            pass
+
     def add_app(self):
         def on_save(data):
             key = self._next_key()
@@ -1041,6 +1178,7 @@ class GameHub:
                 release=data["release"], download=data["download"],
                 icon_path=icon or store.custom_icon_path(key),
             )
+            self._apply_detect_fields(app, data)
             self.apps.append(app)
             saved = self._save_config()
             self.page = (len(self.apps) - 1) // T.PER_PAGE
@@ -1067,6 +1205,8 @@ class GameHub:
             app["download"] = data["download"]
             if data["icon"] and os.path.isfile(data["icon"]):
                 app["icon_path"] = self._store_icon(app["key"], data["icon"])
+            self._apply_detect_fields(app, data)
+            self.game_states.pop(app["key"], None)
             saved = self._save_config()
             self._rebuild()
             if saved:
@@ -1088,6 +1228,7 @@ class GameHub:
                 parent=self.root):
             return
         self.apps = [a for a in self.apps if a["key"] != app["key"]]
+        self.game_states.pop(app["key"], None)
         saved = self._save_config()
         self.page = min(self.page, max(0, (len(self.apps) - 1) // T.PER_PAGE))
         self._rebuild()

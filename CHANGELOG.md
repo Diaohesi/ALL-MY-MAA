@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v0.6.0 (2026-10-18)
+
+- **准确游戏运行检测**：游戏状态不再只看进程名，改为复用各脚本自身的判断方法——
+  一次 `EnumWindows` 窗口快照 + 窗口类 / 标题正则 + 进程（路径收窄，取不到路径时降级）+
+  可选 ADB（默认关闭）；区分「运行中（窗口）/ 运行中（进程）/ 运行中（ADB）」
+  「启动器已开」「云游戏运行中」「未运行 / 未配置」；启动器 / 云游戏只显示文案，不再误报成运行
+- 内置规则：MaaNTE / MaaEnd 自动读取各自 `interface.json` 的 `controller[].win32`；
+  ok-ww 按其 `config.py` 采用 `UnrealWindow` + `Client-Win64-Shipping.exe` 双重校验；
+  MAA PC 端 `UnityWndClass` + `^明日方舟|^Arknights`，模拟器为 ADB 包名规则（默认关闭）
+- 编辑卡片新增「检测规则（可选）」四项：窗口类、窗口标题、进程名、ADB 包名，可自定义；
+  「自动检测」选中启动程序后会把脚本自带规则建议填入空项
+- 修复旧配置误配：内置卡片 `game_procs` 由启动器进程（`NTELauncher.exe` / `Launcher.exe`）
+  迁移为游戏本体进程（`Arknights.exe` / `HTGame.exe` / `Client-Win64-Shipping.exe` / `Endfield.exe`），
+  配置升级为 v4
+- 新增 `gamehub/detector.py`（窗口 / 进程 / ADB 检测与规则解析）与
+  `tools/test_detect_game.py`（不打开 GUI 的游戏状态检测自测）
+- 新增调研报告 `docs/game-detection-research.md`：四款脚本的窗口类 / 标题 / 进程 / ADB 检测机制
+  逆向与静态分析、无法可靠检测的场景与建议
+- 回归测试更新：`tools/regression_test.py` 扩充到 **107 个用例**（含检测规则相关用例），
+  全绿、退出码 0；`docs/qa-report.md` 更新为 v0.6.0 最终版（107 通过 / 0 失败 / 0 跳过）
+- 本机验证：异环运行中被准确识别「运行中（窗口）」（`UnrealWindow` + 「异环」含尾随空格 +
+  `HTGame.exe`），其余三款未运行且无启动器误报；`EnumWindows` 快照 8–14ms
+- 更新 README / 主页（游戏运行检测说明、配置 v4、检测规则、目录结构、常见问题）
+
 ## v0.5.0 (2026-10-18)
 
 - **游戏启动程序自动检测**：编辑卡片时「游戏启动程序」旁新增「自动检测」按钮，
