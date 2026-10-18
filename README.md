@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.10.3
+# All-My-Maa · 游戏脚本中心 v0.10.4
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -37,10 +37,9 @@
 打包版替换 exe 重启、源码模式 `git pull`，安装前确认、失败降级到发布页）；
 「启动游戏」按各脚本自己的方式重构：鸣潮直启 `Wuthering Waves.exe`、终末地走鹰角启动器、
 MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（登录后点开始游戏，避免直启
-`HTGame.exe` 的 UE map 报错）。异环清日常 v0.10.2 起按权限分流：**Hub 未提权且 MaaNTE 未运行**
-→ 用 `--autostart` 自动开始；**MaaNTE 已以高权限运行** → 普通权限 Hub 发不了热键（UIPI），
-提示手动点击或以管理员身份重启 Hub；**Hub 已提权** → 打开 MaaNTE 后发送「开始任务」热键
-（默认 `Ctrl+F10`）。
+`HTGame.exe` 的 UE map 报错）。异环清日常 v0.10.4 起改为与终末地 MaaEnd 同款 MXU autostart：
+`MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`，完成判定为进程退出，
+不再使用 UI + 热键 / 权限分流。
 从 v0.10.3 起，Hub **默认以管理员身份启动**（源码自提权 + 打包 `--uac-admin` manifest）：
 取消 UAC 会回退普通权限并提示，`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过提权；
 关于 / 设置页会显示当前权限。
@@ -240,20 +239,19 @@ v0.8 的三页结构保留，v0.10 在 v0.9 基础上换成更圆润的淡紫渐
 ### 管理员权限（v0.10.3）
 
 v0.10.3 起 Hub **默认以管理员身份启动**——游戏脚本的输入模拟、截图与「一键清日常」通常需要管理员
-权限，异环清日常的「开始任务」热键也要求 Hub 与 MaaNTE 同级：
+权限（异环清日常 v0.10.4 起与终末地一样由 MXU `--autostart` 执行，不再依赖热键）：
 
 - **源码运行**：当前不是管理员时，启动会先用 `pythonw.exe` + `ShellExecuteW(runas)` 重新拉起自己
   （带内部参数 `--elevated`），原进程退出；因此第一次启动会弹一次 UAC；
 - **打包版 GameHub.exe**：构建时用 PyInstaller `--uac-admin` 写入 `requireAdministrator` manifest，
   双击 exe 由 Windows 直接请求管理员权限；
-- **取消 UAC**：源码模式会弹「未获得管理员权限，将以普通权限运行」提示（异环热键 / 部分脚本功能
-  可能受限），然后继续以普通权限运行；打包版带 manifest 时取消 UAC 不会启动；
+- **取消 UAC**：源码模式会弹「未获得管理员权限，将以普通权限运行」提示（部分脚本功能可能受限），
+  然后继续以普通权限运行；打包版带 manifest 时取消 UAC 不会启动；
 - **跳过提权**：源码模式可加 `--no-elevate`，或设置环境变量 `GAMEHUB_NO_ELEVATE=1`
   （也接受 `true` / `yes` / `on`）；`--elevated` 是自重启内部标记，不要手动使用；
 - **权限展示**：关于对话框与设置页会显示「当前权限：管理员 / 普通用户」，方便确认是否提权成功；
-- **权限与功能**：管理员下异环清日常在 MaaNTE 已运行时可直接发送 `Ctrl+F10`；取消 UAC 后按
-  v0.10.2 的分流自动改走 `--autostart`，或提示手动点击 / 以管理员身份重启 Hub。部分脚本的输入 /
-  截图在普通权限下可能失败，遇到问题请右键「以管理员身份运行」。
+- **权限与功能**：一键清日常的每一项会以管理员权限启动（UAC）；异环 / 终末地同为 MXU autostart，
+  不再依赖热键。部分脚本的输入 / 截图在普通权限下可能失败，遇到问题请右键「以管理员身份运行」。
 
 ### 设置（v0.10.0）
 
@@ -315,20 +313,14 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 - **明日方舟 MAA**：在 MAA 里勾选日常任务队列（建议单独建一个「日常」配置），并在
   MAA 设置 → 热键里配置 **LinkStart（开始任务）** 热键；Hub 会带 `--skip-startup-auto-run`
   启动 MAA，等窗口 / 日志就绪后自动发送这个热键。MAA 已经在运行时，Hub 只发热键、不接管进程。
-- **异环 MaaNTE**：按 Hub / MaaNTE 的权限自动分流（v0.10.2）：
-  - **Hub 未提权 + MaaNTE 未运行** → 用 `MaaNTE.exe --autostart --instance "<实例名>"`
-    启动并自动开始任务（实例取 MaaNTE 的 `autoStartInstanceId`，否则取第一个有启用任务的实例）；
-    不发送热键，因此没有 UIPI 问题；
-  - **MaaNTE 已运行且是管理员权限**（或读不到权限，保守按高权限处理）→ 普通权限 Hub 无法向它
-    发送输入，会**提示手动点击「开始任务」**，或以管理员身份重启 Hub 后重试；不会静默算成功；
-  - **Hub 已提权**（或 MaaNTE 由普通权限启动）→ 打开 MaaNTE（正常界面）、等主窗口就绪并置前，
-    发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用）；v0.10.3 起
-    Hub 默认管理员，通常直接走这条分支；取消 UAC 时仍按上面自动分流；
-  - 没有可用实例、热键没启用 / 读不到 / 发送失败 → 打开窗口并提示手动点击；
-    MaaNTE 已在运行时只提示 / 发热键，不结束你自己开的实例；实例名 / 任务字段不再是必需（可保留）。
-- **终末地 MaaEnd**：在 MXU 里准备好实例（本机示例：「挂机任务」/「全套日常」），
-  并在清日常页对应行内填写**实例名**；实例带「启动游戏」前置任务时会自动拉起游戏，
-  仍使用 `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`。
+- **异环 MaaNTE / 终末地 MaaEnd（v0.10.4 起同款 MXU autostart）**：在 MXU 里准备实例
+  （本机示例：「挂机任务」/「全套日常」），并在清日常页对应行内填写**实例名**；Hub 会执行
+  `MaaNTE.exe / MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`。
+  - 执行前请**先关闭已在运行的 MaaNTE / MaaEnd**（脚本在运行会报错）；
+  - 实例必须存在且有启用任务；实例带「启动游戏」前置任务时会自动拉起游戏；
+  - 没有 `LaunchGamePC` 前置任务时：异环要求**游戏已运行**（否则报错，请先点卡片「启动游戏」），
+    终末地只给警告（任务可能失败）；
+  - 完成判定为 MXU 进程退出（`--quit-after-run`，退出码恒 0，不区分成败），结束时只结束本次启动的进程。
 
 **怎么用**
 
@@ -350,7 +342,7 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 | --- | --- | --- | --- |
 | 鸣潮 ok-ww | `pythonw.exe "<working>\main.py" -t DailyTask -e`（cwd=working，管理员） | 进程退出 + 日志出现 `Successfully Executed Task, Exiting Game and App!` | 90 分钟 |
 | 明日方舟 MAA | `MAA.exe --skip-startup-auto-run [--config "<配置名>"]` → 就绪后发送 LinkStart 热键 | `MAA\debug\gui.log` 出现「任务已全部完成！」；失败「任务出错」、停止「已停止」 | 120 分钟 |
-| 异环 MaaNTE | **未提权 + 未运行**：`MaaNTE.exe --autostart --instance "<实例名>"` 自动开始；**已运行高权限**：提示手动 / 管理员重启 Hub；**已提权或目标普通权限**：打开 UI → 置前 → 发送「开始任务」热键（默认 `Ctrl+F10`） | `debug` 最新日志增量出现「停止任务 / tasks-completed / 已停止」；热键缺失 / 无实例 / 发送失败 → 提示手动点击（不静默成功） | 120 分钟 |
+| 异环 MaaNTE | `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出（退出码恒 0，不区分成败） | 120 分钟 |
 | 终末地 MaaEnd | `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出 | 150 分钟 |
 
 **超时、停止与失败处理**
@@ -407,10 +399,8 @@ v0.7.0 起，Hub 为鸣潮生成**启动规格**（`launch`，type=python）：�
   启动用任务队列 + `LinkStart` 热键触发；
 - **MXU（MaaNTE / MaaEnd）**：Tauri + React 的通用 GUI，读取符合 PI V2 的 `interface.json`，
   内嵌 MaaFramework，官方支持 `--autostart --instance "<实例名>" --quit-after-run` 自启动执行；
-  终末地 MaaEnd 仍走这条命令行；异环 MaaNTE v0.10.1 起改为打开 UI 后发送「开始任务」热键
-  （默认 `Ctrl+F10`），因为 MaaNTE 的 UE 游戏直启会报 map 错误；v0.10.2 起再按权限分流：
-  普通权限且 MaaNTE 未运行时回到 `--autostart --instance` 自动开始（绕开 UIPI），
-  已运行的高权限 MaaNTE 无法接收普通权限 Hub 的热键，改为提示手动 / 以管理员重启；
+  v0.10.4 起异环 MaaNTE 与终末地 MaaEnd 都走这条命令行（异环此前短暂用过 UI + 热键，已移除），
+  完成判定为 MXU 进程退出；
 - **ok-script / ok-ww**：Python + PySide6 自动化框架，任务可被命令行 `-t <任务名> -e` 指定，
   完成后退出并关闭游戏；ok-ww 官方计划任务也是这么调用的；
 - **PyAppify**：Rust / Tauri 启动器 + 更新器，负责把 Python 与脚本装到 `data/apps/<app>/`，
@@ -587,10 +577,9 @@ GameHub/
 - 清日常页的勾选 / 独立状态由 `gamehub/daily.py` 的 `DailyManager` 维护
   （`start_single` / `stop_single` / `start_queue` / `snapshot`），可运行
   `python tools/test_ui_state.py` 验证状态隔离与勾选逻辑。
-- 异环清日常的提权分流在 `daily._plan_mxu_ui`：`store.hub_is_elevated()` 判断 Hub、
-  `daily.mxu_target_elevated()` 判断已运行 MaaNTE（`process_is_elevated`），
-  未提权 + 未运行走 `--autostart --instance`、已运行高权限给出 `manual_reason`、提权走
-  `send_hotkey`；自测在 `tools/test_daily.py`（mock，覆盖各权限分支）。
+- 异环 / 终末地清日常共用 `daily._plan_mxu`（`--autostart --instance "<实例名>" --quit-after-run`，
+  完成 = MXU 进程退出）；实例名可由 `_suggest_mxu_instance`（autoStartInstanceId → 首个有启用任务的
+  实例）推荐；自测在 `tools/test_daily.py`（mock，不启动脚本）。
 - 游戏运行检测规则在 `gamehub/detector.py`（`BUILTIN_RULES` / `read_game_rules`）：
   MaaNTE / MaaEnd 优先读各自 `interface.json`，其余用内置规则；改完可运行
   `python tools/test_detect_game.py` 查看每行当前生效的规则与真实检测结果。
@@ -645,41 +634,38 @@ UE map 报错，所以改回启动器；出现回退提示时按提示操作即�
 **Q: 提示需要管理员权限？**
 v0.10.3 起 Hub 默认以管理员身份启动；`ok-ww` 等脚本自身也要求管理员，「一键清日常」每一项会以
 管理员权限启动（可能逐项弹 UAC，点「是」继续；点「否」该项记为失败）。如果当前是普通权限
-（取消过 UAC），异环清日常热键 / 部分脚本输入功能可能受限。
+（取消过 UAC），部分脚本输入功能可能受限。
 
 **Q: 每次启动都弹 UAC，能关掉吗？**
-默认管理员启动就是为了让脚本 / 热键可用，每次启动都会请求一次 UAC。源码运行可加 `--no-elevate`
+默认管理员启动就是为了让脚本 / 输入模拟可用，每次启动都会请求一次 UAC。源码运行可加 `--no-elevate`
 或设置 `GAMEHUB_NO_ELEVATE=1` 跳过提权（例如 PowerShell：`$env:GAMEHUB_NO_ELEVATE=1; python hub.pyw`，
 或把 `python hub.pyw --no-elevate` 写进快捷方式）；打包版 GameHub.exe 带 `requireAdministrator`
 manifest，参数无法跳过，需要自行用不带 `--uac-admin` 的 PyInstaller 参数重新打包。
 
 **Q: 不想用管理员怎么办？**
 源码运行：`python hub.pyw --no-elevate`，或设置环境变量 `GAMEHUB_NO_ELEVATE=1`（true / yes / on 均可）；
-打包版：重新打包时去掉 `--uac-admin`。普通权限下 Hub 仍可使用，但异环清日常会按 v0.10.2 分流
-（MaaNTE 未运行 → `--autostart`；已运行高权限 → 提示手动 / 以管理员重启），部分脚本的输入 /
-截图功能也可能需要管理员。
+打包版：重新打包时去掉 `--uac-admin`。普通权限下 Hub 仍可使用，但部分脚本的输入 / 截图功能
+可能仍需管理员；一键清日常的每一项会单独以管理员权限启动（UAC）。
 
 **Q: 异环清日常没有自动开始？**
-v0.10.2 起按权限自动分流：
-1. **Hub 未提权、MaaNTE 也没在运行**：Hub 用 `--autostart --instance "<实例名>"` 启动 MaaNTE
-   并自动开始任务，不需要热键；实例取 `autoStartInstanceId` 或第一个有启用任务的实例，
-   找不到实例时提示手动点击；
-2. **MaaNTE 已经在运行且是管理员权限**：普通权限 Hub 受 Windows UIPI 限制，无法向高权限进程
-   发送 `Ctrl+F10`，会提示手动点「开始任务」，或以**管理员身份重启 Hub** 后重试；
-3. **Hub 以管理员身份运行**（或 MaaNTE 是普通权限启动）：打开 MaaNTE、等窗口就绪并置前后
-   发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用且未被占用）；
-   热键缺失 / 发送失败同样提示手动点击，不静默算成功。
-
-想看实际走哪条分支，可先用「查看命令(dry-run)」确认命令（autostart / UI+热键 / 手动提示）。
+v0.10.4 起异环与终末地同款，用 `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`：
+1. 先在 MaaNTE 里建好实例并勾选日常任务，在一键清日常行内填写**实例名**（可点卡片「启动脚本」
+   打开脚本界面查看实例）；
+2. **先关闭已经打开的 MaaNTE**（脚本运行中会报错）；
+3. 实例没有 `LaunchGamePC` 前置任务时，**异环游戏需要已经在运行**（先点卡片「启动游戏」）；
+4. 完成后 MaaNTE 进程退出即算完成（`--quit-after-run`，退出码恒 0、不区分成败），
+   可看下方日志确认任务结果；
+5. 找不到实例 / 实例不存在 / 没启用任务 / 游戏未运行 → 日志与 toast 会给出原因，按提示修正后重跑；
+   可先用「查看命令(dry-run)」确认实际命令。
 
 **Q: 点「清日常」没反应 / 一直没开始？**
-先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA / 异环热键
-读不到、MaaEnd 实例名为空或实例不存在、UAC 弹窗被点「否」。可先用「查看命令(dry-run)」确认调用参数。
+先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA 热键读不到、异环 / 终末地实例名为空或不存在、
+异环游戏未运行（实例没有启动前置任务时）、UAC 弹窗被点「否」。可先用「查看命令(dry-run)」确认调用参数。
 
 **Q: 提示「任务未配置」/「实例不存在」？**
 回到脚本里准备任务：ok-ww 在界面里配置并保存「每日任务」；MAA 勾选任务队列并配置 LinkStart 热键；
-异环 MaaNTE 在设置 → 热键里启用「开始任务」全局热键（默认 `Ctrl+F10`，实例名可留空）；
-终末地 MaaEnd 在 MXU 里建好实例并在清日常页对应行内填写实例名。改完再重试。
+异环 MaaNTE / 终末地 MaaEnd 在 MXU 里建好实例，并在清日常页对应行内填写实例名
+（异环实例没有 LaunchGamePC 前置任务时，游戏需先运行）。改完再重试。
 
 **Q: 清日常时脚本窗口弹在后台 / 抢鼠标？**
 脚本本身需要前台输入（尤其 MaaNTE / MaaEnd 的 Win32-Front、ok-ww），执行期间请勿操作电脑；

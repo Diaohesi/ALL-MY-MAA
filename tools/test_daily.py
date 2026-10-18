@@ -104,12 +104,10 @@ def make_mxu_app(tmp, key="nte"):
     base = os.path.join(tmp, script)
     exe = touch(os.path.join(base, f"{script}.exe"))
     if key == "nte":
-        config = {"settings": {"hotkeys": {
-            "startTasks": "Ctrl+F10", "globalEnabled": True}},
-            "instances": [
-                {"name": "挂机任务", "tasks": [
-                    {"taskName": "FishNew", "enabled": True},
-                    {"taskName": "DailyTask", "enabled": False}]}]}
+        config = {"instances": [
+            {"id": "cfg-nte", "name": "挂机任务", "tasks": [
+                {"taskName": "FishNew", "enabled": True},
+                {"taskName": "DailyTask", "enabled": False}]}]}
     else:
         config = {"instances": [
             {"name": "全套日常", "tasks": [
@@ -159,7 +157,6 @@ def test_dry_run_commands(tmp):
         apps = [wuwa, maa, nte, maaend]
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
                 mock.patch.object(store, "launch_spec_running", return_value=False), \
-                mock.patch.object(store, "hub_is_elevated", return_value=True), \
                 mock.patch.object(daily, "_game_running", return_value=True), \
                 mock.patch.object(daily, "launch_elevated",
                                   side_effect=AssertionError("dry-run 不应启动进程")):
@@ -186,33 +183,16 @@ def test_dry_run_commands(tmp):
         check("MAA 无错误", maa_plan["errors"], [])
 
         nte_plan = by_key["nte"]
-        check("异环新策略 mxu_ui", nte_plan["mode"], "mxu_ui")
-        check("异环直接打开 MaaNTE", "MaaNTE.exe" in nte_plan["command_text"],
-              True)
-        check("异环不再用 --autostart", "--autostart" in nte_plan["params"],
-              False)
-        check("异环读取开始任务热键",
-              nte_plan["hotkey"]["text"] if nte_plan.get("hotkey") else "",
-              "Ctrl + F10")
+        check("异环与终末地同用 mxu", nte_plan["mode"], "mxu")
+        check("异环命令含 MaaNTE", "MaaNTE.exe" in nte_plan["command_text"], True)
+        check("异环含 --autostart",
+              "--autostart" in nte_plan["params"], True)
+        check("异环含 --instance \"挂机任务\"",
+              '--instance "挂机任务"' in nte_plan["params"], True)
+        check("异环含 --quit-after-run",
+              "--quit-after-run" in nte_plan["params"], True)
+        check("异环无热键字段", "hotkey" in nte_plan, False)
         check("异环无前置错误", nte_plan["errors"], [])
-        check("提权走热键", nte_plan["use_hotkey"], True)
-        check("提权不 autostart", "--autostart" in nte_plan["params"], False)
-
-        # 未提权：未运行 -> --autostart 自动开始（不发热键、无 --quit-after-run）
-        with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False):
-            plan_nonadmin = daily.plan_for(nte)
-        check("未提权 elevated=False", plan_nonadmin["elevated"], False)
-        check("未提权使用 autostart",
-              plan_nonadmin["args"][:1] == ["--autostart"], True)
-        check("未提权带实例",
-              plan_nonadmin["args"][-1] if plan_nonadmin["args"] else "",
-              "挂机任务")
-        check("未提权不带 --quit-after-run",
-              "--quit-after-run" in plan_nonadmin["params"], False)
-        check("未提权不发热键", plan_nonadmin["use_hotkey"], False)
-        check("未提权不 manual", plan_nonadmin["manual_start"], False)
-        check("未提权无错误", plan_nonadmin["errors"], [])
 
         maaend_plan = by_key["maaend"]
         check("终末地默认实例「全套日常」",
@@ -228,102 +208,76 @@ def test_preconditions(tmp):
     with tempfile.TemporaryDirectory(prefix="gh_daily_pre_") as inner:
         nte = make_mxu_app(inner, "nte")
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=True), \
                 mock.patch.object(daily, "_game_running", return_value=False):
             plan = daily.plan_for(nte)
-        check("异环不再要求游戏/前置", plan["errors"], [])
-        check("异环计划为 mxu_ui", plan["mode"], "mxu_ui")
-        check("异环热键已读取",
-              plan.get("hotkey", {}).get("text") if plan.get("hotkey") else "",
-              "Ctrl + F10")
-        check("提权使用热键", plan.get("use_hotkey"), True)
+        check("异环计划为 mxu", plan["mode"], "mxu")
+        check("异环无 LaunchGamePC 且游戏未运行 -> 错误",
+              any("异环游戏未运行" in error for error in plan["errors"]), True)
+        check("异环含 --quit-after-run",
+              "--quit-after-run" in plan["params"], True)
 
-        # 热键缺失/禁用且已提权 -> 需要手动开始，不静默成功
-        no_hot = make_mxu_app(os.path.join(inner, "no_hot"), "nte")
-        cfg_path = daily.mxu_paths(no_hot)["config"]
+        # 带 LaunchGamePC 前置：游戏未运行也不报错
+        launch = make_mxu_app(os.path.join(inner, "launch"), "nte")
+        cfg_path = daily.mxu_paths(launch)["config"]
         with open(cfg_path, "w", encoding="utf-8") as fh:
-            json.dump({"settings": {"hotkeys": {
-                "startTasks": "Ctrl+F10", "globalEnabled": False}}},
+            json.dump({"instances": [{"name": "挂机任务", "tasks": [
+                {"taskName": "__MXU_PRETASK__LaunchGamePC", "enabled": True},
+                {"taskName": "DailyTask", "enabled": True}]}]},
                 fh, ensure_ascii=False)
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=True):
-            plan_no_hot = daily.plan_for(no_hot)
-        check("热键禁用 -> manual_start", plan_no_hot["manual_start"], True)
-        check("热键禁用 -> warning",
-              any("手动" in warning for warning in plan_no_hot["warnings"]),
-              True)
+                mock.patch.object(daily, "_game_running", return_value=False):
+            plan_launch = daily.plan_for(launch)
+        check("LaunchGamePC 允许游戏未运行", plan_launch["errors"], [])
 
-        # 已运行 + 未提权 -> 明确 manual，不结束用户实例
-        running = make_mxu_app(os.path.join(inner, "running"), "nte")
+        # 脚本已运行 -> 报错（与终末地一致）
         with mock.patch.object(store, "snapshot_processes",
                                return_value={"MAANTE.EXE"}), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False), \
-                mock.patch.object(daily, "mxu_target_elevated",
-                                  return_value=True):
-            plan_running = daily.plan_for(running)
-        check("已运行 attach", plan_running["attach"], True)
-        check("未提权已运行 -> manual", plan_running["manual_start"], True)
-        check("未提权已运行提示管理员",
-              "非管理员" in plan_running["manual_reason"], True)
-        check("已运行不报错", plan_running["errors"], [])
+                mock.patch.object(daily, "_game_running", return_value=True):
+            plan_running = daily.plan_for(launch)
+        check("异环脚本已运行 -> 错误",
+              any("已在运行" in error for error in plan_running["errors"]), True)
 
-        # Hub 未提权但 MaaNTE 是普通权限进程 -> 仍可发热键
-        running_normal = make_mxu_app(os.path.join(inner, "running_normal"),
-                                      "nte")
-        with mock.patch.object(store, "snapshot_processes",
-                               return_value={"MAANTE.EXE"}), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False), \
-                mock.patch.object(daily, "mxu_target_elevated",
-                                  return_value=False):
-            plan_running_normal = daily.plan_for(running_normal)
-        check("目标普通权限 -> 仍走热键",
-              plan_running_normal["use_hotkey"], True)
-        check("目标普通权限 -> 不 manual",
-              plan_running_normal["manual_start"], False)
-
-        # 实例/任务字段不再必须
-        override = make_mxu_app(os.path.join(inner, "override"), "nte")
-        override["daily"] = store._clean_daily({"instance": "不存在",
-                                                 "task": "x"}, "nte")
+        # 实例不存在 -> 明确错误
+        bad = make_mxu_app(os.path.join(inner, "bad_inst"), "nte")
+        bad["daily"] = store._clean_daily({"instance": "不存在"}, "nte")
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False):
-            plan_override = daily.plan_for(override)
-        check("实例/任务字段可保留", plan_override["errors"], [])
+                mock.patch.object(daily, "_game_running", return_value=True):
+            plan_bad = daily.plan_for(bad)
+        check("异环实例不存在 -> 错误",
+              any("不存在" in error for error in plan_bad["errors"]), True)
 
         # autoStartInstanceId -> instances[].name
         mapped = make_mxu_app(os.path.join(inner, "mapped"), "nte")
         mapped_cfg = daily.mxu_paths(mapped)["config"]
         with open(mapped_cfg, "w", encoding="utf-8") as fh:
-            json.dump({"settings": {
-                "hotkeys": {"startTasks": "Ctrl+F10", "globalEnabled": True},
-                "autoStartInstanceId": "cfg-two"},
-                "instances": [
-                    {"id": "cfg-one", "name": "挂机任务",
-                     "tasks": [{"taskName": "DailyTask", "enabled": True}]},
-                    {"id": "cfg-two", "name": "配置 1",
-                     "tasks": [{"taskName": "DailyTask", "enabled": True}]},
-                ]}, fh, ensure_ascii=False)
+            json.dump({"settings": {"autoStartInstanceId": "cfg-two"},
+                       "instances": [
+                           {"id": "cfg-one", "name": "挂机任务",
+                            "tasks": [{"taskName": "DailyTask",
+                                       "enabled": True}]},
+                           {"id": "cfg-two", "name": "配置 1",
+                            "tasks": [{"taskName": "DailyTask",
+                                       "enabled": True}]},
+                       ]}, fh, ensure_ascii=False)
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False):
+                mock.patch.object(daily, "_game_running", return_value=True):
             plan_mapped = daily.plan_for(mapped)
         check("autoStartInstanceId 映射",
-              plan_mapped.get("autostart_instance"), "配置 1")
+              plan_mapped["settings"].get("instance"), "配置 1")
+        check("映射实例进入命令",
+              '--instance "配置 1"' in plan_mapped["params"], True)
 
-        # 无实例 -> 裸 UI + 手动
+        # 无实例 -> 明确错误（不再裸 UI）
         no_inst = make_mxu_app(os.path.join(inner, "no_inst"), "nte")
         ni_cfg = daily.mxu_paths(no_inst)["config"]
         with open(ni_cfg, "w", encoding="utf-8") as fh:
-            json.dump({"settings": {"hotkeys": {
-                "startTasks": "Ctrl+F10", "globalEnabled": True}},
-                "instances": []}, fh, ensure_ascii=False)
+            json.dump({"instances": []}, fh, ensure_ascii=False)
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
-                mock.patch.object(store, "hub_is_elevated", return_value=False):
+                mock.patch.object(daily, "_game_running", return_value=True):
             plan_no_inst = daily.plan_for(no_inst)
-        check("无实例 -> manual", plan_no_inst["manual_start"], True)
-        check("无实例 -> 提示手动",
-              "手动" in plan_no_inst["manual_reason"], True)
-        check("无实例 -> 普通 UI",
-              "--autostart" in plan_no_inst["params"], False)
+        check("异环无实例 -> 错误",
+              any("MXU 实例配置" in error
+                  for error in plan_no_inst["errors"]), True)
 
         maa, _gui, _log = make_maa_app(inner, hotkey=False)
         with mock.patch.object(store, "snapshot_processes", return_value=set()):
@@ -431,106 +385,24 @@ def test_okww_states(tmp):
 def test_mxu_and_maa(tmp):
     print("\n=== MXU / MAA 状态机 ===")
     with tempfile.TemporaryDirectory(prefix="gh_daily_mxu_") as inner:
-        # 终末地仍走 --autostart MXU：进程退出/超时
-        maaend = make_mxu_app(inner, "maaend")
-        clock = FakeClock()
-        handle = FakeHandle(clock, exit_calls=2)
-        result = _run_with_mocks(maaend, clock, handle,
-                                 os.path.join(inner, "mxu.log"))
-        check("MXU 进程退出 -> finished", result["state"], daily.FINISHED)
+        # 异环与终末地同走 --autostart MXU：进程退出/超时
+        for key in ("maaend", "nte"):
+            app = make_mxu_app(os.path.join(inner, key), key)
+            clock = FakeClock()
+            handle = FakeHandle(clock, exit_calls=2)
+            result = _run_with_mocks(app, clock, handle,
+                                     os.path.join(inner, key + ".log"))
+            check(f"{key} MXU 进程退出 -> finished", result["state"],
+                  daily.FINISHED)
 
-        maaend2 = make_mxu_app(os.path.join(inner, "mxu2"), "maaend")
-        clock2 = FakeClock()
-        handle2 = FakeHandle(clock2, exit_calls=None)
-        result2 = _run_with_mocks(maaend2, clock2, handle2,
-                                  os.path.join(inner, "mxu2.log"))
-        check("MXU 超时 -> timeout", result2["state"], daily.TIMEOUT)
-        check("MXU 超时结束本次进程", handle2.terminated, True)
-
-        # 异环 mxu_ui：打开 UI -> 热键 -> 日志完成
-        nte = make_mxu_app(os.path.join(inner, "nte_ui"), "nte")
-        ui_log = touch(os.path.join(daily.mxu_paths(nte)["base"],
-                                    "debug", "2026-test.log"), b"")
-        clock_ui = FakeClock()
-        handle_ui = FakeHandle(clock_ui, exit_calls=None)
-        sent = []
-
-        def fake_send(hotkey):
-            sent.append(hotkey)
-            write_log(ui_log, "[Task] 停止任务 tasks-completed\n")
-            return True
-
-        def launcher_ui(exe, params, cwd):
-            return handle_ui
-
-        with mock.patch.object(daily, "_now", clock_ui.now), \
-                mock.patch.object(daily, "_sleep", clock_ui.sleep), \
-                mock.patch.object(store, "hub_is_elevated", return_value=True), \
-                mock.patch.object(daily, "_mxu_ui_window",
-                                  return_value={"hwnd": 1}), \
-                mock.patch.object(daily, "send_hotkey", side_effect=fake_send), \
-                mock.patch.object(store, "snapshot_processes",
-                                  return_value=set()):
-            result_ui = daily.run(nte, launcher=launcher_ui)
-        check("异环发送开始任务热键", len(sent), 1)
-        check("异环热键内容", sent[0]["text"] if sent else "", "Ctrl + F10")
-        check("异环日志完成 -> finished", result_ui["state"], daily.FINISHED)
-
-        # 未提权 + 未运行：自动 --autostart，不发送热键
-        nte_auto = make_mxu_app(os.path.join(inner, "nte_auto"), "nte")
-        auto_log = touch(os.path.join(daily.mxu_paths(nte_auto)["base"],
-                                      "debug", "2026-auto.log"), b"")
-        clock_auto = FakeClock()
-        handle_auto = FakeHandle(clock_auto, exit_calls=None)
-        auto_params = []
-
-        def launcher_auto(exe, params, cwd):
-            auto_params.append((exe, params, cwd))
-            write_log(auto_log, "[Task] 停止任务 tasks-completed\n")
-            return handle_auto
-
-        with mock.patch.object(daily, "_now", clock_auto.now), \
-                mock.patch.object(daily, "_sleep", clock_auto.sleep), \
-                mock.patch.object(store, "hub_is_elevated",
-                                  return_value=False), \
-                mock.patch.object(daily, "send_hotkey",
-                                  side_effect=AssertionError("未提权不应发热键")), \
-                mock.patch.object(store, "snapshot_processes",
-                                  return_value=set()):
-            result_auto = daily.run(nte_auto, launcher=launcher_auto)
-        check("未提权 autostart 参数含 --autostart",
-              "--autostart" in auto_params[0][1] if auto_params else False,
-              True)
-        check("未提权 autostart 参数含实例",
-              '--instance "挂机任务"' in auto_params[0][1]
-              if auto_params else False, True)
-        check("未提权 autostart 不含 quit",
-              "--quit-after-run" in auto_params[0][1] if auto_params else True,
-              False)
-        check("未提权 autostart 不发热键", result_auto["state"],
-              daily.FINISHED)
-
-        # 热键不可用：提示手动，不静默成功
-        nte_manual = make_mxu_app(os.path.join(inner, "nte_manual"), "nte")
-        cfg = daily.mxu_paths(nte_manual)["config"]
-        with open(cfg, "w", encoding="utf-8") as fh:
-            json.dump({"settings": {"hotkeys": {
-                "startTasks": "Ctrl+F10", "globalEnabled": False}}},
-                fh, ensure_ascii=False)
-        handle_m = FakeHandle(FakeClock(), exit_calls=None)
-        with mock.patch.object(daily, "_now", FakeClock().now), \
-                mock.patch.object(daily, "_sleep", lambda seconds: None), \
-                mock.patch.object(daily, "_mxu_ui_window",
-                                  return_value={"hwnd": 1}), \
-                mock.patch.object(daily, "send_hotkey",
-                                  side_effect=AssertionError("不应发送热键")), \
-                mock.patch.object(store, "snapshot_processes",
-                                  return_value=set()):
-            result_manual = daily.run(
-                nte_manual, launcher=lambda exe, params, cwd: handle_m)
-        check("热键不可用 -> failed", result_manual["state"], daily.FAILED)
-        check("热键不可用 -> 手动提示",
-              "手动" in result_manual["reason"], True)
+            app2 = make_mxu_app(os.path.join(inner, key + "2"), key)
+            clock2 = FakeClock()
+            handle2 = FakeHandle(clock2, exit_calls=None)
+            result2 = _run_with_mocks(app2, clock2, handle2,
+                                      os.path.join(inner, key + "2.log"))
+            check(f"{key} MXU 超时 -> timeout", result2["state"],
+                  daily.TIMEOUT)
+            check(f"{key} MXU 超时结束本次进程", handle2.terminated, True)
 
         # MAA：启动 -> 就绪 -> 热键 -> 日志成功
         maa, _gui, maa_log = make_maa_app(os.path.join(inner, "maa"))

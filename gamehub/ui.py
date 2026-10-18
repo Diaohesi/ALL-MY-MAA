@@ -2320,25 +2320,7 @@ class GameHub:
                 stop_btn.configure(state="normal" if active == key
                                    else "disabled")
             if hint is not None:
-                if reason:
-                    hint.configure(text=reason, fg="#ffce6b")
-                elif key == "nte":
-                    app = self._app_by_key(key)
-                    attach = False
-                    target_elevated = True
-                    elevated = store.hub_is_elevated()
-                    try:
-                        attach = daily._script_running(app) if app else False
-                        if attach and not elevated and app:
-                            target_elevated = daily.mxu_target_elevated(app)
-                    except Exception:
-                        attach = False
-                    hint.configure(
-                        text=daily.mxu_ui_hint(elevated, attach=attach,
-                                               target_elevated=target_elevated),
-                        fg=T.UI_TEXT_3)
-                else:
-                    hint.configure(text="", fg=T.UI_TEXT_3)
+                hint.configure(text=reason, fg="#ffce6b" if reason else T.UI_TEXT_3)
 
     # ---------------------------------------------------------- 设置页
     def _build_settings_page(self):
