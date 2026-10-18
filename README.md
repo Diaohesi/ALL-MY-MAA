@@ -223,6 +223,16 @@ git config --local https.proxy http://127.0.0.1:7897
 - Pull Request 前请先跑一遍 Hub，确认添加/编辑卡片、启动脚本、启动游戏等功能正常；
 - 提交信息建议使用 `feat:`、`fix:`、`docs:` 等前缀。
 
+## 发布新版本（维护者）
+
+1. 修改 `gamehub/__init__.py` 中的 `VERSION`，并更新 `CHANGELOG.md`；
+2. 提交并推送：`git add -A && git commit -m "release: vX.Y.Z" && git push`；
+3. 打标签并推送：`git tag -a vX.Y.Z -m "GameHub Lite vX.Y.Z" && git push origin vX.Y.Z`；
+4. GitHub Actions 会自动构建 `GameHub.exe` 并创建 / 更新对应的 Release
+   （见 [.github/workflows/build-exe.yml](.github/workflows/build-exe.yml)）。
+
+发布页：<https://github.com/Diaohesi/ALL-MY-MAA/releases>
+
 ## 致谢与声明
 
 本仓库代码使用 MIT License。各脚本软件（MAA / MaaNTE / ok-ww / MaaEnd）
