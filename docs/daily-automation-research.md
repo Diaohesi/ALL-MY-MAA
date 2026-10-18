@@ -1,7 +1,7 @@
 # v0.7.0 调研：ok-ww 启动链与四游戏「一键清日常」方案
 
 - 任务：shared task `task-15` —— 研究「鸣潮只打开启动器」的根因与四款脚本（MaaNTE / MaaEnd / ok-ww / MAA）的一键清日常调用方案，供 GameHub v0.7.0 实现。
-- 仓库：`D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/AllMyMaa ），基线版本 v0.6.0。
+- 仓库：`D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/All-My-Maa ），基线版本 v0.6.0。
 - 方法：本地源码/配置/运行时日志/二进制字符串静态分析 + GitHub 官方文档与源码核对（走 `curl -x http://127.0.0.1:7897`）。**未启动游戏、未执行清日常、未重启用户 Hub、未修改除本文件外的任何文件、未 commit。**
 - 证据强度：★★★ 配置文件 / 可读源码 / 官方文档 / 运行时日志；★★ 二进制字符串 / 符号；★ 推断（需实测）。
 

@@ -1,16 +1,16 @@
-# AllMyMaa · 游戏脚本中心 v0.8.0
+# All-My-Maa · 游戏脚本中心 v0.8.0
 
 <p align="center">
-  <a href="https://github.com/Diaohesi/AllMyMaa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/AllMyMaa?label=release&color=4fc3ff"></a>
-  <a href="https://github.com/Diaohesi/AllMyMaa/actions/workflows/build-exe.yml"><img alt="build" src="https://github.com/Diaohesi/AllMyMaa/actions/workflows/build-exe.yml/badge.svg"></a>
-  <a href="https://github.com/Diaohesi/AllMyMaa/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/Diaohesi/AllMyMaa?color=b98bff"></a>
+  <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
+  <a href="https://github.com/Diaohesi/All-My-Maa/actions/workflows/build-exe.yml"><img alt="build" src="https://github.com/Diaohesi/All-My-Maa/actions/workflows/build-exe.yml/badge.svg"></a>
+  <a href="https://github.com/Diaohesi/All-My-Maa/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/Diaohesi/All-My-Maa?color=b98bff"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D7">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
-  <a href="https://diaohesi.github.io/AllMyMaa/"><img alt="homepage" src="https://img.shields.io/badge/homepage-GitHub%20Pages-5ee7c7"></a>
+  <a href="https://diaohesi.github.io/All-My-Maa/"><img alt="homepage" src="https://img.shields.io/badge/homepage-GitHub%20Pages-5ee7c7"></a>
 </p>
 
-**AllMyMaa（游戏脚本中心）** 是一个 Windows 桌面启动器：把 **明日方舟（MAA）**、
+**All-My-Maa（游戏脚本中心）** 是一个 Windows 桌面启动器：把 **明日方舟（MAA）**、
 **异环（MaaNTE）**、**鸣潮（ok-ww）**、**明日方舟终末地（MaaEnd）** 等游戏脚本
 收进同一个窗口，并且可以**可视化添加任意新游戏**。
 
@@ -25,7 +25,7 @@
 主页直接打开或唤出脚本，清日常页勾选游戏、逐行开始 / 停止，设置页可调整强调色、刷新间隔、
 关闭行为与清日常默认值。
 
-**在线主页（GitHub Pages）**：<https://diaohesi.github.io/AllMyMaa/>
+**在线主页（GitHub Pages）**：<https://diaohesi.github.io/All-My-Maa/>
 — 截图、功能一览和下载入口都在这一页。
 
 ![主界面](docs/screenshot.png)
@@ -37,20 +37,20 @@
 ## 下载
 
 - 想先了解再下载？逛一下
-  [在线主页（GitHub Pages）](https://diaohesi.github.io/AllMyMaa/)，
+  [在线主页（GitHub Pages）](https://diaohesi.github.io/All-My-Maa/)，
   截图、功能和下载入口都在一页里。
-- **推荐**：到 [Releases](https://github.com/Diaohesi/AllMyMaa/releases) 下载
+- **推荐**：到 [Releases](https://github.com/Diaohesi/All-My-Maa/releases) 下载
   打包好的 `GameHub.exe`，放到 `GameHub/` 文件夹里双击 `启动游戏中心.bat` 即可，
   **不需要安装 Python 和 Pillow**。
 - 源码运行 / 自己打包：
 
   ```bat
-  git clone https://github.com/Diaohesi/AllMyMaa.git GameHub
+  git clone https://github.com/Diaohesi/All-My-Maa.git GameHub
   cd GameHub
   python -m pip install pillow
   ```
 
-- 问题反馈：[Issues](https://github.com/Diaohesi/AllMyMaa/issues)
+- 问题反馈：[Issues](https://github.com/Diaohesi/All-My-Maa/issues)
 
 
 ## 功能
@@ -182,7 +182,7 @@ v0.5 及更早只按进程名判断游戏是否在运行，内置配置甚至把
 
 主窗口改为**左侧固定导航 + 三页内容**（1200×720，可调整大小，最小 1000×620）：
 
-- **左侧导航**：Logo + AllMyMaa / 游戏脚本中心；「主页 / 清日常 / 设置」当前页高亮；下方常驻
+- **左侧导航**：Logo + All-My-Maa / 游戏脚本中心；「主页 / 清日常 / 设置」当前页高亮；下方常驻
   「打开 Clash Verge」；底部显示 Hub 状态、运行中的脚本数与版本号（单实例运行）。
 - **主页**：每个游戏一行，展示图标、名称、版本、脚本状态与游戏运行状态。行内按钮：
   **「打开脚本」**（未运行则启动，已在运行时变成 **「唤到前台」**）、**「启动游戏」**、
@@ -518,7 +518,7 @@ git config --local https.proxy http://127.0.0.1:7897
 
 ## 参与开发
 
-- 欢迎提交 [Issue](https://github.com/Diaohesi/AllMyMaa/issues) 反馈问题或建议；
+- 欢迎提交 [Issue](https://github.com/Diaohesi/All-My-Maa/issues) 反馈问题或建议；
 - 改动后先跑回归测试（标准库 `unittest`，不需要 pytest，全绿时退出码为 0）：
 
   ```bat
@@ -538,15 +538,15 @@ git config --local https.proxy http://127.0.0.1:7897
 
 1. 修改 `gamehub/__init__.py` 中的 `VERSION`，并更新 `CHANGELOG.md`；
 2. 提交并推送：`git add -A && git commit -m "release: vX.Y.Z" && git push`；
-3. 打标签并推送：`git tag -a vX.Y.Z -m "AllMyMaa vX.Y.Z" && git push origin vX.Y.Z`；
+3. 打标签并推送：`git tag -a vX.Y.Z -m "All-My-Maa vX.Y.Z" && git push origin vX.Y.Z`；
 4. GitHub Actions 会自动构建 `GameHub.exe` 并创建 / 更新对应的 Release
    （见 [.github/workflows/build-exe.yml](.github/workflows/build-exe.yml)）；
 5. 改动了 `docs/` 里的主页内容时，推送后会自动部署到
-   [GitHub Pages](https://diaohesi.github.io/AllMyMaa/)
+   [GitHub Pages](https://diaohesi.github.io/All-My-Maa/)
    （见 [.github/workflows/pages.yml](.github/workflows/pages.yml)；
    仓库 Settings → Pages 的 Source 需为「GitHub Actions」）。
 
-发布页：<https://github.com/Diaohesi/AllMyMaa/releases>
+发布页：<https://github.com/Diaohesi/All-My-Maa/releases>
 
 ## 致谢与声明
 

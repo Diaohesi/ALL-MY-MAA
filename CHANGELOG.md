@@ -21,7 +21,7 @@
   关于页提供项目主页 / GitHub / Release / 更新日志 / QA 报告 / 调研报告 / 检查更新入口
 - **配置扩展（仍为 v4）**：顶层新增 `settings`（强调色 / 启动检查更新 / 刷新间隔 / 关闭行为 /
   Clash 路径 / 清日常默认值），缺省补默认、非法值清洗；保存失败会提示
-- **AllMyMaa 品牌**：项目更名为 AllMyMaa（GitHub 仓库、Pages、文档、应用内标题与关于页同步）
+- **All-My-Maa 品牌**：项目更名为 All-My-Maa（GitHub 仓库、Pages、文档、应用内标题与关于页同步）
 - **清日常独立状态**：新增 `daily.DailyManager`，按 app 维护状态，支持单项开始 / 停止与队列，
   非当前项不再显示「清日常中」
 - 新增 `tools/test_ui_state.py`（per-app 状态隔离 / 勾选过滤 / settings 清洗与往返）；
@@ -92,7 +92,7 @@
   `interface.json` 版本值非字符串时回退（QA-02）；版本比较支持预发布号与短版本（QA-04）；
   进程名清洗忽略非字符串项（QA-05）；注册表 `DisplayIcon` 带图标索引时正确解析（QA-09）
 - 新增回归测试 `tools/regression_test.py`（标准库 unittest，57 个用例）与 `docs/qa-report.md` 测试报告
-- 新增 GitHub Pages 项目主页：<https://diaohesi.github.io/AllMyMaa/>
+- 新增 GitHub Pages 项目主页：<https://diaohesi.github.io/All-My-Maa/>
   （`docs/index.html` + `docs/site.css`，`.github/workflows/pages.yml` 自动部署）
 - 新增 `tools/verify_exe.ps1` 本地打包验证脚本
 - 更新 README（在线主页入口、自动检测说明、目录结构、常见问题）

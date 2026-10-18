@@ -1,11 +1,11 @@
-# AllMyMaa 回归测试报告（v0.8.0 最终版）
+# All-My-Maa 回归测试报告（v0.8.0 最终版）
 
 | 项目 | 内容 |
 | --- | --- |
-| 仓库 | `D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/AllMyMaa ） |
-| 被测版本 | GameHub Lite / **AllMyMaa v0.8.0**（功能快照：v0.7.0 + 新 UI 三页 + AllMyMaa 品牌 + 设置页 + 清日常勾选/独立状态 + QA-15 修复；`gamehub.__init__.VERSION` 当前仍为 `0.7.0`，按发布流程由 release 任务 bump 为 `0.8.0`） |
-| 代码基线 | `3a805e5`（docs: rebrand to AllMyMaa） |
-| 工作区增量 | `gamehub/ui.py` **+1509 / -1196**（2363 行：三页导航/AllMyMaa 品牌/设置页/清日常勾选与独立状态展示）、`gamehub/daily.py` **+312**（1630 行：`DailyManager`/`ordered_daily_keys`/`enabled_daily_keys`/独立状态）、`gamehub/store.py` **+94 / -8**（`settings` 清洗/持久化、`daily_default_timeout`、`daily_explicit`、QA-15 clash 路径还原）、`gamehub/theme.py` +4；新增 `tools/test_ui_state.py`（260 行） |
+| 仓库 | `D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/All-My-Maa ） |
+| 被测版本 | GameHub Lite / **All-My-Maa v0.8.0**（功能快照：v0.7.0 + 新 UI 三页 + All-My-Maa 品牌 + 设置页 + 清日常勾选/独立状态 + QA-15 修复；`gamehub.__init__.VERSION` 当前仍为 `0.7.0`，按发布流程由 release 任务 bump 为 `0.8.0`） |
+| 代码基线 | `3a805e5`（docs: rebrand to All-My-Maa） |
+| 工作区增量 | `gamehub/ui.py` **+1509 / -1196**（2363 行：三页导航/All-My-Maa 品牌/设置页/清日常勾选与独立状态展示）、`gamehub/daily.py` **+312**（1630 行：`DailyManager`/`ordered_daily_keys`/`enabled_daily_keys`/独立状态）、`gamehub/store.py` **+94 / -8**（`settings` 清洗/持久化、`daily_default_timeout`、`daily_explicit`、QA-15 clash 路径还原）、`gamehub/theme.py` +4；新增 `tools/test_ui_state.py`（260 行） |
 | 测试脚本 | `tools/regression_test.py`（标准库 `unittest`，v0.8 最终版 **179 用例 / 33 个测试类**） |
 | 执行命令 | `python tools/regression_test.py`（任意 CWD 可运行；`-v` 详细输出） |
 | 执行时间 | 2026-10-18（最终快照：`gamehub/store.py` mtime 16:40:23，`gamehub/daily.py` mtime 16:33:56，`gamehub/ui.py` mtime 16:33:10） |
@@ -114,7 +114,7 @@ QA-01/02（read_version 回退）、QA-03（save_state 返回 bool）、QA-04（
 
 ## 四、未覆盖点与测试限制
 
-1. **真实 GUI 交互（需 Lead 人工验证）**：三页导航/高亮切换、首页卡片、清日常页勾选与每行独立状态展示、设置页控件绑定与保存提示、队列对话框、滚动/缩放/DPI、AllMyMaa 品牌视觉。本任务不启动 GUI/mainloop，未覆盖。
+1. **真实 GUI 交互（需 Lead 人工验证）**：三页导航/高亮切换、首页卡片、清日常页勾选与每行独立状态展示、设置页控件绑定与保存提示、队列对话框、滚动/缩放/DPI、All-My-Maa 品牌视觉。本任务不启动 GUI/mainloop，未覆盖。
 2. **真实清日常/UAC/热键/日志端到端**：真实启动 ok-ww/MAA/MXU、UAC 弹窗、MAA LinkStart 热键、真实日志成功/失败标记、超时终止、停止后剩余队列等需 Lead 受控实测（自动化全部 mock/FakeHandle）。
 3. **真实安装布局/环境差异**：ok-ww 不同版本目录、MAA gui.new/gui.json 旧格式、MXU 实例配置结构变化仅用 fixtures 模拟。
 4. **真实游戏/模拟器/云游戏状态**：v0.6 detector 契约已覆盖；真实运行态与 ADB（默认关闭）需人工/受控实测。

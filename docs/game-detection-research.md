@@ -1,7 +1,7 @@
 # 游戏运行检测机制调研报告（四脚本逆向 / 静态分析）
 
 - 任务：shared task `task-8` —— 研究 MaaNTE、MaaEnd、ok-ww、MAA 四款脚本软件各自如何判断「游戏是否正在运行」，为 GameHub v0.5.0 从「仅进程名」升级为「窗口类 + 标题 + 进程 + ADB」多源检测提供依据。
-- 仓库：`D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/AllMyMaa ），当前版本 v0.5.0。
+- 仓库：`D:\All MAA\GameHub`（GitHub: https://github.com/Diaohesi/All-My-Maa ），当前版本 v0.5.0。
 - 方法：纯静态分析 —— 读配置文件 / Python 源码 / 运行时日志 / 二进制字符串（ASCII + UTF-16LE），并对本机已安装的游戏目录做只读核对。**未启动任何 GUI、未启动游戏、未重启 Hub、未联网、未 commit。**
 - 输出范围：仅本文件 `docs/game-detection-research.md`；其它文件只读。
 
