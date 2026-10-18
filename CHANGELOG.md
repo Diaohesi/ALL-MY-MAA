@@ -2,6 +2,22 @@
 
 > 最新版本在最上方。
 
+## v0.10.3 (2026-10-18)
+
+- **默认管理员启动**：Hub 默认以管理员身份运行——源码模式用 `pythonw.exe` +
+  `ShellExecuteW(runas)` 自提权重启（`--elevated` 内部标记）；打包版通过 PyInstaller
+  `--uac-admin` 写入 `requireAdministrator` manifest，双击即由 Windows 请求管理员权限；
+  `tools/build_exe.bat` 与 GitHub Actions 打包命令同步更新
+- **取消 UAC 回退**：源码模式取消 UAC / 提权失败时弹提示「未获得管理员权限，将以普通权限运行」
+  （说明异环热键 / 部分脚本输入可能受限），继续普通权限启动；打包版带 manifest 时取消 UAC 不启动
+- **跳过提权**：源码模式支持 `--no-elevate` 参数与 `GAMEHUB_NO_ELEVATE=1`（true / yes / on）
+  环境变量；`--elevated` 为内部标记；新增 `--elevation-check` 输出 JSON 便于测试
+- **权限显示**：关于对话框 / 设置页显示「当前权限：管理员 / 普通用户」；设置页补默认管理员说明
+- **异环清日常**：v0.10.2 的按权限分流继续有效；默认管理员下 MaaNTE 已运行可直接发 `Ctrl+F10`，
+  取消 UAC 时仍走 `--autostart` / 手动提示
+- 新增 `gamehub/elevation.py`、`tools/test_elevation.py`（提权决策纯逻辑自测，不弹 UAC）
+- 更新 README（新增「管理员权限」小节与 FAQ）/ 主页要求说明
+
 ## v0.10.2 (2026-10-18)
 
 - **异环清日常 UIPI 修复**：v0.10.1 的「发送开始任务热键」在 Hub 未提权时会受 Windows UIPI

@@ -7,7 +7,7 @@ python -m pip install --upgrade pyinstaller pillow
 if errorlevel 1 goto :fail
 
 echo [GameHub] Building GameHub.exe ...
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name GameHub ^
+python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name GameHub ^
     --icon "assets\hub.ico" --add-data "assets;assets" hub.pyw
 if errorlevel 1 goto :fail
 

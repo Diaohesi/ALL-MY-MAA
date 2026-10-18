@@ -2522,6 +2522,10 @@ class GameHub:
                     font=self.f_small, bg=T.UI_PANEL).pack(anchor="w", pady=1)
         self._label(about, "游戏脚本中心 · 一体化启动器",
                     color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(0, 2))
+        current_priv = "管理员" if store.hub_is_elevated() else "普通用户"
+        self._label(about, f"当前权限：{current_priv} · 默认以管理员身份启动",
+                    color=T.UI_TEXT_2, font=self.f_aux,
                     bg=T.UI_PANEL).pack(anchor="w", pady=(0, 6))
         links = tk.Frame(about, bg=T.UI_PANEL)
         links.pack(anchor="w")
@@ -2575,6 +2579,15 @@ class GameHub:
                     font=self.f_small, bg=T.UI_PANEL).pack(pady=(2, 2))
         self._label(body, f"版本 v{VERSION}", color=T.UI_TEXT_2,
                     font=self.f_small, bg=T.UI_PANEL).pack()
+        current_priv = "管理员" if store.hub_is_elevated() else "普通用户"
+        self._label(body, f"当前权限：{current_priv}",
+                    color=T.UI_TEXT, font=self.f_small,
+                    bg=T.UI_PANEL).pack(pady=(2, 0))
+        self._label(body, "默认以管理员身份启动（UAC）；取消 UAC 会以普通权限运行，"
+                          "异环清日常热键/部分脚本功能可能受限",
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL, wraplength=520,
+                    justify="center").pack(pady=(0, 4))
         self._label(body, _license_label(),
                     color=T.UI_TEXT_3, font=self.f_aux,
                     bg=T.UI_PANEL).pack(pady=(4, 10))

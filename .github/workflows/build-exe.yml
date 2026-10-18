@@ -28,7 +28,7 @@ jobs:
 
       - name: Build single-file exe
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name GameHub --icon "assets/hub.ico" --add-data "assets;assets" hub.pyw
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name GameHub --icon "assets/hub.ico" --add-data "assets;assets" hub.pyw
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.10.2
+# All-My-Maa · 游戏脚本中心 v0.10.3
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -41,6 +41,9 @@ MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（�
 → 用 `--autostart` 自动开始；**MaaNTE 已以高权限运行** → 普通权限 Hub 发不了热键（UIPI），
 提示手动点击或以管理员身份重启 Hub；**Hub 已提权** → 打开 MaaNTE 后发送「开始任务」热键
 （默认 `Ctrl+F10`）。
+从 v0.10.3 起，Hub **默认以管理员身份启动**（源码自提权 + 打包 `--uac-admin` manifest）：
+取消 UAC 会回退普通权限并提示，`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过提权；
+关于 / 设置页会显示当前权限。
 
 **在线主页（GitHub Pages）**：<https://diaohesi.github.io/All-My-Maa/>
 — 截图、功能一览和下载入口都在这一页。
@@ -91,7 +94,7 @@ MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（�
 | 圆润淡紫渐变 | 默认强调色淡紫 `#b98bff`，面板 / 标题栏 / 侧栏淡紫渐变，更圆润的圆角与间距 |
 | 自定义标题栏 | 自绘渐变标题栏：最小化 / 最大化 / 关闭、拖动移动、双击最大化、8 向边缘 / 角落缩放 |
 | 字体大小 | 小 / 标准 / 大 / 特大（0.9 / 1.0 / 1.12 / 1.25），保存后立即生效 |
-| 自动更新 | 启动时检查脚本与 Hub 版本；可自动下载更新（安装前确认）；打包版替换 exe 重启、源码模式 git pull |
+| 默认管理员启动 | v0.10.3 起默认管理员：源码模式 UAC 自重启、打包版 `--uac-admin` manifest；取消 UAC 回退普通权限并提示；`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过 |
 | 统一视觉 | 统一 Microsoft YaHei UI 字体与字号、圆角 / 间距、淡紫深色分层配色 |
 | 品牌与页面图标 | 窗口 / 任务栏与侧边栏品牌用 `LinYuxia.png`；主页 / 清日常 / 设置 / 关于分别用手柄 / 剑 / 雪花 / 头像图标；缺失时自动回退 |
 | 自动更新 | 启动时检查脚本与 Hub 版本，可自动下载更新包（安装前仍确认）；打包版替换 exe 重启，源码模式 `git pull`，失败自动降级到发布页 |
@@ -126,7 +129,7 @@ D:\All MAA\
 └─ MaaEnd-win-x86_64-v2.33.0\   ← 明日方舟终末地 MaaEnd
 ```
 
-4. 双击 `启动游戏中心.bat`；想放到桌面就双击 `创建桌面快捷方式.bat`。
+4. 双击 `启动游戏中心.bat`（默认管理员启动，会弹一次 UAC，点「是」即可）；想放到桌面就双击 `创建桌面快捷方式.bat`。
 
 > 脚本目录名不需要固定：Hub 会在自己所在目录里按 exe 文件名自动查找
 > `MAA.exe` / `MaaNTE.exe` / `ok-ww.exe` / `MaaEnd.exe`，版本号目录名变了也能找到。
@@ -234,6 +237,24 @@ v0.8 的三页结构保留，v0.10 在 v0.9 基础上换成更圆润的淡紫渐
   打开脚本文件夹、更新启动器、删除自定义卡片）。点行图标或名称等同「打开脚本」；
   右上角还有「添加游戏 / 检查更新 / 重新识别路径」。
 
+### 管理员权限（v0.10.3）
+
+v0.10.3 起 Hub **默认以管理员身份启动**——游戏脚本的输入模拟、截图与「一键清日常」通常需要管理员
+权限，异环清日常的「开始任务」热键也要求 Hub 与 MaaNTE 同级：
+
+- **源码运行**：当前不是管理员时，启动会先用 `pythonw.exe` + `ShellExecuteW(runas)` 重新拉起自己
+  （带内部参数 `--elevated`），原进程退出；因此第一次启动会弹一次 UAC；
+- **打包版 GameHub.exe**：构建时用 PyInstaller `--uac-admin` 写入 `requireAdministrator` manifest，
+  双击 exe 由 Windows 直接请求管理员权限；
+- **取消 UAC**：源码模式会弹「未获得管理员权限，将以普通权限运行」提示（异环热键 / 部分脚本功能
+  可能受限），然后继续以普通权限运行；打包版带 manifest 时取消 UAC 不会启动；
+- **跳过提权**：源码模式可加 `--no-elevate`，或设置环境变量 `GAMEHUB_NO_ELEVATE=1`
+  （也接受 `true` / `yes` / `on`）；`--elevated` 是自重启内部标记，不要手动使用；
+- **权限展示**：关于对话框与设置页会显示「当前权限：管理员 / 普通用户」，方便确认是否提权成功；
+- **权限与功能**：管理员下异环清日常在 MaaNTE 已运行时可直接发送 `Ctrl+F10`；取消 UAC 后按
+  v0.10.2 的分流自动改走 `--autostart`，或提示手动点击 / 以管理员身份重启 Hub。部分脚本的输入 /
+  截图在普通权限下可能失败，遇到问题请右键「以管理员身份运行」。
+
 ### 设置（v0.10.0）
 
 「设置」页分五组，改完点右上角 **「保存设置」** 后写入 `config.json` 顶层 `settings` 并立即生效
@@ -245,7 +266,7 @@ v0.8 的三页结构保留，v0.10 在 v0.9 基础上换成更圆润的淡紫渐
 - **路径**：脚本根目录展示与「重新识别」、Clash Verge 可执行文件（浏览 / 自动查找）；
 - **清日常**：默认超时（1–600 分钟，仅用于未单独设置超时的条目）、执行前显示命令预览、
   启用 ADB 检测（模拟器内游戏，默认关闭）、完成后结束脚本默认值；
-- **关于与更新**：版本、关于软件、检查软件更新、更新日志、GitHub、项目主页入口。
+- **关于与更新**：版本、**当前权限（管理员 / 普通用户）**、关于软件、检查软件更新、更新日志、GitHub、项目主页入口。
 
 ### 小工具 / 关于 / 自动更新（v0.10.0）
 
@@ -301,7 +322,8 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
   - **MaaNTE 已运行且是管理员权限**（或读不到权限，保守按高权限处理）→ 普通权限 Hub 无法向它
     发送输入，会**提示手动点击「开始任务」**，或以管理员身份重启 Hub 后重试；不会静默算成功；
   - **Hub 已提权**（或 MaaNTE 由普通权限启动）→ 打开 MaaNTE（正常界面）、等主窗口就绪并置前，
-    发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用）；
+    发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用）；v0.10.3 起
+    Hub 默认管理员，通常直接走这条分支；取消 UAC 时仍按上面自动分流；
   - 没有可用实例、热键没启用 / 读不到 / 发送失败 → 打开窗口并提示手动点击；
     MaaNTE 已在运行时只提示 / 发热键，不结束你自己开的实例；实例名 / 任务字段不再是必需（可保留）。
 - **终末地 MaaEnd**：在 MXU 里准备好实例（本机示例：「挂机任务」/「全套日常」），
@@ -481,13 +503,14 @@ ok-ww 启动即自动更新、MaaNTE / MaaEnd 启动后自检更新）。点「�
 
 ```
 GameHub/
-├─ hub.pyw                 程序入口
+├─ hub.pyw                 程序入口（默认管理员启动 / 可 --no-elevate 跳过）
 ├─ gamehub/                主程序
 │  ├─ ui.py                侧边栏三页、自绘渐变标题栏、字体缩放、小工具、自动更新、主页行、清日常页、设置页、对话框
 │  ├─ render.py            Pillow 图标 / 旧版画布渲染
 │  ├─ store.py             配置、路径识别、版本、进程、更新检查、游戏自动检测、启动规格（游戏 / 脚本）、自动更新、设置
 │  ├─ detector.py          游戏运行检测（窗口 / 进程 / ADB 规则）
 │  ├─ daily.py             一键清日常（计划 / 执行 / 独立状态 / 队列）
+│  ├─ elevation.py         提权决策 / 源码自重启（runas）/ 权限提示
 │  └─ theme.py             设计令牌（淡紫渐变配色、字体 / 字号 / 更圆润圆角 / 间距、标题栏高度、窗口尺寸）
 ├─ assets/                 图标资源
 │  ├─ LinYuxia.png         品牌 / 窗口 / 侧边栏图标
@@ -511,6 +534,7 @@ GameHub/
 │  ├─ test_ui_state.py     新 UI 状态逻辑自测（per-app 状态 / 勾选 / settings / 标题栏）
 │  ├─ test_game_exe.py     游戏启动器发现自测（各游戏 exe 解析，不启动游戏）
 │  ├─ test_game_launch.py  游戏启动规格 / 等待逻辑自测（mock，不启动游戏）
+│  ├─ test_elevation.py    提权决策自测（--elevation-check，不弹 UAC）
 │  ├─ regression_test.py   回归测试（标准库 unittest）
 │  └─ verify_exe.ps1       本地打包 exe 验证
 ├─ docs/                   文档与 GitHub Pages 站点
@@ -542,6 +566,11 @@ GameHub/
   （8 向缩放）、`_setup_borderless`（隐藏原生标题栏并恢复任务栏 / Alt+Tab / DWM 圆角）。
 - 字体大小：`ui._apply_font_scale`（`store.FONT_SCALES` = 0.9 / 1.0 / 1.12 / 1.25），
   保存设置后立即重建字体并同步标题栏 / 按钮 / 页面标题尺寸。
+- 默认管理员启动在 `gamehub/elevation.py`：`should_elevate`（判断是否自提权，支持
+  `--no-elevate` / `GAMEHUB_NO_ELEVATE=1`）、`build_relaunch` / `relaunch_as_admin`（pythonw +
+  ShellExecuteW(runas)）、`not_admin_message`（取消 UAC 提示）、`elevation_status`
+  （`--elevation-check` 输出 JSON，便于测试）；`hub.pyw` 在导入 UI 前完成提权重启，打包脚本与
+  CI 均带 `--uac-admin`。自测 `python tools/test_elevation.py`（不弹 UAC）。
 - 小工具 / 关于 / 自动更新在 `ui.py`：`open_script_dir` / `open_log_dir` / `open_about` /
   `check_software_update`；release 解析在 `parse_release_payload`，资产选择
   `select_update_asset`，安装能力判断 `can_auto_update` / `should_source_update` /
@@ -614,8 +643,21 @@ UE map 报错，所以改回启动器；出现回退提示时按提示操作即�
 里对应字段后重新点击按钮选择。
 
 **Q: 提示需要管理员权限？**
-`ok-ww` 自身要求管理员权限；「一键清日常」每一项也会以管理员权限启动，可能逐项弹 UAC，点「是」继续。
-若点「否」，该项会记为失败。
+v0.10.3 起 Hub 默认以管理员身份启动；`ok-ww` 等脚本自身也要求管理员，「一键清日常」每一项会以
+管理员权限启动（可能逐项弹 UAC，点「是」继续；点「否」该项记为失败）。如果当前是普通权限
+（取消过 UAC），异环清日常热键 / 部分脚本输入功能可能受限。
+
+**Q: 每次启动都弹 UAC，能关掉吗？**
+默认管理员启动就是为了让脚本 / 热键可用，每次启动都会请求一次 UAC。源码运行可加 `--no-elevate`
+或设置 `GAMEHUB_NO_ELEVATE=1` 跳过提权（例如 PowerShell：`$env:GAMEHUB_NO_ELEVATE=1; python hub.pyw`，
+或把 `python hub.pyw --no-elevate` 写进快捷方式）；打包版 GameHub.exe 带 `requireAdministrator`
+manifest，参数无法跳过，需要自行用不带 `--uac-admin` 的 PyInstaller 参数重新打包。
+
+**Q: 不想用管理员怎么办？**
+源码运行：`python hub.pyw --no-elevate`，或设置环境变量 `GAMEHUB_NO_ELEVATE=1`（true / yes / on 均可）；
+打包版：重新打包时去掉 `--uac-admin`。普通权限下 Hub 仍可使用，但异环清日常会按 v0.10.2 分流
+（MaaNTE 未运行 → `--autostart`；已运行高权限 → 提示手动 / 以管理员重启），部分脚本的输入 /
+截图功能也可能需要管理员。
 
 **Q: 异环清日常没有自动开始？**
 v0.10.2 起按权限自动分流：
@@ -732,6 +774,7 @@ git config --local https.proxy http://127.0.0.1:7897
   python tools/test_ui_state.py     :: 新 UI 状态逻辑自测（per-app 状态 / 勾选 / settings / 标题栏）
   python tools/test_game_exe.py     :: 游戏启动器发现自测（不启动游戏）
   python tools/test_game_launch.py  :: 游戏启动策略 / 等待逻辑自测（mock，不启动游戏）
+  python tools/test_elevation.py    :: 提权决策自测（--elevation-check，不弹 UAC）
   ```
 
   详细结果、已知缺陷与未覆盖点见 [docs/qa-report.md](docs/qa-report.md)；

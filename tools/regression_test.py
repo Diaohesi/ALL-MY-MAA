@@ -15,6 +15,7 @@
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -27,7 +28,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gamehub import daily, detector, render, store, theme, ui  # noqa: E402
+from gamehub import daily, detector, elevation, render, store, theme, ui  # noqa: E402
 
 ASSETS = os.path.join(REPO_ROOT, "assets")
 
@@ -4559,6 +4560,174 @@ class V0102UipiTests(TempDirTest):
         self.assertIn("非管理员", result2["reason"])
         self.assertIn("管理员身份重启", result2["reason"])
         self.assertIsNone(result2["pid"])
+
+
+# ---------------------------------------------------------------- v0.10.3 默认管理员启动
+class V0103ElevationTests(TempDirTest):
+    """v0.10.3 默认管理员启动：提权决策/自重启命令/状态/打包 manifest/入口诊断。"""
+
+    def test_should_elevate_matrix(self):
+        should = elevation.should_elevate
+        self.assertTrue(should(False, [], {}, False))
+        self.assertFalse(should(True, [], {}, False))
+        self.assertFalse(should(False, [], {}, True))
+        self.assertFalse(should(False, ["--no-elevate"], {}, False))
+        self.assertFalse(should(False, ["--elevated"], {}, False))
+        for value in ("1", "true", "YES", " on "):
+            with self.subTest(value=value):
+                self.assertFalse(should(False, [],
+                                        {"GAMEHUB_NO_ELEVATE": value}, False))
+        for value in ("0", "false", "", "no", "off"):
+            with self.subTest(value=value):
+                self.assertTrue(should(False, [],
+                                       {"GAMEHUB_NO_ELEVATE": value}, False))
+        self.assertTrue(should(False, ["--some-arg"], {}, False))
+        self.assertFalse(should(True, ["--no-elevate"], {}, True))
+        # _env_flag 大小写/空白归一
+        self.assertTrue(elevation._env_flag({"X": " TRUE "}, "X"))
+        self.assertFalse(elevation._env_flag({"X": "off"}, "X"))
+        self.assertFalse(elevation._env_flag(None, "X"))
+
+    def test_pythonw_path(self):
+        pw = _touch(os.path.join(self.tmp, "pythonw.exe"), b"")
+        py = _touch(os.path.join(self.tmp, "python.exe"), b"")
+        self.assertEqual(os.path.normpath(elevation.pythonw_path(py)),
+                         os.path.normpath(pw))
+        self.assertEqual(os.path.normpath(elevation.pythonw_path(pw)),
+                         os.path.normpath(pw))
+        other = _touch(os.path.join(self.tmp, "only", "python.exe"), b"")
+        self.assertEqual(os.path.normpath(elevation.pythonw_path(other)),
+                         os.path.normpath(other))
+        # 当前解释器优先找同目录 pythonw.exe；空路径同 None
+        self.assertEqual(os.path.basename(elevation.pythonw_path(None)).lower(),
+                         "pythonw.exe")
+        self.assertEqual(elevation.pythonw_path(None),
+                         elevation.pythonw_path(""))
+
+    def test_build_relaunch_spec(self):
+        hub = os.path.join(self.tmp, "hub dir", "hub.pyw")
+        app_dir = os.path.join(self.tmp, "app dir")
+        os.makedirs(app_dir, exist_ok=True)
+        pw = _touch(os.path.join(self.tmp, "pythonw.exe"), b"")
+        spec = elevation.build_relaunch(hub, app_dir, pythonw=pw,
+                                        extra_args=["--no-elevate", "x"])
+        self.assertEqual(spec["verb"], "runas")
+        self.assertEqual(os.path.normpath(spec["file"]),
+                         os.path.normpath(pw))
+        self.assertEqual(spec["params"],
+                         f'"{os.path.abspath(hub)}" --elevated --no-elevate x')
+        self.assertEqual(spec["cwd"], os.path.abspath(app_dir))
+        self.assertEqual(spec["show"], 1)
+        # 默认 cwd = hub 所在目录；无空格的 hub 路径也始终加引号
+        simple = os.path.join(self.tmp, "hub.pyw")
+        spec2 = elevation.build_relaunch(simple, pythonw=pw)
+        self.assertEqual(spec2["cwd"],
+                         os.path.abspath(os.path.dirname(simple)))
+        self.assertTrue(spec2["params"].startswith(
+            '"' + os.path.abspath(simple) + '" --elevated'))
+
+    def test_elevation_status(self):
+        with mock.patch.object(elevation, "is_admin", return_value=True):
+            status = elevation.elevation_status([], {}, False)
+        self.assertTrue(status["admin"])
+        self.assertFalse(status["frozen"])
+        self.assertFalse(status["would_elevate"])
+        self.assertTrue(status["pythonw"])
+        with mock.patch.object(elevation, "is_admin", return_value=False):
+            self.assertTrue(elevation.elevation_status([], {}, False)
+                            ["would_elevate"])
+            self.assertFalse(elevation.elevation_status(
+                ["--no-elevate"], {}, False)["would_elevate"])
+            self.assertFalse(elevation.elevation_status(
+                [], {"GAMEHUB_NO_ELEVATE": "1"}, False)["would_elevate"])
+            frozen = elevation.elevation_status([], {}, True)
+        self.assertTrue(frozen["frozen"])
+        self.assertFalse(frozen["would_elevate"])
+        self.assertIn(elevation.is_admin(), (True, False))
+
+    def test_hub_elevation_check_cli(self):
+        env = dict(os.environ)
+        env.pop("GAMEHUB_NO_ELEVATE", None)
+        hub = os.path.join(REPO_ROOT, "hub.pyw")
+        proc = subprocess.run(
+            [sys.executable, hub, "--elevation-check"], cwd=REPO_ROOT,
+            env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertIsInstance(data.get("admin"), bool)
+        self.assertIsInstance(data.get("frozen"), bool)
+        self.assertIsInstance(data.get("pythonw"), str)
+        self.assertEqual(data.get("would_elevate"),
+                         not elevation.is_admin())
+        # 环境变量 / --no-elevate 让诊断结果跳过提权
+        env2 = dict(env, GAMEHUB_NO_ELEVATE="1")
+        proc2 = subprocess.run(
+            [sys.executable, hub, "--elevation-check"], cwd=REPO_ROOT,
+            env=env2, capture_output=True, text=True, timeout=30)
+        data2 = json.loads(proc2.stdout.strip().splitlines()[-1])
+        self.assertFalse(data2.get("would_elevate"))
+        proc3 = subprocess.run(
+            [sys.executable, hub, "--elevation-check", "--no-elevate"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True,
+            timeout=30)
+        data3 = json.loads(proc3.stdout.strip().splitlines()[-1])
+        self.assertFalse(data3.get("would_elevate"))
+
+    def test_not_admin_message_mocked(self):
+        with mock.patch.object(elevation, "ctypes") as fake_ctypes:
+            elevation.not_admin_message()
+        call = fake_ctypes.windll.user32.MessageBoxW.call_args
+        self.assertIsNotNone(call)
+        args = call.args
+        self.assertEqual(args[0], 0)
+        self.assertIn("未获得管理员权限", args[1])
+        self.assertIn("普通权限", args[1])
+        self.assertIn("权限提示", args[2])
+        self.assertEqual(args[3], 0x00000040)
+
+    def test_build_manifest_flags(self):
+        bat = open(os.path.join(REPO_ROOT, "tools", "build_exe.bat"),
+                   "r", encoding="utf-8", errors="replace").read()
+        yml = open(os.path.join(REPO_ROOT, ".github", "workflows",
+                                "build-exe.yml"),
+                   "r", encoding="utf-8", errors="replace").read()
+        for name, text in (("build_exe.bat", bat), ("workflow", yml)):
+            with self.subTest(file=name):
+                self.assertIn("--uac-admin", text)
+                self.assertIn("--onefile", text)
+                self.assertIn("--windowed", text)
+                self.assertIn("--icon", text)
+                self.assertIn("--add-data", text)
+                self.assertIn("hub.pyw", text)
+                self.assertIn("GameHub", text)
+        self.assertIn("assets\\hub.ico", bat)
+        self.assertIn("assets/hub.ico", yml)
+
+    def test_ui_permission_strings_and_hub_flow(self):
+        ui_src = open(os.path.join(REPO_ROOT, "gamehub", "ui.py"),
+                      "r", encoding="utf-8").read()
+        self.assertIn("当前权限：", ui_src)
+        self.assertIn("管理员", ui_src)
+        self.assertIn("普通用户", ui_src)
+        self.assertIn("默认以管理员身份启动", ui_src)
+        self.assertIn("store.hub_is_elevated()", ui_src)
+        hub_src = open(os.path.join(REPO_ROOT, "hub.pyw"),
+                       "r", encoding="utf-8").read()
+        for mark in ("--elevation-check", "--no-elevate",
+                     "should_elevate(", "relaunch_as_admin(",
+                     "not_admin_message(", "GAMEHUB_NO_ELEVATE"):
+            with self.subTest(mark=mark):
+                self.assertIn(mark, hub_src)
+        elev_src = open(os.path.join(REPO_ROOT, "gamehub", "elevation.py"),
+                        "r", encoding="utf-8").read()
+        self.assertIn("--elevated", elev_src)
+        self.assertIn("--no-elevate", elev_src)
+        # 提权决策必须早于 Pillow 检查与 UI 导入
+        self.assertLess(hub_src.index("should_elevate("),
+                        hub_src.index("import PIL"))
+        self.assertLess(hub_src.index("should_elevate("),
+                        hub_src.index("from gamehub.ui import run"))
 
 
 def main():
