@@ -242,6 +242,102 @@ def test_manager_stop():
         check("停止非当前项返回 False", manager.stop_single("maa"), False)
 
 
+def test_theme_tokens():
+    print("\n=== v0.9 设计令牌 / 品牌 / 小工具路径 ===")
+    theme = ui.T
+    check("品牌标题", ui.TITLE, "All-My-Maa · 游戏脚本中心")
+    check("字体", theme.UI_FONT, "Microsoft YaHei UI")
+    check("标题字号范围", 20 <= theme.UI_FONT_SIZES["title"] <= 22, True)
+    check("正文字号范围", 11 <= theme.UI_FONT_SIZES["body"] <= 12, True)
+    check("辅助字号不小于 10", theme.UI_FONT_SIZES["aux"] >= 10, True)
+    check("圆角 10-12", 10 <= theme.RADIUS <= 12, True)
+    check("小圆角", theme.RADIUS_SM, 8)
+    check("间距体系", (theme.SPACE_XS, theme.SPACE_SM, theme.SPACE_MD,
+                       theme.SPACE_LG), (8, 12, 16, 20))
+    check("默认窗口", (theme.WIN_W, theme.WIN_H), (1180, 760))
+    check("最小窗口", (theme.MIN_W, theme.MIN_H), (1000, 640))
+    check("侧边栏宽度", theme.SIDEBAR_W, 232)
+    check("旧渲染尺寸保持", (theme.W, theme.H), (1200, 560))
+    check("项目主页", ui.PROJECT_PAGES,
+          "https://diaohesi.github.io/All-My-Maa/")
+    check("GitHub", ui.PROJECT_GITHUB, "https://github.com/Diaohesi/All-My-Maa")
+
+    tmp = tempfile.mkdtemp(prefix="gh_tools_")
+    check("脚本目录", ui._script_directory(tmp), os.path.abspath(tmp))
+    check("脚本目录缺省", ui._script_directory(""), store.APP_DIR)
+    check("无 logs 回退", ui._log_directory(tmp), tmp)
+    os.makedirs(os.path.join(tmp, "logs"), exist_ok=True)
+    check("logs 目录", ui._log_directory(tmp), os.path.join(tmp, "logs"))
+    check("License 可定位", bool(ui._find_license()), True)
+    check("更新日志预览非空", bool(ui._changelog_preview_text(3)), True)
+
+
+def test_release_parsing():
+    print("\n=== 软件更新/版本解析（纯逻辑） ===")
+    info = ui.parse_release_payload(json.dumps({
+        "tag_name": "v0.9.0", "name": "All-My-Maa v0.9.0",
+        "body": "新增圆角 UI", "html_url": "https://example.com/release",
+        "published_at": "2026-10-01T00:00:00Z",
+    }), "0.8.0")
+    check("解析无错误", info["error"], "")
+    check("版本号去 v", info["version"], "0.9.0")
+    check("检测到新版本", info["newer"], True)
+    check("更新说明", info["changelog"], "新增圆角 UI")
+    check("发布页", info["url"], "https://example.com/release")
+
+    same = ui.parse_release_payload({"tag_name": "v0.8.0"}, "0.8.0")
+    check("同版本不提示更新", same["newer"], False)
+    older = ui.parse_release_payload({"tag_name": "v0.7.9"}, "0.8.0")
+    check("旧版本不提示更新", older["newer"], False)
+    padded = ui.parse_release_payload({"tag_name": "0.9"}, "0.8.0")
+    check("非 v 前缀版本", (padded["version"], padded["newer"]),
+          ("0.9", True))
+    bytes_info = ui.parse_release_payload(
+        json.dumps({"tag_name": "v1.0.0"}).encode("utf-8"), "0.8.0")
+    check("bytes payload", bytes_info["newer"], True)
+    bad = ui.parse_release_payload("{not json", "0.8.0")
+    check("坏 JSON 给出错误", bool(bad["error"]), True)
+    missing = ui.parse_release_payload({}, "0.8.0")
+    check("缺版本号给出错误", bool(missing["error"]), True)
+    invalid = ui.parse_release_payload({"tag_name": "release-latest"},
+                                       "0.8.0")
+    check("无法识别版本给出错误", bool(invalid["error"]), True)
+
+
+def test_format_changelog():
+    print("\n=== 更新日志纯文本渲染 ===")
+    raw = (
+        "## v0.9.0 (2026-10-18)\n"
+        "- **界面重构**：圆角与间距\n"
+        "- 修复 [Issue #12](https://example.com/12) 的链接\n"
+        "## v0.8.0 (2026-10-01)\n"
+        "- `代码`样式与 ~~删除线~~\n"
+        "  - 子条目保留换行\n"
+    )
+    out = ui.format_changelog_text(raw)
+    check("标题行", "v0.9.0 · 2026-10-18" in out, True)
+    check("无 ## 符号", "##" not in out, True)
+    check("无列表符号", not any(line.lstrip().startswith(("- ", "* "))
+                                for line in out.splitlines()), True)
+    check("无粗体/代码/链接语法",
+          ("**" not in out and "`" not in out and "](" not in out), True)
+    check("保留链接文字", "Issue #12" in out, True)
+    check("保留条目换行", "界面重构：圆角与间距" in out, True)
+    check("最新版本在上", out.index("v0.9.0") < out.index("v0.8.0"), True)
+    limited = ui.format_changelog_text(raw, 1)
+    check("limit_entries 截断", ("v0.9.0" in limited
+                                and "v0.8.0" not in limited), True)
+    plain = ui.format_changelog_text("### 新增\n- **圆角 UI**\n> 注意事项")
+    check("无标题/引用符号", ("#" not in plain and ">" not in plain
+                            and "**" not in plain), True)
+    check("条目文字保留", "圆角 UI" in plain and "注意事项" in plain, True)
+    check("空文本", ui.format_changelog_text(""), "")
+    check("空白文本", ui.format_changelog_text("   \n\n"), "")
+    preview = ui._changelog_preview_text(3)
+    check("关于预览无原始 Markdown", "##" not in preview, True)
+    check("License 清晰一行", ui._license_label(), "License：MIT License")
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -252,6 +348,9 @@ def main():
         test_settings_roundtrip(tmp)
         test_manager_isolation()
         test_manager_stop()
+        test_theme_tokens()
+        test_release_parsing()
+        test_format_changelog()
     print("\nFAILURES:", failures if failures else "none")
     return 1 if failures else 0
 

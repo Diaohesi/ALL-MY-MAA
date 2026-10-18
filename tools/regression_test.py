@@ -10,7 +10,8 @@
 * 本脚本只 import gamehub 包并做纯内存操作，不启动 tkinter / GUI mainloop。
 * 所有涉及配置读写的用例都用 mock.patch 把 store.CONFIG / store.SEARCH_ROOT
   指向临时目录，绝不会碰仓库里真实的 config.json。
-* 不依赖网络：http_get / check_latest 等联网函数不在此测试范围内。
+* 不依赖网络：http_get / check_latest / GitHub release 等联网函数均用 mock
+  模拟，测试不会发起真实网络请求。
 """
 import json
 import os
@@ -3132,6 +3133,283 @@ class UiPureLogicTests(unittest.TestCase):
         self.assertEqual(ui._refresh_delay_ms(settings), 2000)
         settings["refresh_interval"] = 9
         self.assertEqual(ui._refresh_delay_ms(settings), 1500)
+
+
+# ---------------------------------------------------------------- v0.9 UI 令牌 / 软件更新 / 小工具
+class V09ThemeTests(unittest.TestCase):
+    """v0.9 设计令牌、字体、色板与项目链接常量。"""
+
+    def test_theme_tokens_and_scale(self):
+        theme = ui.T
+        self.assertEqual(theme.UI_FONT, "Microsoft YaHei UI")
+        sizes = theme.UI_FONT_SIZES
+        self.assertTrue(20 <= sizes["title"] <= 22)
+        self.assertEqual(sizes["page"], 16)
+        self.assertGreaterEqual(sizes["aux"], 10)
+        self.assertGreaterEqual(min(sizes.values()), 10)
+        self.assertIn(theme.RADIUS, (10, 12))
+        self.assertEqual(theme.RADIUS_SM, 8)
+        self.assertEqual((theme.SPACE_XS, theme.SPACE_SM, theme.SPACE_MD,
+                          theme.SPACE_LG, theme.SPACE_XL), (8, 12, 16, 20, 24))
+        self.assertEqual((theme.WIN_W, theme.WIN_H), (1180, 760))
+        self.assertEqual((theme.MIN_W, theme.MIN_H), (1000, 640))
+        self.assertEqual(theme.SIDEBAR_W, 232)
+        # 旧 Pillow 渲染尺寸保持（render.py 回归）
+        self.assertEqual((theme.W, theme.H), (1200, 560))
+        self.assertEqual((theme.BTN_W, theme.BTN_H), (99, 44))
+        self.assertEqual(len(theme.ACCENT_PRESETS), 8)
+
+    def test_palette_hex_and_compat_aliases(self):
+        theme = ui.T
+        color_names = [name for name in dir(theme)
+                       if name.startswith("UI_")
+                       and isinstance(getattr(theme, name), str)
+                       and getattr(theme, name).startswith("#")]
+        self.assertTrue(color_names)
+        for name in color_names:
+            with self.subTest(name=name):
+                self.assertRegex(getattr(theme, name), r"^#[0-9a-fA-F]{6}$")
+        aliases = {"HEX_BG": "UI_BG", "HEX_TXT": "UI_TEXT",
+                   "HEX_TXT2": "UI_TEXT_2", "HEX_TXT3": "UI_TEXT_3",
+                   "HEX_OK": "UI_SUCCESS", "HEX_ERR": "UI_DANGER",
+                   "HEX_WAIT": "UI_WARNING"}
+        for old, new in aliases.items():
+            self.assertEqual(getattr(theme, old), getattr(theme, new))
+        accents = [color for _name, color in theme.ACCENT_PRESETS]
+        self.assertEqual(len(set(accents)), 8)
+        for color in accents:
+            self.assertRegex(color, r"^#[0-9a-fA-F]{6}$")
+
+    def test_project_links_and_title(self):
+        self.assertEqual(ui.TITLE, "All-My-Maa · 游戏脚本中心")
+        self.assertEqual(ui.GITHUB_REPO, "Diaohesi/All-My-Maa")
+        self.assertEqual(ui.PROJECT_GITHUB,
+                         "https://github.com/Diaohesi/All-My-Maa")
+        self.assertEqual(ui.PROJECT_PAGES,
+                         "https://diaohesi.github.io/All-My-Maa/")
+        self.assertEqual(ui.RELEASE_API,
+                         "https://api.github.com/repos/"
+                         f"{ui.GITHUB_REPO}/releases/latest")
+        self.assertEqual(ui.RELEASE_PAGE,
+                         f"https://github.com/{ui.GITHUB_REPO}/releases/latest")
+
+    def test_mix_colors(self):
+        self.assertEqual(ui._mix("#000000", "#ffffff", 0), "#000000")
+        self.assertEqual(ui._mix("#000000", "#ffffff", 1), "#ffffff")
+        self.assertEqual(ui._mix("#000000", "#ffffff", 0.5), "#7f7f7f")
+        self.assertEqual(ui._mix("#000000", "#ff0000", 0.5), "#7f0000")
+        self.assertEqual(ui._mix("bad", "#ffffff", 0.5), "bad")
+
+
+class SoftwareUpdateTests(unittest.TestCase):
+    """v0.9 软件更新纯逻辑：版本比较 / release 解析 / 链接 / 无网络错误处理。"""
+
+    def test_version_compare(self):
+        self.assertEqual(store.version_key("v0.9.0"), (0, 9, 0))
+        self.assertTrue(store.is_newer("v0.9.0", "v0.8.0"))
+        self.assertFalse(store.is_newer("v0.9.0", "0.9.0"))
+        self.assertTrue(store.is_newer("v0.10.0", "v0.9.9"))
+        self.assertTrue(store.is_newer("V0.9.0", "v0.8.0"))
+        self.assertFalse(store.is_newer("v0.9.0", "v0.9.0"))
+
+    def test_parse_release_payload(self):
+        payload = json.dumps({
+            "tag_name": "v0.9.0",
+            "name": "All-My-Maa v0.9.0",
+            "body": "## 更新\n- **圆角 UI**",
+            "html_url": "https://example.com/release",
+            "published_at": "2026-10-18T00:00:00Z",
+        }, ensure_ascii=False)
+        info = ui.parse_release_payload(payload, "0.8.0")
+        self.assertEqual(info["error"], "")
+        self.assertEqual(info["version"], "0.9.0")
+        self.assertEqual(info["current"], "0.8.0")
+        self.assertTrue(info["newer"])
+        self.assertIn("圆角 UI", info["changelog"])
+        self.assertEqual(info["url"], "https://example.com/release")
+        self.assertEqual(info["name"], "All-My-Maa v0.9.0")
+        self.assertEqual(info["published_at"], "2026-10-18T00:00:00Z")
+        # dict / bytes 输入、tag 无 v 前缀、name 兜底
+        self.assertEqual(ui.parse_release_payload(
+            {"tag_name": "0.9.0"}, "0.8.0")["version"], "0.9.0")
+        self.assertEqual(ui.parse_release_payload(
+            payload.encode("utf-8"), "0.8.0")["version"], "0.9.0")
+        self.assertEqual(ui.parse_release_payload(
+            {"name": "v0.9.0"}, "0.8.0")["version"], "0.9.0")
+        # 相同/更低版本不提示更新
+        self.assertFalse(ui.parse_release_payload(
+            {"tag_name": "v0.8.0"}, "0.8.0")["newer"])
+        self.assertFalse(ui.parse_release_payload(
+            {"tag_name": "v0.7.9"}, "0.8.0")["newer"])
+
+    def test_parse_release_payload_errors(self):
+        bad = ui.parse_release_payload("{not json", "0.8.0")
+        self.assertTrue(bad["error"])
+        self.assertIn("解析 release 信息失败", bad["error"])
+        self.assertEqual(ui.parse_release_payload(["x"], "0.8.0")["error"],
+                         "release 信息格式不正确")
+        self.assertEqual(ui.parse_release_payload({}, "0.8.0")["error"],
+                         "release 信息缺少版本号")
+        self.assertEqual(ui.parse_release_payload({"tag_name": "v"},
+                                                  "0.8.0")["error"],
+                         "release 信息缺少版本号")
+        self.assertIn("无法识别版本号",
+                      ui.parse_release_payload({"tag_name": "release-latest"},
+                                               "0.8.0")["error"])
+        self.assertTrue(ui.parse_release_payload(b"\xff\xfe\x00",
+                                                 "0.8.0")["error"])
+
+    def test_release_url_fallback(self):
+        info = ui.parse_release_payload({"tag_name": "v0.9.0"}, "0.8.0")
+        self.assertEqual(info["url"], ui.RELEASE_PAGE)
+        self.assertEqual(info["changelog"], "")
+        self.assertEqual(info["published_at"], "")
+
+    def test_check_latest_with_mocks(self):
+        app = {"key": "custom", "release":
+               "https://github.com/x/y/releases/latest"}
+        with mock.patch.object(store, "github_latest_tag",
+                               return_value="v0.9.0") as fake:
+            self.assertEqual(store.check_latest(app), "v0.9.0")
+            fake.assert_called_once()
+        with mock.patch.object(store, "github_latest_tag",
+                               side_effect=OSError("offline")):
+            self.assertIsNone(store.check_latest(app))
+        with mock.patch.object(store, "github_latest_tag") as fake:
+            self.assertIsNone(store.check_latest({"release": ""}))
+            fake.assert_not_called()
+        # MAA 走 api.maa.plus；mock http_get 避免真实网络
+        with mock.patch.object(store, "http_get",
+                               return_value=b'{"version": "v6.19.0"}'):
+            self.assertEqual(store.check_latest({"key": "maa"}), "v6.19.0")
+        with mock.patch.object(store, "http_get",
+                               side_effect=OSError("offline")), \
+                mock.patch.object(store, "github_latest_tag",
+                                  side_effect=OSError("offline")):
+            self.assertIsNone(store.check_latest(
+                {"key": "maa", "release": "https://example.com/r"}))
+
+
+class SmallToolsTests(TempDirTest):
+    """v0.9 小工具：脚本/日志目录、License/更新日志定位、Clash 路径解析（mock 打开）。"""
+
+    def test_script_directory(self):
+        self.assertEqual(ui._script_directory(self.tmp),
+                         os.path.abspath(self.tmp))
+        self.assertEqual(ui._script_directory(""), store.APP_DIR)
+        self.assertEqual(ui._script_directory(None), store.APP_DIR)
+        # 相对路径按当前工作目录转绝对路径（临时切换 cwd 后恢复）
+        sub = os.path.join(self.tmp, "sub")
+        os.makedirs(sub, exist_ok=True)
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(self.tmp)
+            self.assertEqual(ui._script_directory("sub"), sub)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_log_directory(self):
+        self.assertEqual(ui._log_directory(self.tmp), self.tmp)
+        log_dir = os.path.join(self.tmp, "log")
+        os.makedirs(log_dir)
+        self.assertEqual(ui._log_directory(self.tmp), log_dir)
+        logs_dir = os.path.join(self.tmp, "logs")
+        os.makedirs(logs_dir)
+        self.assertEqual(ui._log_directory(self.tmp), logs_dir,
+                         "logs 优先于 log")
+
+    def test_license_and_changelog(self):
+        license_path = ui._find_license()
+        self.assertTrue(license_path)
+        self.assertTrue(os.path.isfile(license_path))
+        self.assertEqual(ui._license_label(), "License：MIT License")
+        changelog = ui._find_changelog()
+        self.assertTrue(changelog)
+        self.assertTrue(os.path.isfile(changelog))
+        preview = ui._changelog_preview_text(3)
+        self.assertTrue(preview)
+        self.assertNotIn("未找到", preview)
+        self.assertIn("v0.", preview)
+        self.assertTrue(preview.splitlines()[0].startswith("v"),
+                        "更新日志预览最新版本应在最上面")
+
+    def test_open_path_and_clash_candidates(self):
+        with mock.patch.object(store.subprocess, "Popen") as popen:
+            self.assertTrue(store.open_path(self.tmp))
+            popen.assert_called_once_with(["explorer", self.tmp])
+        with mock.patch.object(store.subprocess, "Popen") as popen:
+            self.assertFalse(store.open_path(
+                os.path.join(self.tmp, "not_here")))
+            popen.assert_not_called()
+        # Clash 自动候选：取第一个存在的路径（前面的候选不存在）
+        candidate = _touch(os.path.join(self.tmp, "Clash", "clash-verge.exe"))
+        cfg = os.path.join(self.tmp, "config.json")
+        _write_json(cfg, {"version": 4, "root": self.tmp})
+        search = os.path.join(self.tmp, "search_root")
+        os.makedirs(search, exist_ok=True)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search), \
+                mock.patch.object(store, "CLASH_CANDIDATES",
+                                  [os.path.join(self.tmp, "missing.exe"),
+                                   candidate]):
+            _apps, clash, _root, _meta = store.load_state_full()
+        self.assertEqual(os.path.normpath(clash), os.path.normpath(candidate))
+
+
+class ChangelogFormatTests(unittest.TestCase):
+    """v0.9 更新日志纯文本渲染：标题/列表/粗体/链接/多版本/截断/空文本。"""
+
+    def test_sections_order_and_limit(self):
+        raw = "\n".join([
+            "# CHANGELOG",
+            "## v0.8.0（2026-10-18）",
+            "- 旧版本内容",
+            "## v0.9.0 (2026-10-18)",
+            "",
+            "### 新增",
+            "- **圆角 UI** 与 [链接](https://example.com)",
+            "> 注意事项",
+        ])
+        text = ui.format_changelog_text(raw)
+        self.assertIn("v0.9.0 · 2026-10-18", text)
+        self.assertIn("v0.8.0 · 2026-10-18", text)
+        self.assertLess(text.index("v0.9.0"), text.index("v0.8.0"),
+                        "最新版本应排在最上面")
+        self.assertIn("圆角 UI", text)
+        self.assertIn("链接", text)
+        self.assertIn("注意事项", text)
+        for mark in ("**", "](", "`", "###", "# ", "- 圆角"):
+            self.assertNotIn(mark, text)
+        limited = ui.format_changelog_text(raw, 1)
+        self.assertIn("v0.9.0", limited)
+        self.assertNotIn("v0.8.0", limited)
+        self.assertNotIn("旧版本内容", limited)
+        self.assertEqual(ui.format_changelog_text(""), "")
+        self.assertEqual(ui.format_changelog_text("   \n\n"), "")
+
+    def test_plain_fallback(self):
+        text = ui.format_changelog_text("### 新增\n- **圆角 UI**\n> 注意事项")
+        self.assertIn("新增", text)
+        self.assertIn("圆角 UI", text)
+        self.assertIn("注意事项", text)
+        for mark in ("###", "**", "> ", "- "):
+            self.assertNotIn(mark, text)
+
+    def test_markdown_helpers(self):
+        markdown = ui._markdown_to_plain
+        self.assertEqual(markdown("![图标](https://x/y.png) 文案"),
+                         "图标 文案")
+        self.assertEqual(markdown("[链接文字](https://x)"), "链接文字")
+        self.assertEqual(markdown("<https://x>"), "")
+        self.assertEqual(markdown("**粗体** __下划线__ `代码` ~~删除~~"),
+                         "粗体 下划线 代码 删除")
+        self.assertEqual(markdown("### 标题"), "标题")
+        self.assertEqual(markdown("- 条目"), "条目")
+        self.assertEqual(markdown("1. 条目"), "条目")
+        self.assertEqual(markdown("> 引用"), "引用")
+        self.assertEqual(markdown("---"), "")
+        self.assertEqual(ui._markdown_body_to_plain("a\n\n\nb\n\n"),
+                         "a\n\nb")
 
 
 def main():

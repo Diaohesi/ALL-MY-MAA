@@ -3,6 +3,7 @@
 import ctypes
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -15,7 +16,338 @@ from PIL import Image, ImageTk
 from . import VERSION, daily, detector, render, store
 from . import theme as T
 
-TITLE = "AllMyMaa · 游戏脚本中心"
+TITLE = "All-My-Maa · 游戏脚本中心"
+
+# 软件更新（只检查/展示，不自动下载安装）
+GITHUB_REPO = "Diaohesi/All-My-Maa"
+PROJECT_PAGES = "https://diaohesi.github.io/All-My-Maa/"
+PROJECT_GITHUB = "https://github.com/Diaohesi/All-My-Maa"
+RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASE_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+def _parent_bg(master):
+    try:
+        return master.cget("bg")
+    except Exception:
+        return T.UI_BG
+
+
+def _round_rect(canvas, x1, y1, x2, y2, radius, fill, outline="",
+                width=1, tags=None):
+    """在 Canvas 上画平滑圆角矩形（用平滑多边形近似，避免逐像素图片）。"""
+    radius = max(0, min(int(radius), int((x2 - x1) // 2), int((y2 - y1) // 2)))
+    if radius <= 0:
+        return canvas.create_rectangle(x1, y1, x2, y2, fill=fill,
+                                       outline=outline, width=width,
+                                       tags=tags)
+    points = [
+        x1 + radius, y1, x2 - radius, y1,
+        x2, y1, x2, y1 + radius,
+        x2, y2 - radius, x2, y2,
+        x2 - radius, y2, x1 + radius, y2,
+        x1, y2, x1, y2 - radius,
+        x1, y1 + radius, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=24,
+                                 fill=fill, outline=outline, width=width,
+                                 tags=tags)
+
+
+class RoundButton(tk.Canvas):
+    """v0.9 自绘圆角按钮：默认/悬停/按下/禁用/主按钮 5 态。"""
+
+    def __init__(self, master, text="", command=None, kind="normal",
+                 width=None, font=None, state="normal", height=36,
+                 accent=None, radius=None, bg=None, anchor="center",
+                 **kwargs):
+        self._parent_bg = bg or _parent_bg(master)
+        super().__init__(master, bg=self._parent_bg, highlightthickness=0,
+                         bd=0, height=height, cursor="hand2",
+                         takefocus=True)
+        self._text = str(text or "")
+        self._command = command
+        self._kind = kind
+        self._anchor = anchor
+        self._state = state
+        self._hover = False
+        self._pressed = False
+        self._focused = False
+        self._selected = False
+        self._fg_override = None
+        self._bg_override = None
+        self._accent = accent or T.UI_ACCENT
+        self._radius = radius or T.RADIUS_SM
+        self._font = font or tkfont.Font(family=T.UI_FONT, size=-11,
+                                         weight="bold")
+        self._height = height
+        if width:
+            self._width = int(width) * 9 + 26
+        else:
+            self._width = max(78, self._font.measure(self._text) + 30)
+        super().configure(width=self._width)
+        self.bind("<Configure>", lambda e: self._redraw(), add="+")
+        self.bind("<Enter>", self._on_enter, add="+")
+        self.bind("<Leave>", self._on_leave, add="+")
+        self.bind("<ButtonPress-1>", self._on_press, add="+")
+        self.bind("<ButtonRelease-1>", self._on_release, add="+")
+        self.bind("<FocusIn>", self._on_focus, add="+")
+        self.bind("<FocusOut>", self._on_blur, add="+")
+        self._redraw()
+
+    # 兼容旧 tk.Button 用法
+    def configure(self, **kwargs):
+        redraw = False
+        for key, value in kwargs.items():
+            if key == "text":
+                self._text = str(value or "")
+                redraw = True
+            elif key == "state":
+                self._state = str(value)
+                self.configure(cursor="arrow" if value == "disabled"
+                               else "hand2")
+                redraw = True
+            elif key == "command":
+                self._command = value
+            elif key == "font":
+                self._font = value
+                redraw = True
+            elif key == "fg":
+                self._fg_override = value
+                redraw = True
+            elif key == "bg":
+                self._bg_override = value
+                redraw = True
+            elif key in ("activebackground", "activeforeground"):
+                continue
+            elif key == "width":
+                self._width = int(value) * 9 + 26
+                super().configure(width=self._width)
+                redraw = True
+            else:
+                try:
+                    super().configure(**{key: value})
+                except Exception:
+                    pass
+        if redraw:
+            self._redraw()
+        return self
+
+    def cget(self, key):
+        if key == "text":
+            return self._text
+        if key == "state":
+            return self._state
+        if key == "fg":
+            return getattr(self, "_fg_override", None) or T.UI_TEXT
+        if key == "bg":
+            return getattr(self, "_bg_override", None) or self._parent_bg
+        return super().cget(key)
+
+    def set_accent(self, accent):
+        self._accent = accent or T.UI_ACCENT
+        self._redraw()
+
+    def set_selected(self, selected):
+        self._selected = bool(selected)
+        self._redraw()
+
+    def set_text(self, text):
+        self._text = str(text or "")
+        self._redraw()
+
+    # 状态事件
+    def _on_enter(self, _event=None):
+        if self._state != "disabled":
+            self._hover = True
+            self._redraw()
+
+    def _on_leave(self, _event=None):
+        self._hover = False
+        self._pressed = False
+        self._redraw()
+
+    def _on_press(self, _event=None):
+        if self._state == "disabled":
+            return
+        self._pressed = True
+        self.focus_set()
+        self._redraw()
+
+    def _on_release(self, event=None):
+        if self._state == "disabled":
+            return
+        was = self._pressed
+        self._pressed = False
+        self._redraw()
+        if was and event is not None:
+            inside = 0 <= event.x <= self.winfo_width() and \
+                0 <= event.y <= self.winfo_height()
+            if inside and self._command:
+                try:
+                    self._command()
+                except Exception:
+                    pass
+
+    def _on_focus(self, _event=None):
+        self._focused = True
+        self._redraw()
+
+    def _on_blur(self, _event=None):
+        self._focused = False
+        self._redraw()
+
+    def _colors(self):
+        accent = getattr(self, "_accent", T.UI_ACCENT)
+        selected = getattr(self, "_selected", False)
+        if self._state == "disabled":
+            return T.UI_PANEL, T.UI_TEXT_3, T.UI_BORDER_SOFT
+        if self._kind == "primary":
+            fill, fg, border = accent, "#071018", accent
+        elif self._kind == "danger":
+            fill, fg, border = T.UI_DANGER_SOFT, T.UI_DANGER, "#4a2c3a"
+        elif self._kind == "ghost":
+            if selected:
+                fill, fg, border = T.UI_ACCENT_SOFT, accent, accent
+            else:
+                fill, fg, border = T.UI_PANEL, T.UI_TEXT_2, T.UI_BORDER_SOFT
+        else:
+            fill, fg, border = T.UI_PANEL_2, T.UI_TEXT, T.UI_BORDER
+        if self._kind == "primary" and self._hover:
+            fill = _mix(accent, "#ffffff", 0.14)
+        elif self._kind == "primary" and self._pressed:
+            fill = _mix(accent, "#000000", 0.12)
+        elif self._kind != "ghost" and self._hover:
+            fill = T.UI_PANEL_3
+        elif self._kind == "ghost" and self._hover:
+            fill = T.UI_PANEL_2 if not selected else T.UI_ACCENT_SOFT
+        if self._focused:
+            border = accent
+        if self._kind == "ghost" and not selected:
+            fill = self._bg_override or fill
+        return fill, fg, border
+
+    def _redraw(self):
+        self.delete("all")
+        width = max(4, self.winfo_width())
+        height = max(4, self.winfo_height())
+        fill, fg, border = self._colors()
+        _round_rect(self, 0.5, 0.5, width - 1, height - 1, self._radius,
+                    fill, border, 1)
+        if self._anchor == "w":
+            text_x = 16
+            anchor = "w"
+        else:
+            text_x = width / 2
+            anchor = "center"
+        self.create_text(text_x, height / 2, text=self._text, fill=fg,
+                         font=self._font, anchor=anchor)
+
+
+def _mix(color, other, ratio):
+    """把两个 #rrggbb 颜色按比例混合（用于 hover/pressed 态）。"""
+    try:
+        a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#" + "".join(f"{int(x + (y - x) * ratio):02x}"
+                             for x, y in zip(a, b))
+    except Exception:
+        return color
+
+
+class RoundPanel(tk.Canvas):
+    """v0.9 圆角卡片/面板容器；内容放进 .inner Frame。"""
+
+    def __init__(self, master, fill=None, border=None, radius=None,
+                 pad=None, bg=None, **kwargs):
+        self._parent_bg = bg or _parent_bg(master)
+        super().__init__(master, bg=self._parent_bg, highlightthickness=0,
+                         bd=0, **kwargs)
+        self._fill = fill or T.UI_PANEL
+        self._border = border or T.UI_BORDER
+        self._radius = radius or T.RADIUS
+        self._pad = pad if pad is not None else T.SPACE_MD
+        self.inner = tk.Frame(self, bg=self._fill)
+        self._win = self.create_window(self._pad, self._pad,
+                                       window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner, add="+")
+        self.bind("<Configure>", self._on_canvas, add="+")
+
+    def _on_inner(self, event=None):
+        height = event.height if event is not None else self.inner.winfo_reqheight()
+        self.configure(height=height + self._pad * 2)
+
+    def _on_canvas(self, event=None):
+        width = self.winfo_width()
+        self.itemconfigure(self._win, width=max(10, width - self._pad * 2))
+        self.delete("panel-bg")
+        _round_rect(self, 0.5, 0.5, width - 1,
+                    max(10, self.winfo_height()) - 1, self._radius,
+                    self._fill, self._border, 1, tags="panel-bg")
+        self.tag_lower("panel-bg")
+
+    def set_border(self, color):
+        self._border = color
+        self._on_canvas()
+
+
+class RoundEntry(tk.Frame):
+    """v0.9 圆角输入框（保留 get/insert/delete 接口以兼容现有代码）。"""
+
+    def __init__(self, master, value="", width=18, font=None,
+                 textvariable=None, bg=None):
+        self._parent_bg = bg or _parent_bg(master)
+        super().__init__(master, bg=self._parent_bg)
+        self._font = font or tkfont.Font(family=T.UI_FONT,
+                                         size=-T.UI_FONT_SIZES["body"])
+        self._canvas = tk.Canvas(self, bg=self._parent_bg,
+                                 highlightthickness=0, bd=0, height=34,
+                                 width=max(90, int(width) * 8 + 24))
+        self._canvas.pack(fill="both", expand=True)
+        self.var = textvariable or tk.StringVar(value=str(value or ""))
+        self.entry = tk.Entry(self._canvas, textvariable=self.var,
+                              bg=T.UI_PANEL_2, fg=T.UI_TEXT,
+                              insertbackground=T.UI_TEXT, relief="flat",
+                              bd=0, highlightthickness=0, font=self._font,
+                              width=max(4, int(width)))
+        self._win = self._canvas.create_window(12, 17, window=self.entry,
+                                               anchor="w")
+        self._focused = False
+        self.entry.bind("<FocusIn>", self._focus, add="+")
+        self.entry.bind("<FocusOut>", self._blur, add="+")
+        self._canvas.bind("<Configure>", lambda e: self._draw(), add="+")
+        self._draw()
+
+    def _focus(self, _event=None):
+        self._focused = True
+        self._draw()
+
+    def _blur(self, _event=None):
+        self._focused = False
+        self._draw()
+
+    def _draw(self):
+        canvas = self._canvas
+        width = max(10, canvas.winfo_width())
+        canvas.delete("all")
+        accent = T.UI_ACCENT
+        _round_rect(canvas, 0.5, 0.5, width - 1, 33.5, T.RADIUS_SM,
+                    T.UI_PANEL_2, accent if self._focused else T.UI_BORDER, 1)
+        self._win = canvas.create_window(12, 17, window=self.entry,
+                                         anchor="w")
+        canvas.itemconfigure(self._win, width=max(20, width - 24))
+
+    def get(self):
+        return self.var.get()
+
+    def insert(self, index, text):
+        self.entry.insert(index, text)
+
+    def delete(self, first, last=None):
+        self.entry.delete(first, last)
+
+    def focus_set(self):
+        self.entry.focus_set()
 
 
 def _dark_titlebar(root):
@@ -32,13 +364,14 @@ def _dark_titlebar(root):
 
 
 def _flat_button(parent, text, command, accent=False):
-    """深色扁平按钮（主界面各对话框共用）。"""
-    bg = "#25445f" if accent else "#1b2432"
-    active = "#2d5577" if accent else "#26313f"
-    return tk.Button(parent, text=text, command=command, bg=bg, fg="#eaf0f8",
-                     activebackground=active, activeforeground="#ffffff",
+    """深色扁平按钮（添加/编辑等对话框共用）。"""
+    bg = T.UI_ACCENT if accent else T.UI_PANEL_2
+    active = _mix(T.UI_ACCENT, "#000000", 0.12) if accent else T.UI_PANEL_3
+    fg = "#071018" if accent else T.UI_TEXT
+    return tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
+                     activebackground=active, activeforeground=fg,
                      relief="flat", bd=0, padx=14, pady=5,
-                     font=("Microsoft YaHei", -11), cursor="hand2")
+                     font=(T.UI_FONT, -11), cursor="hand2")
 
 
 class AppDialog(tk.Toplevel):
@@ -69,7 +402,7 @@ class AppDialog(tk.Toplevel):
     def __init__(self, master, app=None, on_save=None, on_delete=None):
         super().__init__(master)
         self.title("编辑游戏卡片" if app else "添加游戏")
-        self.configure(bg="#0f141d")
+        self.configure(bg=T.UI_BG)
         self.resizable(False, False)
         self.transient(master)
         self.on_save = on_save
@@ -91,10 +424,10 @@ class AppDialog(tk.Toplevel):
 
     # ---------------------------------------------------------- 界面
     def _entry(self, parent, value=""):
-        entry = tk.Entry(parent, bg="#101620", fg="#eaf0f8", insertbackground="#eaf0f8",
+        entry = tk.Entry(parent, bg=T.UI_PANEL, fg=T.UI_TEXT, insertbackground=T.UI_TEXT,
                          relief="flat", highlightthickness=1,
                          highlightbackground="#2a3547", highlightcolor="#4fc3ff",
-                         font=("Microsoft YaHei", -11), width=34)
+                         font=(T.UI_FONT, -11), width=34)
         entry.insert(0, value or "")
         return entry
 
@@ -103,25 +436,25 @@ class AppDialog(tk.Toplevel):
 
     def _build(self):
         pad = 18
-        body = tk.Frame(self, bg="#0f141d")
+        body = tk.Frame(self, bg=T.UI_BG)
         body.pack(fill="both", expand=True, padx=pad, pady=(pad, 6))
         body.columnconfigure(1, weight=1)
 
         tk.Label(body, text="填写后保存即可，路径会自动记录成相对路径",
-                 bg="#0f141d", fg="#68788e",
-                 font=("Microsoft YaHei", -10)).grid(
+                 bg=T.UI_BG, fg=T.UI_TEXT_3,
+                 font=(T.UI_FONT, -10)).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         row = 1
         for field, label, hint in self.FIELDS:
-            tk.Label(body, text=label, bg="#0f141d", fg="#9aa8bc",
-                     font=("Microsoft YaHei", -11), anchor="e", width=14).grid(
+            tk.Label(body, text=label, bg=T.UI_BG, fg=T.UI_TEXT_2,
+                     font=(T.UI_FONT, -11), anchor="e", width=14).grid(
                 row=row, column=0, sticky="e", pady=4)
             entry = self._entry(body, self.app.get(field, ""))
             entry.grid(row=row, column=1, sticky="we", pady=4)
             self.values[field] = entry
             if field == "game_exe":
-                box = tk.Frame(body, bg="#0f141d")
+                box = tk.Frame(body, bg=T.UI_BG)
                 box.grid(row=row, column=2, sticky="w", padx=(8, 0), pady=4)
                 self._button(box, "浏览", lambda: self._browse("game_exe")).pack(
                     side="left")
@@ -131,50 +464,50 @@ class AppDialog(tk.Toplevel):
                 self._button(body, "浏览", lambda f=field: self._browse(f)).grid(
                     row=row, column=2, padx=(8, 0), pady=4)
             elif hint:
-                tk.Label(body, text=hint, bg="#0f141d", fg="#4d5c74",
-                         font=("Microsoft YaHei", -9), anchor="w").grid(
+                tk.Label(body, text=hint, bg=T.UI_BG, fg=T.UI_TEXT_3,
+                         font=(T.UI_FONT, -10), anchor="w").grid(
                     row=row, column=2, sticky="w", padx=(8, 0))
             row += 1
 
         # 检测规则（可选）
-        tk.Frame(body, bg="#243044", height=1).grid(
+        tk.Frame(body, bg=T.UI_BORDER, height=1).grid(
             row=row, column=0, columnspan=3, sticky="we", pady=(10, 2))
         row += 1
         tk.Label(body, text="检测规则（可选，用于准确判断「游戏运行中」）",
-                 bg="#0f141d", fg="#68788e",
-                 font=("Microsoft YaHei", -10)).grid(
+                 bg=T.UI_BG, fg=T.UI_TEXT_3,
+                 font=(T.UI_FONT, -10)).grid(
             row=row, column=0, columnspan=3, sticky="w", pady=(2, 4))
         row += 1
         for field, label, hint in self.DETECT_FIELDS:
-            tk.Label(body, text=label, bg="#0f141d", fg="#9aa8bc",
-                     font=("Microsoft YaHei", -11), anchor="e", width=14).grid(
+            tk.Label(body, text=label, bg=T.UI_BG, fg=T.UI_TEXT_2,
+                     font=(T.UI_FONT, -11), anchor="e", width=14).grid(
                 row=row, column=0, sticky="e", pady=4)
             entry = self._entry(body, self.detect_initial.get(field, ""))
             entry.grid(row=row, column=1, sticky="we", pady=4)
             self.values[field] = entry
             if hint:
-                tk.Label(body, text=hint, bg="#0f141d", fg="#4d5c74",
-                         font=("Microsoft YaHei", -9), anchor="w").grid(
+                tk.Label(body, text=hint, bg=T.UI_BG, fg=T.UI_TEXT_3,
+                         font=(T.UI_FONT, -10), anchor="w").grid(
                     row=row, column=2, sticky="w", padx=(8, 0))
             row += 1
 
         # 主题色
-        tk.Label(body, text="主题色", bg="#0f141d", fg="#9aa8bc",
-                 font=("Microsoft YaHei", -11), anchor="e", width=14).grid(
+        tk.Label(body, text="主题色", bg=T.UI_BG, fg=T.UI_TEXT_2,
+                 font=(T.UI_FONT, -11), anchor="e", width=14).grid(
             row=row, column=0, sticky="e", pady=6)
-        colors = tk.Frame(body, bg="#0f141d")
+        colors = tk.Frame(body, bg=T.UI_BG)
         colors.grid(row=row, column=1, columnspan=2, sticky="w", pady=6)
         for name, color in T.ACCENT_PRESETS:
             chip = tk.Frame(colors, bg=color, width=26, height=26,
                             highlightthickness=3,
-                            highlightbackground="#0f141d", cursor="hand2")
+                            highlightbackground=T.UI_BG, cursor="hand2")
             chip.pack(side="left", padx=2)
             chip.bind("<Button-1>", lambda e, c=color, f=chip: self._pick_accent(c, f))
             self._chip_refs.append((color, chip))
         self._refresh_chips()
 
         # 底部按钮
-        footer = tk.Frame(self, bg="#0f141d")
+        footer = tk.Frame(self, bg=T.UI_BG)
         footer.pack(fill="x", padx=pad, pady=(4, 14))
         self._button(footer, "保存", self._save, accent=True).pack(side="right")
         self._button(footer, "取消", self.destroy).pack(side="right", padx=(0, 8))
@@ -183,8 +516,8 @@ class AppDialog(tk.Toplevel):
 
     def _refresh_chips(self):
         for color, chip in self._chip_refs:
-            chip.configure(highlightbackground="#eaf0f8" if color == self.accent
-                           else "#0f141d")
+            chip.configure(highlightbackground=T.UI_TEXT if color == self.accent
+                           else T.UI_BG)
 
     def _pick_accent(self, color, chip):
         self.accent = color
@@ -308,7 +641,7 @@ class GameCandidateDialog(tk.Toplevel):
     def __init__(self, master, candidates, title="选择游戏启动程序"):
         super().__init__(master)
         self.title(title)
-        self.configure(bg="#0f141d")
+        self.configure(bg=T.UI_BG)
         self.resizable(False, False)
         self.transient(master)
         self.result = None
@@ -321,19 +654,19 @@ class GameCandidateDialog(tk.Toplevel):
     def _build(self):
         pad = 16
         tk.Label(self, text=f"找到 {len(self.candidates)} 个候选，双击或选中后点「确定」",
-                 bg="#0f141d", fg="#9aa8bc",
-                 font=("Microsoft YaHei", -11)).pack(anchor="w", padx=pad, pady=(14, 8))
-        body = tk.Frame(self, bg="#101620", highlightthickness=1,
+                 bg=T.UI_BG, fg=T.UI_TEXT_2,
+                 font=(T.UI_FONT, -11)).pack(anchor="w", padx=pad, pady=(14, 8))
+        body = tk.Frame(self, bg=T.UI_PANEL, highlightthickness=1,
                         highlightbackground="#2a3547")
         body.pack(fill="both", expand=True, padx=pad)
         self.listbox = tk.Listbox(
-            body, bg="#101620", fg="#eaf0f8", selectbackground="#25445f",
+            body, bg=T.UI_PANEL, fg=T.UI_TEXT, selectbackground=T.UI_ACCENT_SOFT,
             selectforeground="#ffffff", relief="flat", bd=0, highlightthickness=0,
-            activestyle="none", font=("Microsoft YaHei", -11),
+            activestyle="none", font=(T.UI_FONT, -11),
             width=96, height=min(9, max(3, len(self.candidates))))
         scroll = tk.Scrollbar(body, command=self.listbox.yview, width=10,
-                              bg="#1b2432", troughcolor="#0f141d",
-                              activebackground="#26313f", relief="flat", bd=0,
+                              bg=T.UI_PANEL_2, troughcolor=T.UI_BG,
+                              activebackground=T.UI_PANEL_3, relief="flat", bd=0,
                               highlightthickness=0)
         self.listbox.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -349,10 +682,10 @@ class GameCandidateDialog(tk.Toplevel):
             self._show_path(0)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         self.listbox.bind("<Double-Button-1>", lambda event: self._confirm())
-        tk.Label(self, textvariable=self._path_var, bg="#0f141d", fg="#68788e",
-                 font=("Microsoft YaHei", -9), anchor="w", justify="left",
+        tk.Label(self, textvariable=self._path_var, bg=T.UI_BG, fg=T.UI_TEXT_3,
+                 font=(T.UI_FONT, -10), anchor="w", justify="left",
                  wraplength=720).pack(fill="x", padx=pad, pady=(8, 0))
-        footer = tk.Frame(self, bg="#0f141d")
+        footer = tk.Frame(self, bg=T.UI_BG)
         footer.pack(fill="x", padx=pad, pady=(12, 14))
         _flat_button(footer, "确定", self._confirm, accent=True).pack(side="right")
         _flat_button(footer, "取消", self._cancel).pack(side="right", padx=(0, 8))
@@ -460,6 +793,8 @@ class GameHub:
         self.checking = False
         self.manual_check = False
         self.update_queue = queue.Queue()
+        self.software_checking = False
+        self.software_queue = queue.Queue()
         self._toast_after = None
         self._poll_after = None
         self._closing = False
@@ -501,14 +836,20 @@ class GameHub:
             parent=self.root)
 
     def _setup_fonts(self):
-        fam = "Microsoft YaHei"
-        self.f_title = tkfont.Font(family=fam, size=-20, weight="bold")
-        self.f_page = tkfont.Font(family=fam, size=-15, weight="bold")
-        self.f_name = tkfont.Font(family=fam, size=-13, weight="bold")
-        self.f_body = tkfont.Font(family=fam, size=-11)
-        self.f_small = tkfont.Font(family=fam, size=-10)
-        self.f_tiny = tkfont.Font(family=fam, size=-9)
-        self.f_btn = tkfont.Font(family=fam, size=-11, weight="bold")
+        fam = T.UI_FONT
+        sizes = T.UI_FONT_SIZES
+        self.f_title = tkfont.Font(family=fam, size=-sizes["title"],
+                                   weight="bold")
+        self.f_page = tkfont.Font(family=fam, size=-sizes["page"],
+                                  weight="bold")
+        self.f_name = tkfont.Font(family=fam, size=-sizes["name"],
+                                  weight="bold")
+        self.f_body = tkfont.Font(family=fam, size=-sizes["body"])
+        self.f_small = tkfont.Font(family=fam, size=-sizes["body"])
+        self.f_tiny = tkfont.Font(family=fam, size=-sizes["aux"])
+        self.f_aux = self.f_tiny
+        self.f_btn = tkfont.Font(family=fam, size=-sizes["body"],
+                                 weight="bold")
 
     def _app_by_key(self, key):
         for app in self.apps:
@@ -540,52 +881,33 @@ class GameHub:
 
     # ---------------------------------------------------------- 控件
     def _button(self, parent, text, command, kind="normal", width=None,
-                font=None, state=None):
-        styles = {
-            "normal": ("#1b2432", "#26313f", "#eaf0f8", "#ffffff"),
-            "primary": ("#25445f", "#2d5577", "#eaf0f8", "#ffffff"),
-            "ghost": ("#101620", "#1b2432", "#9aa8bc", "#ffffff"),
-            "danger": ("#3a2430", "#4a2c3a", "#ffb3b3", "#ffffff"),
-        }
-        bg, active, fg, active_fg = styles.get(kind, styles["normal"])
-        if kind == "primary":
-            accent = self.settings.get("accent") or "#4fc3ff"
-            bg, active, fg, active_fg = accent, accent, "#071018", "#071018"
-        kwargs = dict(text=text, command=command, bg=bg, fg=fg,
-                      activebackground=active, activeforeground=active_fg,
-                      relief="flat", bd=0, padx=10, pady=4,
-                      font=font or self.f_btn, cursor="hand2")
-        if width:
-            kwargs["width"] = width
-        if state:
-            kwargs["state"] = state
-        button = tk.Button(parent, **kwargs)
+                font=None, state=None, anchor="center"):
+        """v0.9：统一自绘圆角按钮（正常/悬停/按下/禁用/主按钮）。"""
+        accent = self.settings.get("accent") or T.UI_ACCENT
+        button = RoundButton(parent, text=text, command=command, kind=kind,
+                             width=width, font=font or self.f_btn,
+                             state=state or "normal", accent=accent,
+                             anchor=anchor)
         if kind == "primary":
             self._accent_buttons.append(button)
         return button
 
     def _entry(self, parent, value="", width=18):
-        entry = tk.Entry(parent, bg="#0c111a", fg="#eaf0f8",
-                         insertbackground="#eaf0f8", relief="flat",
-                         highlightthickness=1,
-                         highlightbackground="#243044",
-                         highlightcolor=self.settings.get("accent", "#4fc3ff"),
-                         font=self.f_body, width=width)
-        entry.insert(0, str(value or ""))
-        return entry
+        return RoundEntry(parent, value=value, width=width, font=self.f_body)
 
-    def _label(self, parent, text="", color="#9aa8bc", font=None, **kwargs):
-        return tk.Label(parent, text=text, bg=kwargs.pop("bg", "#0f141d"),
+    def _label(self, parent, text="", color=T.UI_TEXT_2, font=None, **kwargs):
+        return tk.Label(parent, text=text, bg=kwargs.pop("bg", T.UI_BG),
                         fg=color, font=font or self.f_body, **kwargs)
 
     def _scroll_area(self, parent):
-        outer = tk.Frame(parent, bg="#0f141d")
-        canvas = tk.Canvas(outer, bg="#0f141d", highlightthickness=0)
+        outer = tk.Frame(parent, bg=T.UI_BG)
+        canvas = tk.Canvas(outer, bg=T.UI_BG, highlightthickness=0)
         scroll = tk.Scrollbar(outer, orient="vertical", command=canvas.yview,
-                              width=10, bg="#1b2432", troughcolor="#101620",
-                              activebackground="#26313f", relief="flat",
+                              width=11, bg=T.UI_PANEL_2,
+                              troughcolor=T.UI_BG,
+                              activebackground=T.UI_PANEL_3, relief="flat",
                               bd=0, highlightthickness=0)
-        inner = tk.Frame(canvas, bg="#0f141d")
+        inner = tk.Frame(canvas, bg=T.UI_BG)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>",
                    lambda event: canvas.configure(
@@ -596,12 +918,20 @@ class GameHub:
         canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+
+        def _wheel(event):
+            try:
+                canvas.yview_scroll(int(-event.delta / 120), "units")
+            except Exception:
+                pass
+
+        inner.bind_all("<MouseWheel>", _wheel, add="+")
         return outer, inner
 
     # ---------------------------------------------------------- 主布局
     def _build_ui(self):
         self.root.title(TITLE)
-        self.root.configure(bg=T.HEX_BG)
+        self.root.configure(bg=T.UI_BG)
         self.root.resizable(True, True)
         self.root.minsize(T.MIN_W, T.MIN_H)
         width, height = T.WIN_W, T.WIN_H
@@ -619,13 +949,13 @@ class GameHub:
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
         self._build_sidebar()
-        self.content = tk.Frame(self.root, bg=T.HEX_BG)
+        self.content = tk.Frame(self.root, bg=T.UI_BG)
         self.content.grid(row=0, column=1, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
         self.pages = {}
         for name in ("home", "daily", "settings"):
-            frame = tk.Frame(self.content, bg=T.HEX_BG)
+            frame = tk.Frame(self.content, bg=T.UI_BG)
             frame.grid(row=0, column=0, sticky="nsew")
             self.pages[name] = frame
         self._build_home_page()
@@ -634,85 +964,109 @@ class GameHub:
         self._apply_accent_theme()
         self.toast_var = tk.StringVar(value="")
         self.toast_label = tk.Label(self.content, textvariable=self.toast_var,
-                                    bg="#0a0d13", fg="#9aa8bc",
+                                    bg=T.UI_SIDEBAR, fg=T.UI_TEXT_2,
                                     anchor="w", font=self.f_small,
-                                    padx=14, pady=6)
+                                    padx=18, pady=7)
         self.toast_label.grid(row=1, column=0, sticky="we")
 
+    def _sidebar_section(self, title):
+        tk.Label(self.sidebar, text=title, bg=T.UI_SIDEBAR,
+                 fg=T.UI_TEXT_3, font=self.f_tiny, anchor="w").pack(
+            fill="x", padx=24, pady=(11, 2))
+
     def _build_sidebar(self):
-        sidebar = tk.Frame(self.root, bg="#101620", width=T.SIDEBAR_W)
+        sidebar = tk.Frame(self.root, bg=T.UI_SIDEBAR, width=T.SIDEBAR_W)
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
-        sidebar.columnconfigure(0, weight=1)
-        sidebar.rowconfigure(6, weight=1)
+        sidebar.pack_propagate(False)
         self.sidebar = sidebar
 
-        head = tk.Frame(sidebar, bg="#101620")
-        head.grid(row=0, column=0, sticky="we", padx=16, pady=(18, 12))
-        logo = self._icon_photo(os.path.join(store.ASSETS, "hub.png"), 38)
+        head = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
+        head.pack(fill="x", padx=20, pady=(18, 6))
+        logo = self._icon_photo(os.path.join(store.ASSETS, "hub.png"), 42)
         if logo is not None:
-            tk.Label(head, image=logo, bg="#101620").pack(side="left")
+            tk.Label(head, image=logo, bg=T.UI_SIDEBAR).pack(side="left")
             self._logo_photo = logo
-        text = tk.Frame(head, bg="#101620")
-        text.pack(side="left", padx=(10, 0))
-        self._label(text, "AllMyMaa", color="#eaf0f8", font=self.f_page,
-                    bg="#101620").pack(anchor="w")
-        self._label(text, "游戏脚本中心", color="#68788e",
-                    font=self.f_tiny, bg="#101620").pack(anchor="w")
+        text = tk.Frame(head, bg=T.UI_SIDEBAR)
+        text.pack(side="left", padx=(12, 0))
+        self._label(text, "All-My-Maa", color=T.UI_TEXT, font=self.f_page,
+                    bg=T.UI_SIDEBAR).pack(anchor="w")
+        self._label(text, "游戏脚本中心", color=T.UI_TEXT_3,
+                    font=self.f_aux, bg=T.UI_SIDEBAR).pack(anchor="w")
 
-        tk.Frame(sidebar, bg="#243044", height=1).grid(
-            row=1, column=0, sticky="we", padx=14, pady=(0, 10))
-
-        nav = tk.Frame(sidebar, bg="#101620")
-        nav.grid(row=2, column=0, sticky="we", padx=10)
-        nav.columnconfigure(0, weight=1)
+        self._sidebar_section("导航")
+        nav = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
+        nav.pack(fill="x", padx=12)
         items = (("home", "主页"), ("daily", "清日常"), ("settings", "设置"))
-        for index, (name, label) in enumerate(items):
-            button = tk.Button(
-                nav, text=label, command=lambda page=name: self.show_page(page),
-                bg="#101620", fg="#9aa8bc", activebackground="#1b2432",
-                activeforeground="#ffffff", relief="flat", bd=0,
-                anchor="w", padx=16, pady=9, font=self.f_btn, cursor="hand2")
-            button.grid(row=index, column=0, sticky="we", pady=2)
+        for name, label in items:
+            button = RoundButton(nav, text=label,
+                                 command=lambda page=name: self.show_page(page),
+                                 kind="ghost", height=37, anchor="w",
+                                 font=self.f_small, bg=T.UI_SIDEBAR)
+            button.pack(fill="x", pady=1)
+            button._selected = (name == "home")
             self._nav_buttons[name] = button
 
-        tk.Frame(sidebar, bg="#243044", height=1).grid(
-            row=3, column=0, sticky="we", padx=14, pady=(10, 10))
+        self._sidebar_section("小工具")
+        tools = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
+        tools.pack(fill="x", padx=12)
+        tool_items = (
+            ("打开 Clash Verge", self.open_clash),
+            ("打开脚本目录", self.open_script_dir),
+            ("打开日志目录", self.open_log_dir),
+            ("检查脚本更新", self._on_refresh),
+        )
+        for label, command in tool_items:
+            button = RoundButton(tools, text=label, command=command,
+                                 kind="ghost", height=33, anchor="w",
+                                 font=self.f_small, bg=T.UI_SIDEBAR)
+            button.pack(fill="x", pady=1)
+        self.clash_button = tools.winfo_children()[0]
 
-        self.clash_button = self._button(
-            sidebar, "打开 Clash Verge", self.open_clash, kind="normal")
-        self.clash_button.grid(row=4, column=0, sticky="we", padx=14, pady=2)
+        spacer = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
+        spacer.pack(fill="both", expand=True)
 
-        bottom = tk.Frame(sidebar, bg="#101620")
-        bottom.grid(row=7, column=0, sticky="we", padx=16, pady=(6, 16))
+        bottom = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
+        bottom.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        tk.Label(bottom, text="关于与更新", bg=T.UI_SIDEBAR,
+                 fg=T.UI_TEXT_3, font=self.f_tiny, anchor="w").pack(
+            fill="x", padx=8, pady=(0, 3))
+        about_buttons = tk.Frame(bottom, bg=T.UI_SIDEBAR)
+        about_buttons.pack(fill="x")
+        self._button(about_buttons, "关于软件", self.open_about,
+                     kind="ghost", anchor="w").pack(fill="x", pady=1)
+        self._button(about_buttons, "检查软件更新", self.check_software_update,
+                     kind="ghost", anchor="w").pack(fill="x", pady=1)
+
+        status = RoundPanel(bottom, fill=T.UI_PANEL,
+                            border=T.UI_BORDER_SOFT, pad=T.SPACE_XS)
+        status.pack(fill="x", pady=(4, 6))
         self.sidebar_hub_var = tk.StringVar(value="就绪")
         self.sidebar_count_var = tk.StringVar(value="")
-        self._label(bottom, "Hub 状态", color="#4d5c74",
-                    font=self.f_tiny, bg="#101620").pack(anchor="w")
-        tk.Label(bottom, textvariable=self.sidebar_hub_var, bg="#101620",
-                 fg="#4ade80", font=self.f_small,
-                 anchor="w").pack(anchor="w", pady=(0, 6))
-        tk.Label(bottom, textvariable=self.sidebar_count_var, bg="#101620",
-                 fg="#68788e", font=self.f_tiny,
-                 anchor="w").pack(anchor="w", pady=(0, 8))
-        self._label(bottom, f"AllMyMaa v{VERSION} · 单实例", color="#4d5c74",
-                    font=self.f_tiny, bg="#101620").pack(anchor="w")
+        self._label(status.inner, "Hub 状态", color=T.UI_TEXT_3,
+                    font=self.f_aux, bg=T.UI_PANEL).pack(anchor="w")
+        tk.Label(status.inner, textvariable=self.sidebar_hub_var,
+                 bg=T.UI_PANEL, fg=T.UI_SUCCESS, font=self.f_small,
+                 anchor="w").pack(anchor="w", pady=(1, 1))
+        tk.Label(status.inner, textvariable=self.sidebar_count_var,
+                 bg=T.UI_PANEL, fg=T.UI_TEXT_3, font=self.f_aux,
+                 anchor="w").pack(anchor="w")
+        self._label(bottom, f"All-My-Maa v{VERSION} · 单实例",
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_SIDEBAR).pack(anchor="w")
 
     def _apply_accent_theme(self):
         """把 settings.accent 应用到导航高亮与主按钮（强调色）。"""
-        accent = self.settings.get("accent") or "#4fc3ff"
+        accent = self.settings.get("accent") or T.UI_ACCENT
         for button in self._accent_buttons:
             try:
-                button.configure(bg=accent, fg="#071018",
-                                 activebackground=accent,
-                                 activeforeground="#071018")
+                button.set_accent(accent)
             except Exception:
                 pass
         for page_name, button in self._nav_buttons.items():
-            selected = page_name == self.page
             try:
-                button.configure(fg=accent if selected else "#9aa8bc",
-                                 bg="#1b2a3c" if selected else "#101620")
+                button.set_accent(accent)
+                button.set_selected(page_name == self.page)
             except Exception:
                 pass
 
@@ -725,14 +1079,11 @@ class GameHub:
                 frame.tkraise()
             else:
                 frame.lower()
-        accent = self.settings.get("accent") or "#4fc3ff"
         for page_name, button in self._nav_buttons.items():
-            if page_name == name:
-                button.configure(bg="#1b2a3c", fg=accent,
-                                 activebackground="#243a52")
-            else:
-                button.configure(bg="#101620", fg="#9aa8bc",
-                                 activebackground="#1b2432")
+            try:
+                button.set_selected(page_name == name)
+            except Exception:
+                pass
         if name == "home":
             self._refresh_home_states()
         elif name == "daily":
@@ -745,23 +1096,26 @@ class GameHub:
         page = self.pages["home"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        header = tk.Frame(page, bg=T.HEX_BG)
-        header.grid(row=0, column=0, sticky="we", padx=24, pady=(20, 8))
+        header = tk.Frame(page, bg=T.UI_BG)
+        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
+                    pady=(T.SPACE_XL, T.SPACE_SM))
         header.columnconfigure(1, weight=1)
-        self._label(header, "主页", color="#eaf0f8", font=self.f_title,
-                    bg=T.HEX_BG).grid(row=0, column=0, sticky="w")
+        self._label(header, "主页", color=T.UI_TEXT, font=self.f_title,
+                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
         self._label(header, "选择游戏行或「打开脚本」：未运行则启动，运行中则唤到前台",
-                    color="#68788e", font=self.f_small,
-                    bg=T.HEX_BG).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        actions = tk.Frame(header, bg=T.HEX_BG)
+                    color=T.UI_TEXT_3, font=self.f_small,
+                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
+                                     pady=(4, 0))
+        actions = tk.Frame(header, bg=T.UI_BG)
         actions.grid(row=0, column=2, rowspan=2, sticky="e")
         self._button(actions, "添加游戏", self.add_app,
-                     kind="primary").pack(side="left", padx=(0, 7))
+                     kind="primary").pack(side="left", padx=(0, T.SPACE_XS))
         self._button(actions, "检查更新", self._on_refresh).pack(
-            side="left", padx=(0, 7))
+            side="left", padx=(0, T.SPACE_XS))
         self._button(actions, "重新识别路径", self.rescan_paths).pack(side="left")
         area, self.home_inner = self._scroll_area(page)
-        area.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 12))
+        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_XL,
+                  pady=(0, T.SPACE_MD))
 
     def _rebuild_home(self):
         if not hasattr(self, "home_inner"):
@@ -773,68 +1127,69 @@ class GameHub:
             self._build_home_row(index, app)
         if not self.apps:
             self._label(self.home_inner, "还没有游戏，点右上角「添加游戏」开始。",
-                        color="#68788e").pack(padx=10, pady=20)
+                        color=T.UI_TEXT_3).pack(padx=10, pady=24)
         self._refresh_home_states()
 
     def _build_home_row(self, index, app):
         key = app["key"]
-        row = tk.Frame(self.home_inner, bg="#101620",
-                       highlightthickness=1, highlightbackground="#243044")
-        row.pack(fill="x", pady=6)
+        card = RoundPanel(self.home_inner, fill=T.UI_PANEL,
+                          border=T.UI_BORDER, pad=T.SPACE_LG)
+        card.pack(fill="x", pady=(3, 9))
+        row = card.inner
         row.columnconfigure(2, weight=1)
-        icon = self._icon_photo(app.get("icon_path"), 58)
-        icon_label = tk.Label(row, image=icon, bg="#101620")
+        icon = self._icon_photo(app.get("icon_path"), 64)
+        icon_label = tk.Label(row, image=icon, bg=T.UI_PANEL)
         if icon is not None:
             icon_label.image = icon
-        icon_label.grid(row=0, column=0, rowspan=2, padx=(16, 14), pady=14)
+        icon_label.grid(row=0, column=0, rowspan=2, padx=(0, T.SPACE_MD),
+                        pady=2)
 
-        name = tk.Label(row, text=app.get("game", ""), bg="#101620",
-                        fg="#eaf0f8", font=self.f_name, anchor="w")
-        name.grid(row=0, column=1, sticky="sw", pady=(14, 0))
-        version = tk.Label(row, text="", bg="#101620", fg="#68788e",
+        name = tk.Label(row, text=app.get("game", ""), bg=T.UI_PANEL,
+                        fg=T.UI_TEXT, font=self.f_page, anchor="w")
+        name.grid(row=0, column=1, sticky="sw", columnspan=2)
+        version = tk.Label(row, text="", bg=T.UI_PANEL, fg=T.UI_TEXT_3,
                            font=self.f_small, anchor="w")
-        version.grid(row=1, column=1, sticky="nw")
+        version.grid(row=1, column=1, sticky="nw", pady=(3, 0))
 
-        status_box = tk.Frame(row, bg="#101620")
+        status_box = tk.Frame(row, bg=T.UI_PANEL)
         status_box.grid(row=2, column=0, columnspan=2, sticky="w",
-                        padx=(16, 0), pady=(0, 14))
+                        pady=(T.SPACE_XS, 0))
         script_status = tk.StringVar(value="脚本 未启动")
         game_status = tk.StringVar(value="游戏 未运行")
         script_status_label = tk.Label(status_box, textvariable=script_status,
-                                       bg="#101620", fg="#9aa8bc",
+                                       bg=T.UI_PANEL, fg=T.UI_TEXT_2,
                                        font=self.f_small)
-        script_status_label.pack(side="left", padx=(0, 16))
+        script_status_label.pack(side="left", padx=(0, T.SPACE_MD))
         game_status_label = tk.Label(status_box, textvariable=game_status,
-                                     bg="#101620", fg="#68788e",
+                                     bg=T.UI_PANEL, fg=T.UI_TEXT_3,
                                      font=self.f_small)
         game_status_label.pack(side="left")
 
-        buttons = tk.Frame(row, bg="#101620")
-        buttons.grid(row=0, column=3, rowspan=2, sticky="e",
-                     padx=(10, 16), pady=14)
+        buttons = tk.Frame(row, bg=T.UI_PANEL)
+        buttons.grid(row=0, column=3, rowspan=3, sticky="e",
+                     padx=(T.SPACE_MD, 0))
         main_btn = self._button(buttons, "打开脚本",
                                 lambda k=key: self.open_script(k),
                                 kind="primary", width=11)
-        main_btn.pack(side="left", padx=(0, 7))
+        main_btn.pack(side="left", padx=(0, T.SPACE_XS))
         game_btn = self._button(buttons, "启动游戏",
                                 lambda k=key: self.launch_game(k),
                                 width=9)
-        game_btn.pack(side="left", padx=(0, 7))
+        game_btn.pack(side="left", padx=(0, T.SPACE_XS))
         daily_btn = self._button(buttons, "清日常",
                                  lambda k=key: self.run_daily_single(k),
-                                 width=9)
-        daily_btn.pack(side="left", padx=(0, 7))
-        more_btn = self._button(buttons, "更多 ▾",
-                                lambda k=key, w=None: None, width=8)
+                                 width=8)
+        daily_btn.pack(side="left", padx=(0, T.SPACE_XS))
+        more_btn = self._button(buttons, "更多 ▾", lambda: None, width=7)
         more_btn.configure(command=lambda k=key, w=more_btn: self._show_more(k, w))
         more_btn.pack(side="left")
 
-        for widget in (row, icon_label, name, version):
+        for widget in (card, row, icon_label, name, version):
             widget.bind("<Button-1>",
                         lambda event, k=key: self.open_script(k))
 
         self._home_rows[key] = {
-            "row": row, "name": name, "version": version,
+            "row": row, "card": card, "name": name, "version": version,
             "script_status": script_status, "game_status": game_status,
             "script_status_label": script_status_label,
             "game_status_label": game_status_label,
@@ -843,7 +1198,7 @@ class GameHub:
         }
 
     def _refresh_home_states(self):
-        accent = self.settings.get("accent") or "#4fc3ff"
+        accent = self.settings.get("accent") or T.UI_ACCENT
         by_key = {app["key"]: app for app in self.apps}
         daily_snapshot = self.daily_manager.snapshot()
         daily_busy = daily_snapshot.get("busy")
@@ -860,30 +1215,30 @@ class GameHub:
                 text += "  →  " + str(self.latest.get(key))
                 row["version"].configure(fg=accent)
             else:
-                row["version"].configure(fg="#68788e")
+                row["version"].configure(fg=T.UI_TEXT_3)
             row["version"].configure(text=text)
 
             script_state = self._app_state(app)
-            script_labels = {"on": ("脚本 运行中", "#4ade80"),
-                             "starting": ("脚本 启动中…", "#ffce6b"),
-                             "missing": ("脚本 路径缺失", "#ff7f7f"),
-                             "off": ("脚本 未启动", "#9aa8bc")}
+            script_labels = {"on": ("● 脚本运行中", T.UI_SUCCESS),
+                             "starting": ("● 脚本启动中…", T.UI_WARNING),
+                             "missing": ("● 脚本路径缺失", T.UI_DANGER),
+                             "off": ("○ 脚本未启动", T.UI_TEXT_2)}
             label, color = script_labels.get(script_state,
                                             script_labels["off"])
             row["script_status"].set(label)
             row["script_status_label"].configure(fg=color)
             game_state = self._game_state(app)
             if not game_state.get("configured"):
-                game_text, game_color = "游戏 未配置", "#68788e"
+                game_text, game_color = "○ 游戏未配置", T.UI_TEXT_3
             elif game_state.get("running"):
-                game_text = "游戏 " + (game_state.get("label") or "运行中")
-                game_color = "#4ade80"
+                game_text = "● 游戏" + (game_state.get("label") or "运行中")
+                game_color = T.UI_SUCCESS
             elif game_state.get("reason") == "launcher":
-                game_text, game_color = "游戏 启动器已开", "#ffce6b"
+                game_text, game_color = "● 游戏启动器已开", T.UI_WARNING
             elif game_state.get("reason") == "cloud":
-                game_text, game_color = "游戏 云游戏运行中", "#4ade80"
+                game_text, game_color = "● 游戏云游戏运行中", T.UI_SUCCESS
             else:
-                game_text, game_color = "游戏 未运行", "#68788e"
+                game_text, game_color = "○ 游戏未运行", T.UI_TEXT_3
             row["game_status"].set(game_text)
             row["game_status_label"].configure(fg=game_color)
 
@@ -909,9 +1264,9 @@ class GameHub:
         app = self._app_by_key(key)
         if app is None:
             return
-        menu = tk.Menu(self.root, tearoff=0, bg="#151b26", fg="#eaf0f8",
-                       activebackground="#2a3547", activeforeground="#ffffff",
-                       bd=0, font=self.f_small)
+        menu = tk.Menu(self.root, tearoff=0, bg=T.UI_PANEL_2,
+                       fg=T.UI_TEXT, activebackground=T.UI_PANEL_3,
+                       activeforeground=T.UI_TEXT, bd=0, font=self.f_small)
         menu.add_command(label="编辑卡片",
                          command=lambda: self.edit_app(self._key_index(key)))
         menu.add_command(label="检查更新",
@@ -947,46 +1302,50 @@ class GameHub:
         page = self.pages["daily"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(3, weight=1)
-        header = tk.Frame(page, bg=T.HEX_BG)
-        header.grid(row=0, column=0, sticky="we", padx=24, pady=(20, 4))
+        header = tk.Frame(page, bg=T.UI_BG)
+        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
+                    pady=(T.SPACE_XL, 6))
         header.columnconfigure(0, weight=1)
-        self._label(header, "清日常", color="#eaf0f8", font=self.f_title,
-                    bg=T.HEX_BG).grid(row=0, column=0, sticky="w")
+        self._label(header, "清日常", color=T.UI_TEXT, font=self.f_title,
+                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
         self._label(header, "使用脚本自身已配置的任务；勾选决定队列，顺序可调；同一时刻只运行一项。",
-                    color="#68788e", font=self.f_small,
-                    bg=T.HEX_BG).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        toolbar = tk.Frame(page, bg=T.HEX_BG)
-        toolbar.grid(row=1, column=0, sticky="we", padx=24, pady=(6, 6))
-        self._button(toolbar, "全选", lambda: self._daily_check_all(True),
-                     width=6).pack(side="left", padx=(0, 6))
-        self._button(toolbar, "取消全选", lambda: self._daily_check_all(False),
-                     width=8).pack(side="left", padx=(0, 12))
-        self._button(toolbar, "↑ 上移", lambda: self._daily_move(-1),
-                     width=7).pack(side="left", padx=(0, 6))
-        self._button(toolbar, "↓ 下移", lambda: self._daily_move(1),
-                     width=7).pack(side="left", padx=(0, 12))
-        self._button(toolbar, "开始选中项", self._daily_start_checked,
-                     kind="primary", width=11).pack(side="left", padx=(0, 6))
-        self._button(toolbar, "停止", self._daily_stop_all,
-                     kind="danger", width=6).pack(side="left", padx=(0, 12))
-        self._button(toolbar, "查看命令(dry-run)", self._daily_preview,
-                     width=16).pack(side="left")
+                    color=T.UI_TEXT_3, font=self.f_small,
+                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
+                                     pady=(4, 0))
+        toolbar = tk.Frame(page, bg=T.UI_BG)
+        toolbar.grid(row=1, column=0, sticky="we", padx=T.SPACE_XL,
+                     pady=(4, 8))
+        buttons = (
+            ("全选", lambda: self._daily_check_all(True), "normal", 6),
+            ("取消全选", lambda: self._daily_check_all(False), "normal", 8),
+            ("↑ 上移", lambda: self._daily_move(-1), "normal", 7),
+            ("↓ 下移", lambda: self._daily_move(1), "normal", 7),
+            ("开始选中项", self._daily_start_checked, "primary", 11),
+            ("停止", self._daily_stop_all, "danger", 6),
+            ("查看命令(dry-run)", self._daily_preview, "normal", 16),
+        )
+        for index, (text, command, kind, width) in enumerate(buttons):
+            button = self._button(toolbar, text, command, kind=kind,
+                                  width=width)
+            button.pack(side="left", padx=(0, T.SPACE_XS if index < 4
+                                          else T.SPACE_SM))
         self._label(page, "⚠ 自动化可能违反游戏条款、存在账号风险；执行期间脚本会抢占鼠标键盘，请确认后使用。",
-                    color="#ffce6b", font=self.f_tiny,
-                    bg=T.HEX_BG).grid(row=2, column=0, sticky="w",
-                                      padx=24)
+                    color=T.UI_WARNING, font=self.f_aux,
+                    bg=T.UI_BG).grid(row=2, column=0, sticky="w",
+                                     padx=T.SPACE_XL)
         self._daily_area, self.daily_inner = self._scroll_area(page)
-        self._daily_area.grid(row=3, column=0, sticky="nsew", padx=24,
-                              pady=(4, 8))
-        log_frame = tk.Frame(page, bg="#101620", highlightthickness=1,
-                             highlightbackground="#243044")
-        log_frame.grid(row=4, column=0, sticky="we", padx=24, pady=(0, 14))
+        self._daily_area.grid(row=3, column=0, sticky="nsew",
+                              padx=T.SPACE_XL,
+                              pady=(4, T.SPACE_XS))
+        log_panel = RoundPanel(page, fill=T.UI_PANEL,
+                               border=T.UI_BORDER_SOFT, pad=T.SPACE_SM)
+        log_panel.grid(row=4, column=0, sticky="we", padx=T.SPACE_XL,
+                       pady=(0, T.SPACE_MD))
         self.daily_log_text = tk.Text(
-            log_frame, height=7, bg="#101620", fg="#cdd8e6",
-            insertbackground="#cdd8e6", relief="flat", bd=0,
-            highlightthickness=0, font=self.f_tiny, wrap="word")
-        self.daily_log_text.pack(side="left", fill="both", expand=True,
-                                 padx=8, pady=6)
+            log_panel.inner, height=6, bg=T.UI_PANEL, fg=T.UI_TEXT_2,
+            insertbackground=T.UI_TEXT, relief="flat", bd=0,
+            highlightthickness=0, font=self.f_aux, wrap="word")
+        self.daily_log_text.pack(side="left", fill="both", expand=True)
         self.daily_log_text.configure(state="disabled")
 
     def _daily_settings_for(self, app):
@@ -1030,38 +1389,38 @@ class GameHub:
     def _build_daily_row(self, index, app):
         key = app["key"]
         settings = self._daily_settings_for(app)
-        row = tk.Frame(self.daily_inner, bg="#101620",
-                       highlightthickness=1, highlightbackground="#243044")
-        row.pack(fill="x", pady=5)
-        row.columnconfigure(2, weight=1)
-        line1 = tk.Frame(row, bg="#101620")
-        line1.grid(row=0, column=0, columnspan=4, sticky="we",
-                   padx=(12, 12), pady=(8, 2))
+        card = RoundPanel(self.daily_inner, fill=T.UI_PANEL,
+                          border=T.UI_BORDER, pad=T.SPACE_MD)
+        card.pack(fill="x", pady=(3, 8))
+        row = card.inner
+        line1 = tk.Frame(row, bg=T.UI_PANEL)
+        line1.pack(fill="x")
         line1.columnconfigure(2, weight=1)
         var = tk.BooleanVar(value=bool(settings.get("enabled", True)))
         check = tk.Checkbutton(
-            line1, variable=var, bg="#101620", activebackground="#101620",
-            selectcolor="#25445f", fg="#eaf0f8", bd=0, highlightthickness=0,
+            line1, variable=var, bg=T.UI_PANEL, activebackground=T.UI_PANEL,
+            selectcolor=T.UI_ACCENT_SOFT, fg=T.UI_TEXT, bd=0,
+            highlightthickness=0,
             command=lambda k=key: self._daily_on_check(k))
-        check.grid(row=0, column=0, padx=(0, 4))
+        check.grid(row=0, column=0, padx=(0, T.SPACE_XS))
         self._daily_vars[key] = var
-        icon = self._icon_photo(app.get("icon_path"), 30)
-        icon_label = tk.Label(line1, image=icon, bg="#101620")
+        icon = self._icon_photo(app.get("icon_path"), 34)
+        icon_label = tk.Label(line1, image=icon, bg=T.UI_PANEL)
         if icon is not None:
             icon_label.image = icon
-        icon_label.grid(row=0, column=1, padx=(0, 8))
-        name = tk.Label(line1, text=app.get("game", ""), bg="#101620",
-                        fg="#eaf0f8", font=self.f_name, anchor="w")
+        icon_label.grid(row=0, column=1, padx=(0, 10))
+        name = tk.Label(line1, text=app.get("game", ""), bg=T.UI_PANEL,
+                        fg=T.UI_TEXT, font=self.f_name, anchor="w")
         name.grid(row=0, column=2, sticky="w")
         status = tk.StringVar(value="空闲")
-        tk.Label(line1, textvariable=status, bg="#101620", fg="#9aa8bc",
+        tk.Label(line1, textvariable=status, bg=T.UI_PANEL, fg=T.UI_TEXT_2,
                  font=self.f_small, width=18,
-                 anchor="e").grid(row=0, column=3, padx=(8, 10))
+                 anchor="e").grid(row=0, column=3, padx=(T.SPACE_SM, 10))
         self._daily_status[key] = status
         start_btn = self._button(line1, "开始清日常",
                                  lambda k=key: self._daily_start_row(k),
                                  kind="primary", width=10)
-        start_btn.grid(row=0, column=4, padx=(0, 6))
+        start_btn.grid(row=0, column=4, padx=(0, T.SPACE_XS))
         stop_btn = self._button(line1, "停止",
                                 lambda k=key: self._daily_stop_row(k),
                                 kind="danger", width=6, state="disabled")
@@ -1069,34 +1428,37 @@ class GameHub:
         self._daily_start_btn[key] = start_btn
         self._daily_stop_btn[key] = stop_btn
 
-        line2 = tk.Frame(row, bg="#101620")
-        line2.grid(row=1, column=0, columnspan=4, sticky="we",
-                   padx=(30, 12), pady=(0, 8))
-        fields = [("instance", "实例", 12), ("task", "任务", 10),
-                  ("config", "MAA配置", 10), ("timeout_min", "超时", 5),
-                  ("extra_args", "额外参数", 14)]
+        line2 = tk.Frame(row, bg=T.UI_PANEL)
+        line2.pack(fill="x", pady=(T.SPACE_SM, 0))
+        fields = [("instance", "实例", 6), ("task", "任务", 6),
+                  ("config", "MAA 配置", 6), ("timeout_min", "超时", 4),
+                  ("extra_args", "额外参数", 6)]
         entries = {}
         for column, (field, label, width) in enumerate(fields):
-            tk.Label(line2, text=label, bg="#101620", fg="#68788e",
-                     font=self.f_tiny).grid(row=0, column=column * 2,
-                                            padx=(0, 3), sticky="e")
+            name_label = tk.Label(line2, text=label, bg=T.UI_PANEL,
+                                  fg=T.UI_TEXT_3, font=self.f_aux)
+            name_label.grid(row=0, column=column * 2, padx=(0, 4),
+                            sticky="e")
             entry = self._entry(line2, self._daily_field_value(settings, field),
                                 width=width)
-            entry.grid(row=0, column=column * 2 + 1, padx=(0, 8), sticky="w")
+            entry.grid(row=0, column=column * 2 + 1, padx=(0, 8),
+                       sticky="ew")
+            line2.columnconfigure(column * 2 + 1, weight=1)
             entries[field] = entry
         save_btn = self._button(line2, "保存设置",
                                 lambda k=key: self._daily_save_row(k),
-                                width=8)
+                                width=6)
         save_btn.grid(row=0, column=len(fields) * 2, padx=(4, 0))
-        hint = self._label(line2, "", color="#68788e", font=self.f_tiny,
-                           bg="#101620")
-        hint.grid(row=0, column=len(fields) * 2 + 1, padx=(8, 0), sticky="w")
+        hint = self._label(line2, "", color=T.UI_WARNING, font=self.f_aux,
+                           bg=T.UI_PANEL, anchor="w", justify="left")
+        hint.grid(row=1, column=0, columnspan=len(fields) * 2 + 1,
+                  sticky="w", pady=(4, 0))
         self._daily_hint[key] = hint
         self._daily_settings[key] = entries
 
-        for widget in (row, name, icon_label):
+        for widget in (card, row, name, icon_label, check):
             widget.bind("<Button-1>", lambda event, k=key: self._daily_select(k))
-        self._daily_rows[key] = row
+        self._daily_rows[key] = card
 
     @staticmethod
     def _daily_field_value(settings, field):
@@ -1107,9 +1469,12 @@ class GameHub:
 
     def _daily_select(self, key):
         self.daily_selected = key
-        for row_key, row in self._daily_rows.items():
-            row.configure(highlightbackground=(
-                self.settings.get("accent") if row_key == key else "#243044"))
+        accent = self.settings.get("accent") or T.UI_ACCENT
+        for row_key, card in self._daily_rows.items():
+            try:
+                card.set_border(accent if row_key == key else T.UI_BORDER)
+            except Exception:
+                pass
 
     def _daily_on_check(self, key):
         app = self._app_by_key(key)
@@ -1249,17 +1614,17 @@ class GameHub:
     def _confirm_preview(self, title, plans, confirm=True):
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
-        dialog.configure(bg="#0f141d")
+        dialog.configure(bg=T.UI_BG)
         dialog.transient(self.root)
         dialog.geometry("760x460")
         result = {"ok": False}
-        text = tk.Text(dialog, bg="#101620", fg="#cdd8e6", relief="flat",
+        text = tk.Text(dialog, bg=T.UI_PANEL, fg=T.UI_TEXT_2, relief="flat",
                        wrap="word", font=self.f_small)
         text.pack(fill="both", expand=True, padx=14, pady=(14, 8))
         text.insert("1.0", "\n\n".join(daily.describe_plan(plan)
                                        for plan in plans))
         text.configure(state="disabled")
-        footer = tk.Frame(dialog, bg="#0f141d")
+        footer = tk.Frame(dialog, bg=T.UI_BG)
         footer.pack(fill="x", padx=14, pady=(0, 12))
 
         def start():
@@ -1389,56 +1754,60 @@ class GameHub:
                 stop_btn.configure(state="normal" if active == key
                                    else "disabled")
             if hint is not None:
-                hint.configure(text=reason, fg="#ffce6b" if reason else "#68788e")
+                hint.configure(text=reason, fg="#ffce6b" if reason else T.UI_TEXT_3)
 
     # ---------------------------------------------------------- 设置页
     def _build_settings_page(self):
         page = self.pages["settings"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        header = tk.Frame(page, bg=T.HEX_BG)
-        header.grid(row=0, column=0, sticky="we", padx=24, pady=(20, 8))
+        header = tk.Frame(page, bg=T.UI_BG)
+        header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
+                    pady=(T.SPACE_XL, T.SPACE_SM))
         header.columnconfigure(0, weight=1)
-        self._label(header, "设置", color="#eaf0f8", font=self.f_title,
-                    bg=T.HEX_BG).grid(row=0, column=0, sticky="w")
+        self._label(header, "设置", color=T.UI_TEXT, font=self.f_title,
+                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
         self._label(header, "配置会立即持久化到 config.json（保存失败会提示）",
-                    color="#68788e", font=self.f_small,
-                    bg=T.HEX_BG).grid(row=1, column=0, sticky="w", pady=(2, 0))
+                    color=T.UI_TEXT_3, font=self.f_small,
+                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
+                                     pady=(4, 0))
         self._button(header, "保存设置", self._apply_settings,
                      kind="primary").grid(row=0, column=1, rowspan=2,
                                           sticky="e")
         area, body = self._scroll_area(page)
-        area.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 14))
+        area.grid(row=1, column=0, sticky="nsew", padx=T.SPACE_XL,
+                  pady=(0, T.SPACE_MD))
         self.settings_body = body
-        columns = tk.Frame(body, bg="#0f141d")
+        columns = tk.Frame(body, bg=T.UI_BG)
         columns.pack(fill="both", expand=True)
-        left_col = tk.Frame(columns, bg="#0f141d")
-        left_col.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right_col = tk.Frame(columns, bg="#0f141d")
-        right_col.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        left_col = tk.Frame(columns, bg=T.UI_BG)
+        left_col.pack(side="left", fill="both", expand=True,
+                      padx=(0, T.SPACE_SM))
+        right_col = tk.Frame(columns, bg=T.UI_BG)
+        right_col.pack(side="left", fill="both", expand=True,
+                       padx=(T.SPACE_SM, 0))
 
         def section(title, parent):
-            frame = tk.Frame(parent, bg="#101620", highlightthickness=1,
-                             highlightbackground="#243044")
-            frame.pack(fill="x", pady=4)
-            self._label(frame, title, color="#eaf0f8", font=self.f_name,
-                        bg="#101620").pack(anchor="w", padx=14, pady=(8, 3))
-            content = tk.Frame(frame, bg="#101620")
-            content.pack(fill="x", padx=14, pady=(0, 10))
-            return content
+            panel = RoundPanel(parent, fill=T.UI_PANEL,
+                               border=T.UI_BORDER, pad=T.SPACE_MD)
+            panel.pack(fill="x", pady=(3, 9))
+            self._label(panel.inner, title, color=T.UI_TEXT,
+                        font=self.f_name, bg=T.UI_PANEL).pack(
+                anchor="w", pady=(0, T.SPACE_XS))
+            return panel.inner
 
         # 外观
         appearance = section("外观", left_col)
-        self._label(appearance, "强调色", color="#9aa8bc",
-                    font=self.f_small, bg="#101620").pack(side="left",
+        self._label(appearance, "强调色", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left",
                                                           padx=(0, 10))
-        self._accent_var = self.settings.get("accent") or "#4fc3ff"
+        self._accent_var = self.settings.get("accent") or T.UI_ACCENT
         self._accent_chips = {}
         for color in store.ACCENT_PRESETS:
-            chip = tk.Button(appearance, bg=color, width=3, relief="flat",
+            chip = tk.Button(appearance, bg=color, width=2, relief="flat",
                              bd=0, cursor="hand2",
                              command=lambda c=color: self._pick_accent(c))
-            chip.pack(side="left", padx=3)
+            chip.pack(side="left", padx=3, pady=2)
             self._accent_chips[color] = chip
         self._refresh_accent_chips()
 
@@ -1447,58 +1816,58 @@ class GameHub:
         self.check_update_var = tk.BooleanVar(
             value=bool(self.settings.get("check_update_on_start", True)))
         tk.Checkbutton(launcher, text="启动时检查更新", variable=self.check_update_var,
-                       bg="#101620", fg="#9aa8bc", selectcolor="#101620",
-                       activebackground="#101620", activeforeground="#eaf0f8",
+                       bg=T.UI_PANEL, fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
+                       activebackground=T.UI_PANEL,
+                       activeforeground=T.UI_TEXT,
                        font=self.f_small).pack(anchor="w", pady=2)
-        row = tk.Frame(launcher, bg="#101620")
+        row = tk.Frame(launcher, bg=T.UI_PANEL)
         row.pack(anchor="w", pady=2)
-        self._label(row, "状态刷新间隔：", color="#9aa8bc",
-                    font=self.f_small, bg="#101620").pack(side="left")
+        self._label(row, "状态刷新间隔：", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left")
         self.refresh_var = tk.StringVar(
             value=str(self.settings.get("refresh_interval", 1.5)))
         refresh_menu = tk.OptionMenu(row, self.refresh_var, "1.0", "1.5", "2.0")
-        refresh_menu.configure(bg="#1b2432", fg="#eaf0f8",
-                               activebackground="#26313f", relief="flat",
+        refresh_menu.configure(bg=T.UI_PANEL_2, fg=T.UI_TEXT,
+                               activebackground=T.UI_PANEL_3, relief="flat",
                                bd=0, highlightthickness=0, font=self.f_small)
         refresh_menu.pack(side="left")
-        self._label(row, " 秒", color="#68788e", font=self.f_tiny,
-                    bg="#101620").pack(side="left")
-        row2 = tk.Frame(launcher, bg="#101620")
+        self._label(row, " 秒", color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(side="left")
+        row2 = tk.Frame(launcher, bg=T.UI_PANEL)
         row2.pack(anchor="w", pady=2)
-        self._label(row2, "关闭窗口：", color="#9aa8bc", font=self.f_small,
-                    bg="#101620").pack(side="left")
+        self._label(row2, "关闭窗口：", color=T.UI_TEXT_2, font=self.f_small,
+                    bg=T.UI_PANEL).pack(side="left")
         self.close_action_var = tk.StringVar(
             value=self.settings.get("close_action", "exit"))
         for value, label in (("exit", "退出程序"), ("minimize", "最小化到任务栏")):
             tk.Radiobutton(row2, text=label, value=value,
-                           variable=self.close_action_var, bg="#101620",
-                           fg="#9aa8bc", selectcolor="#101620",
-                           activebackground="#101620",
-                           activeforeground="#eaf0f8",
+                           variable=self.close_action_var, bg=T.UI_PANEL,
+                           fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
+                           activebackground=T.UI_PANEL,
+                           activeforeground=T.UI_TEXT,
                            font=self.f_small).pack(side="left", padx=(0, 12))
 
         # 路径
         paths = section("路径", left_col)
-        row = tk.Frame(paths, bg="#101620")
+        row = tk.Frame(paths, bg=T.UI_PANEL)
         row.pack(fill="x", pady=2)
-        self._label(row, "脚本根目录：", color="#9aa8bc",
-                    font=self.f_small, bg="#101620").pack(side="left")
+        self._label(row, "脚本根目录：", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left")
         self.settings_root_var = tk.StringVar(value=self.search_root)
-        tk.Label(row, textvariable=self.settings_root_var, bg="#101620",
-                 fg="#68788e", font=self.f_tiny,
+        tk.Label(row, textvariable=self.settings_root_var, bg=T.UI_PANEL,
+                 fg=T.UI_TEXT_3, font=self.f_aux,
                  anchor="w").pack(side="left", fill="x", expand=True)
         self._button(row, "重新识别", self.rescan_paths, width=8).pack(
             side="right")
-        row = tk.Frame(paths, bg="#101620")
-        row.pack(fill="x", pady=2)
-        self._label(row, "Clash Verge：", color="#9aa8bc",
-                    font=self.f_small, bg="#101620").pack(side="left")
+        row = tk.Frame(paths, bg=T.UI_PANEL)
+        row.pack(fill="x", pady=(T.SPACE_XS, 2))
+        self._label(row, "Clash Verge：", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left")
         self.clash_var = tk.StringVar(value=self.clash_exe or "")
-        tk.Entry(row, textvariable=self.clash_var, bg="#0c111a",
-                 fg="#eaf0f8", insertbackground="#eaf0f8", relief="flat",
-                 highlightthickness=1, highlightbackground="#243044",
-                 font=self.f_tiny).pack(side="left", fill="x", expand=True,
-                                         padx=(0, 6))
+        clash_entry = RoundEntry(row, textvariable=self.clash_var, width=16,
+                                 font=self.f_aux)
+        clash_entry.pack(side="left", fill="x", expand=True,
+                         padx=(0, 6), pady=2)
         self._button(row, "浏览", self._browse_clash, width=6).pack(
             side="left", padx=(0, 6))
         self._button(row, "自动查找", self._auto_find_clash, width=8).pack(
@@ -1506,19 +1875,16 @@ class GameHub:
 
         # 清日常
         daily_frame = section("清日常", right_col)
-        row = tk.Frame(daily_frame, bg="#101620")
+        row = tk.Frame(daily_frame, bg=T.UI_PANEL)
         row.pack(fill="x", pady=2)
-        self._label(row, "默认超时（分钟）：", color="#9aa8bc",
-                    font=self.f_small, bg="#101620").pack(side="left")
+        self._label(row, "默认超时（分钟）：", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack(side="left")
         self.daily_timeout_var = tk.StringVar(
             value=str(self.settings.get("daily_default_timeout", 120)))
-        tk.Entry(row, textvariable=self.daily_timeout_var, width=6,
-                 bg="#0c111a", fg="#eaf0f8", insertbackground="#eaf0f8",
-                 relief="flat", highlightthickness=1,
-                 highlightbackground="#243044",
-                 font=self.f_small).pack(side="left", padx=(0, 16))
-        self._label(row, "（仅用于未单独设置超时的条目）", color="#4d5c74",
-                    font=self.f_tiny, bg="#101620").pack(side="left")
+        RoundEntry(row, textvariable=self.daily_timeout_var, width=4,
+                   font=self.f_small).pack(side="left", padx=(0, 16), pady=2)
+        self._label(row, "（未单独设置时使用）", color=T.UI_TEXT_3,
+                    font=self.f_aux, bg=T.UI_PANEL).pack(side="left")
         self.preview_var = tk.BooleanVar(
             value=bool(self.settings.get("daily_show_preview", True)))
         self.adb_var = tk.BooleanVar(
@@ -1529,38 +1895,204 @@ class GameHub:
                           (self.adb_var, "启用 ADB 检测（模拟器内游戏）"),
                           (self.daily_close_var, "完成后结束脚本（默认值）")):
             tk.Checkbutton(daily_frame, text=text, variable=var,
-                           bg="#101620", fg="#9aa8bc", selectcolor="#101620",
-                           activebackground="#101620",
-                           activeforeground="#eaf0f8",
+                           bg=T.UI_PANEL, fg=T.UI_TEXT_2,
+                           selectcolor=T.UI_PANEL,
+                           activebackground=T.UI_PANEL,
+                           activeforeground=T.UI_TEXT,
                            font=self.f_small).pack(anchor="w", pady=1)
 
-        # 关于
-        about = section("关于", right_col)
-        self._label(about, f"AllMyMaa v{VERSION}", color="#eaf0f8",
-                    font=self.f_small, bg="#101620").pack(anchor="w", pady=1)
+        # 关于与更新
+        about = section("关于与更新", right_col)
+        self._label(about, f"All-My-Maa v{VERSION}", color=T.UI_TEXT,
+                    font=self.f_small, bg=T.UI_PANEL).pack(anchor="w", pady=1)
         self._label(about, "游戏脚本中心 · 一体化启动器",
-                    color="#68788e", font=self.f_tiny,
-                    bg="#101620").pack(anchor="w", pady=(0, 4))
-        links = tk.Frame(about, bg="#101620")
-        links.pack(anchor="w", pady=(2, 0))
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(0, 6))
+        links = tk.Frame(about, bg=T.UI_PANEL)
+        links.pack(anchor="w")
         about_links = (
-            ("项目主页", lambda: self._open_url(
-                "https://diaohesi.github.io/AllMyMaa/", "项目主页")),
-            ("GitHub", lambda: self._open_url(
-                "https://github.com/Diaohesi/AllMyMaa", "GitHub")),
-            ("Release", lambda: self._open_url(
-                "https://github.com/Diaohesi/AllMyMaa/releases/latest",
-                "Release")),
-            ("更新日志", self._open_changelog),
-            ("QA 报告", lambda: self._open_doc("qa-report.md")),
-            ("调研报告", lambda: self._open_doc("daily-automation-research.md")),
-            ("检查更新", self._on_refresh),
+            ("关于软件", self.open_about, "primary"),
+            ("检查软件更新", self.check_software_update, "normal"),
+            ("更新日志", self._open_changelog, "ghost"),
+            ("GitHub", lambda: self._open_url(PROJECT_GITHUB, "GitHub"),
+             "ghost"),
+            ("项目主页", lambda: self._open_url(PROJECT_PAGES, "项目主页"),
+             "ghost"),
         )
-        for index, (label, command) in enumerate(about_links):
-            self._button(links, label, command, kind="ghost",
-                         width=8, font=self.f_tiny).grid(
-                row=index // 4, column=index % 4, padx=(0, 5), pady=2,
+        for index, (label, command, kind) in enumerate(about_links):
+            self._button(links, label, command, kind=kind,
+                         width=9, font=self.f_small).grid(
+                row=index // 2, column=index % 2, padx=(0, 6), pady=2,
                 sticky="w")
+
+    # ---------------------------------------------------------- 关于 / 软件更新 / 小工具
+    def open_script_dir(self):
+        folder = _script_directory(self.search_root)
+        if store.open_path(folder):
+            self._toast("已打开脚本根目录")
+        else:
+            self._toast(f"脚本目录不存在：{folder}")
+
+    def open_log_dir(self):
+        folder = _log_directory(store.APP_DIR)
+        if store.open_path(folder):
+            self._toast("已打开日志目录")
+        else:
+            self._toast(f"日志目录不存在：{folder}")
+
+    def open_about(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("关于软件 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 620, 540)
+        panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
+                           pad=T.SPACE_XL)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_MD,
+                   pady=T.SPACE_MD)
+        body = panel.inner
+        logo = self._icon_photo(os.path.join(store.ASSETS, "hub.png"), 64)
+        if logo is not None:
+            tk.Label(body, image=logo, bg=T.UI_PANEL).pack(pady=(0, 6))
+        self._label(body, "All-My-Maa", color=T.UI_TEXT, font=self.f_title,
+                    bg=T.UI_PANEL).pack()
+        self._label(body, "游戏脚本中心 · 一体化启动器", color=T.UI_TEXT_3,
+                    font=self.f_small, bg=T.UI_PANEL).pack(pady=(2, 2))
+        self._label(body, f"版本 v{VERSION}", color=T.UI_TEXT_2,
+                    font=self.f_small, bg=T.UI_PANEL).pack()
+        self._label(body, _license_label(),
+                    color=T.UI_TEXT_3, font=self.f_aux,
+                    bg=T.UI_PANEL).pack(pady=(4, 10))
+
+        links = tk.Frame(body, bg=T.UI_PANEL)
+        links.pack(pady=(0, T.SPACE_SM))
+        entries = (
+            ("GitHub", lambda: self._open_url(PROJECT_GITHUB, "GitHub")),
+            ("项目主页", lambda: self._open_url(PROJECT_PAGES, "项目主页")),
+            ("License", self._open_license),
+            ("更新日志", self._open_changelog),
+        )
+        for label, command in entries:
+            self._button(links, label, command, kind="ghost",
+                         width=8, font=self.f_small).pack(side="left",
+                                                         padx=3)
+        self._label(body, "最近更新", color=T.UI_TEXT, font=self.f_small,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(0, 4))
+        text = tk.Text(body, height=9, bg=T.UI_PANEL_2, fg=T.UI_TEXT_2,
+                       relief="flat", bd=0, highlightthickness=0,
+                       wrap="word", font=self.f_aux)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", _changelog_preview_text(8))
+        text.configure(state="disabled")
+        footer = tk.Frame(body, bg=T.UI_PANEL)
+        footer.pack(fill="x", pady=(T.SPACE_SM, 0))
+        self._button(footer, "检查软件更新", self.check_software_update,
+                     kind="primary").pack(side="left")
+        self._button(footer, "关闭", dialog.destroy).pack(side="right")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+
+    def _open_license(self):
+        path = _find_license()
+        if path:
+            self._open_file(path, "License")
+        else:
+            self._toast("未找到 LICENSE 文件（打包版需随 exe 附带）")
+
+    def _open_file(self, path, label):
+        try:
+            os.startfile(path)
+            self._toast(f"已打开 {label}")
+        except Exception as exc:
+            self._toast(f"打开 {label} 失败：{exc}")
+
+    def _place_dialog(self, dialog, width, height):
+        """把对话框居中放在主窗口内，并保证不超过主窗口可用区域。"""
+        self.root.update_idletasks()
+        max_w = max(480, self.root.winfo_width() - 80)
+        max_h = max(360, self.root.winfo_height() - 100)
+        width = min(int(width), max_w)
+        height = min(int(height), max_h)
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+
+    def check_software_update(self, manual=True):
+        if self.software_checking:
+            if manual:
+                self._toast("正在检查软件更新，请稍候…")
+            return
+        self.software_checking = True
+        self._toast("正在检查软件更新…")
+        threading.Thread(target=self._software_update_worker,
+                         daemon=True).start()
+
+    def _software_update_worker(self):
+        try:
+            payload = store.http_get(RELEASE_API, timeout=12)
+            info = parse_release_payload(payload, VERSION)
+        except Exception as exc:
+            info = {"error": f"{exc}"}
+        self.software_queue.put(info)
+
+    def _drain_software_update(self):
+        try:
+            info = self.software_queue.get_nowait()
+        except queue.Empty:
+            return
+        self.software_checking = False
+        if info.get("error"):
+            self._toast(f"检查软件更新失败：{info['error']}（请检查网络或代理）")
+            return
+        self._show_software_update(info)
+
+    def _show_software_update(self, info):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("软件更新 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 680, 540)
+        panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER,
+                           pad=T.SPACE_XL)
+        panel.pack(fill="both", expand=True, padx=T.SPACE_MD,
+                   pady=T.SPACE_MD)
+        body = panel.inner
+        self._label(body, "All-My-Maa 软件更新", color=T.UI_TEXT,
+                    font=self.f_page, bg=T.UI_PANEL).pack(anchor="w")
+        self._label(body, f"当前版本：v{info.get('current', VERSION)}",
+                    color=T.UI_TEXT_2, font=self.f_small,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(6, 2))
+        version = info.get("version") or "未知"
+        if info.get("newer"):
+            headline = f"发现新版本：v{version}"
+            color = T.UI_SUCCESS
+        else:
+            headline = f"已是最新版本（GitHub 最新：v{version}）"
+            color = T.UI_TEXT_2
+        self._label(body, headline, color=color, font=self.f_name,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(0, 8))
+        self._label(body, "更新内容", color=T.UI_TEXT, font=self.f_small,
+                    bg=T.UI_PANEL).pack(anchor="w")
+        text = tk.Text(body, height=12, bg=T.UI_PANEL_2, fg=T.UI_TEXT_2,
+                       relief="flat", bd=0, highlightthickness=0,
+                       wrap="word", font=self.f_small)
+        text.pack(fill="both", expand=True, pady=(4, T.SPACE_SM))
+        changelog = format_changelog_text(info.get("changelog") or "")
+        text.insert("1.0", changelog or "（该版本没有附带更新说明）")
+        text.configure(state="disabled")
+        footer = tk.Frame(body, bg=T.UI_PANEL)
+        footer.pack(fill="x")
+        if info.get("newer"):
+            self._button(footer, "打开发布页",
+                         lambda: self._open_url(info.get("url") or RELEASE_PAGE,
+                                                "发布页"),
+                         kind="primary").pack(side="left")
+        self._button(footer, "关闭", dialog.destroy).pack(side="right")
+        self._label(body, "本程序不会自动下载或安装更新。", color=T.UI_TEXT_3,
+                    font=self.f_aux, bg=T.UI_PANEL).pack(anchor="w",
+                                                         pady=(6, 0))
+        dialog.grab_set()
+        self.root.wait_window(dialog)
 
     # ---------------------------------------------------------- 更新日志
     def _open_changelog(self):
@@ -1574,36 +2106,26 @@ class GameHub:
         except Exception as exc:
             self._toast(f"读取更新日志失败：{exc}")
             return
-        sections = _parse_changelog(text)
-        if not sections:
-            content = text.strip() or "（更新日志为空）"
-        else:
-            blocks = []
-            for section in sections:
-                title = section["version"]
-                if section["date"]:
-                    title += f"  ({section['date']})"
-                blocks.append(f"## {title}\n\n{section['body']}".strip())
-            content = "\n\n".join(blocks)
-        self._show_text_window("更新日志 · AllMyMaa", content)
+        content = format_changelog_text(text) or "（更新日志为空）"
+        self._show_text_window("更新日志 · All-My-Maa", content)
 
     def _show_text_window(self, title, content):
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
-        dialog.configure(bg="#0f141d")
+        dialog.configure(bg=T.UI_BG)
         dialog.transient(self.root)
-        dialog.geometry("780x580")
-        text = tk.Text(dialog, bg="#101620", fg="#cdd8e6", relief="flat",
+        self._place_dialog(dialog, 720, 560)
+        text = tk.Text(dialog, bg=T.UI_PANEL, fg=T.UI_TEXT_2, relief="flat",
                        wrap="word", font=self.f_small)
         scroll = tk.Scrollbar(dialog, command=text.yview, width=10,
-                              bg="#1b2432", troughcolor="#101620",
+                              bg=T.UI_PANEL_2, troughcolor=T.UI_PANEL,
                               relief="flat", bd=0, highlightthickness=0)
         text.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         text.pack(fill="both", expand=True, padx=(14, 0), pady=14)
         text.insert("1.0", content)
         text.configure(state="disabled")
-        footer = tk.Frame(dialog, bg="#0f141d")
+        footer = tk.Frame(dialog, bg=T.UI_BG)
         footer.pack(fill="x", padx=14, pady=(0, 12))
         self._button(footer, "关闭", dialog.destroy).pack(side="right")
         dialog.grab_set()
@@ -2281,6 +2803,7 @@ class GameHub:
         try:
             self._drain_queue()
             self._drain_daily_events()
+            self._drain_software_update()
             self._refresh()
         except Exception:
             pass
@@ -2294,6 +2817,176 @@ class GameHub:
         self._rebuild_home()
         self._rebuild_daily()
         self._refresh()
+
+
+def _find_license():
+    """定位 LICENSE：源码运行用仓库根目录，打包版用 exe 同目录/_MEIPASS。"""
+    import sys
+    candidates = []
+    bundle = getattr(sys, "_MEIPASS", "")
+    if bundle:
+        candidates.append(os.path.join(bundle, "LICENSE"))
+        candidates.append(os.path.join(bundle, "LICENSE.md"))
+    for name in ("LICENSE", "LICENSE.md", "LICENSE.txt"):
+        candidates.append(os.path.join(store.APP_DIR, name))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def _license_label():
+    """从 LICENSE 文件识别许可证名称，输出一行「License：MIT License」。"""
+    path = _find_license()
+    if not path:
+        return "License：随程序附带"
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+            head = fh.read(4096)
+    except Exception:
+        return "License：随程序附带"
+    low = head.lower()
+    known = (
+        ("MIT License", "mit license"),
+        ("Apache License 2.0", "apache license"),
+        ("GNU GPL v3", "gnu general public license"),
+        ("GNU LGPL", "gnu lesser general public license"),
+        ("BSD 3-Clause", "bsd 3-clause"),
+        ("BSD 2-Clause", "bsd 2-clause"),
+        ("Mozilla Public License 2.0", "mozilla public license"),
+    )
+    for label, needle in known:
+        if needle in low:
+            return f"License：{label}"
+    match = re.search(r"SPDX-License-Identifier:\s*([^\s]+)", head)
+    if match:
+        return f"License：{match.group(1)}"
+    return "License：见随程序附带的 LICENSE 文件"
+
+
+def _markdown_to_plain(text):
+    """把一行 Markdown 变成纯文本：去 #/列表/引用/粗体/斜体/代码/链接语法。"""
+    line = str(text or "").strip()
+    line = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)
+    line = re.sub(r"<https?://[^>]+>", "", line)
+    line = line.replace("**", "").replace("__", "").replace("`", "")
+    line = re.sub(r"~~(.*?)~~", r"\1", line)
+    line = re.sub(r"(?<!\w)[*_]([^*_]+)[*_](?!\w)", r"\1", line)
+    line = re.sub(r"^#{1,6}\s*", "", line)
+    line = re.sub(r"^>\s*", "", line)
+    line = re.sub(r"^[-*+]\s+", "", line)
+    line = re.sub(r"^\d+[.)]\s+", "", line)
+    if re.fullmatch(r"[-*_]{3,}", line):
+        return ""
+    return line.strip()
+
+
+def _markdown_body_to_plain(body):
+    lines = []
+    for raw in str(body or "").splitlines():
+        line = _markdown_to_plain(raw)
+        if line == "" and (not lines or lines[-1] == ""):
+            continue
+        lines.append(line)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
+def format_changelog_text(text, limit_entries=None):
+    """把 CHANGELOG / GitHub release Markdown 转成适合 Text 显示的纯文本。
+
+    - `## vX.Y.Z (日期)` -> `vX.Y.Z · 日期` 单独一行（版本从新到旧）
+    - 去掉行首 #/列表/引用符号，去掉 **、反引号、[]() 链接语法（保留文字）
+    - 条目保留换行；limit_entries 限制显示的版本数
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    sections = _parse_changelog(raw)
+    blocks = []
+    if sections:
+        selected = sections
+        if limit_entries is not None:
+            try:
+                selected = sections[:max(1, int(limit_entries))]
+            except (TypeError, ValueError):
+                selected = sections
+        for section in selected:
+            title = section["version"]
+            if section["date"]:
+                title += f" · {section['date']}"
+            body = _markdown_body_to_plain(section["body"])
+            blocks.append(title + (("\n\n" + body) if body else ""))
+    else:
+        cleaned = _markdown_body_to_plain(raw)
+        if cleaned:
+            blocks.append(cleaned)
+    return "\n\n".join(blocks).strip()
+
+
+def _changelog_preview_text(limit=6):
+    """关于对话框里的更新日志预览（最新版本在最上面，已转纯文本）。"""
+    path = _find_changelog()
+    if not path:
+        return "（未找到 CHANGELOG.md）"
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            text = fh.read()
+    except Exception:
+        return "（更新日志读取失败）"
+    formatted = format_changelog_text(text, limit)
+    return formatted or "（更新日志为空）"
+
+
+def parse_release_payload(payload, current):
+    """解析 GitHub latest release JSON，返回纯数据（供 UI 与自测使用）。
+
+    不自动下载/安装；失败时返回 {"error": "..."}。
+    """
+    import json
+    try:
+        if isinstance(payload, bytes):
+            text = payload.decode("utf-8", "replace")
+        else:
+            text = payload
+        data = json.loads(text) if isinstance(text, (str, bytes)) else payload
+    except Exception as exc:
+        return {"error": f"解析 release 信息失败：{exc}"}
+    if not isinstance(data, dict):
+        return {"error": "release 信息格式不正确"}
+    raw = str(data.get("tag_name") or data.get("name") or "").strip()
+    version = raw[1:] if raw[:1] in ("v", "V") else raw
+    if not version:
+        return {"error": "release 信息缺少版本号"}
+    if not store.version_key(version):
+        return {"error": f"无法识别版本号：{raw}"}
+    return {
+        "error": "",
+        "current": str(current),
+        "version": version,
+        "newer": store.is_newer(version, current),
+        "changelog": str(data.get("body") or ""),
+        "url": str(data.get("html_url") or RELEASE_PAGE),
+        "name": str(data.get("name") or ""),
+        "published_at": str(data.get("published_at") or ""),
+    }
+
+
+def _script_directory(root):
+    """脚本根目录（小工具：打开脚本目录）。"""
+    return os.path.abspath(root) if root else store.APP_DIR
+
+
+def _log_directory(app_dir=None):
+    """日志目录：优先 <app>/logs 或 <app>/log，否则回退 app 目录。"""
+    base = app_dir or store.APP_DIR
+    for name in ("logs", "log"):
+        path = os.path.join(base, name)
+        if os.path.isdir(path):
+            return path
+    return base
 
 
 def _find_changelog():
@@ -2350,7 +3043,7 @@ def _refresh_delay_ms(settings):
 
 def run():
     import ctypes
-    mutex = store.kernel32.CreateMutexW(None, False, "Local\\GameHubLite_SingleInstance")
+    mutex = store.kernel32.CreateMutexW(None, False, "Local\\AllMyMaa_SingleInstance")
     if mutex and ctypes.get_last_error() == 183:
         store.focus_window(TITLE)
         return

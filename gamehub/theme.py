@@ -3,10 +3,54 @@
 
 # 窗口与卡片布局
 W, H = 1200, 560
-# v0.8 主窗口（侧边栏 + 三页）；W/H 保留给旧版 Pillow 背景渲染（回归测试）
-WIN_W, WIN_H = 1200, 720
-MIN_W, MIN_H = 1000, 620
-SIDEBAR_W = 210
+# v0.8/v0.9 主窗口（侧边栏 + 三页）；W/H 保留给旧版 Pillow 背景渲染（回归测试）
+WIN_W, WIN_H = 1180, 760
+MIN_W, MIN_H = 1000, 640
+SIDEBAR_W = 232
+
+# ---------------------------------------------------------------- v0.9 设计令牌
+# 字体：统一 Microsoft YaHei UI；最小辅助字号 10，不使用更小字号
+UI_FONT = "Microsoft YaHei UI"
+UI_FONT_SIZES = {
+    "title": 21,      # 页面标题 20-22
+    "page": 16,       # 页面/侧边栏标题
+    "name": 13,       # 卡片/游戏名
+    "body": 11,       # 正文
+    "aux": 10,        # 辅助信息（最小 10）
+}
+# 圆角与间距（8/12/16/20 体系）
+RADIUS = 12
+RADIUS_SM = 8
+SPACE_XS = 8
+SPACE_SM = 12
+SPACE_MD = 16
+SPACE_LG = 20
+SPACE_XL = 24
+# 色板：深色 surface 分层 + 柔和描边
+UI_BG = "#0b0f16"
+UI_SIDEBAR = "#0f1520"
+UI_PANEL = "#141b26"
+UI_PANEL_2 = "#1a2331"
+UI_PANEL_3 = "#223043"
+UI_BORDER = "#263244"
+UI_BORDER_SOFT = "#1d2735"
+UI_TEXT = "#e9eef7"
+UI_TEXT_2 = "#a7b4c8"
+UI_TEXT_3 = "#7d8ba1"
+UI_ACCENT = "#4fc3ff"
+UI_ACCENT_SOFT = "#1f3a4f"
+UI_SUCCESS = "#4ade80"
+UI_WARNING = "#ffce6b"
+UI_DANGER = "#ff7f7f"
+UI_DANGER_SOFT = "#3a2430"
+# 兼容旧 UI 常量名（v0.8 及渲染代码仍引用）
+HEX_BG = UI_BG
+HEX_TXT = UI_TEXT
+HEX_TXT2 = UI_TEXT_2
+HEX_TXT3 = UI_TEXT_3
+HEX_OK = UI_SUCCESS
+HEX_ERR = UI_DANGER
+HEX_WAIT = UI_WARNING
 CARD_X = [48, 330, 612, 894]
 CARD_Y, CARD_W, CARD_H = 124, 258, 340
 PER_PAGE = len(CARD_X)
@@ -47,14 +91,6 @@ CARD_BORDER = (35, 44, 59)
 TXT = (234, 240, 248)
 TXT2 = (154, 168, 188)
 TXT3 = (104, 120, 142)
-
-HEX_BG = "#0a0d13"
-HEX_TXT = "#eaf0f8"
-HEX_TXT2 = "#9aa8bc"
-HEX_TXT3 = "#68788e"
-HEX_OK = "#4ade80"
-HEX_ERR = "#ff7f7f"
-HEX_WAIT = "#ffce6b"
 
 # 预设主题色
 ACCENT_PRESETS = [

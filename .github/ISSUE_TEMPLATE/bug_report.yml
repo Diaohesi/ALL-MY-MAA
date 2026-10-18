@@ -1,12 +1,12 @@
 name: Bug 反馈
-description: 报告 AllMyMaa 使用中遇到的问题
+description: 报告 All-My-Maa 使用中遇到的问题
 title: "[Bug] "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈！提交前请先确认使用的是最新版本（见 [Releases](https://github.com/Diaohesi/AllMyMaa/releases)）。
+        感谢反馈！提交前请先确认使用的是最新版本（见 [Releases](https://github.com/Diaohesi/All-My-Maa/releases)）。
   - type: textarea
     id: what-happened
     attributes:

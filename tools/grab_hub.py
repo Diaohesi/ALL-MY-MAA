@@ -15,9 +15,9 @@ gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
-TITLE = "AllMyMaa · 游戏脚本中心"
+TITLE = "All-My-Maa · 游戏脚本中心"
 # 兼容旧/新标题：只要求标题包含品牌或中文名
-TITLE_MARKERS = ("AllMyMaa", "游戏脚本中心")
+TITLE_MARKERS = ("All-My-Maa", "AllMyMaa", "游戏脚本中心")
 
 
 class RECT(ctypes.Structure):
