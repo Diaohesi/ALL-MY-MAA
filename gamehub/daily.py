@@ -1316,3 +1316,315 @@ class DailyQueue:
 
     def _forward_event(self, event):
         self._emit(**{"type": "runner", "event": event})
+
+
+# ------------------------------------------------------------------ 每游戏独立状态管理（v0.8）
+def ordered_daily_keys(apps, order=None):
+    """按 daily_order 过滤出存在的 app key；未列出的卡片补在末尾。"""
+    by_key = {app.get("key"): app for app in (apps or [])}
+    keys = []
+    for key in (order or store.DEFAULT_DAILY_ORDER):
+        if key in by_key and key not in keys:
+            keys.append(key)
+    for app in apps or []:
+        key = app.get("key")
+        if key in by_key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def enabled_daily_keys(apps, order=None):
+    """按 daily_order 返回已勾选（daily.enabled）的 app key。"""
+    by_key = {app.get("key"): app for app in (apps or [])}
+    result = []
+    for key in ordered_daily_keys(apps, order):
+        settings = store._clean_daily(by_key[key].get("daily"), key)
+        if settings.get("enabled", True):
+            result.append(key)
+    return result
+
+
+def _empty_app_state(app):
+    key = app.get("key", "")
+    return {
+        "key": key,
+        "game": app.get("game", ""),
+        "state": IDLE,
+        "state_label": STATE_LABELS[IDLE],
+        "reason": "",
+        "pid": None,
+        "started_at": None,
+        "ended_at": None,
+        "duration": 0,
+        "command": "",
+        "log_tail": "",
+        "updated_at": time.time(),
+    }
+
+
+class DailyManager:
+    """管理单游戏/队列的清日常独立状态（v0.8 UI 使用）。
+
+    - 同一时刻只允许一个任务/队列运行；其它行保持自己的空闲/历史状态，
+      绝不全部显示「清日常中」。
+    - start_single(key)/stop_single(key) 与 start_queue(keys)/stop_all() 共用 run()。
+    - snapshot() 线程安全，可供 UI 轮询。
+    """
+
+    def __init__(self, apps, *, on_event=None, launcher=None):
+        self.apps = list(apps or [])
+        self.by_key = {app.get("key"): app for app in self.apps}
+        self.on_event = on_event
+        self.launcher = launcher
+        self._lock = threading.RLock()
+        self._states = {}
+        for app in self.apps:
+            self._states[app.get("key")] = _empty_app_state(app)
+        self._active = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._mode = ""          # single / queue / ""
+        self._queue = {"state": IDLE, "state_label": STATE_LABELS[IDLE],
+                       "order": [], "results": [], "current": None,
+                       "index": -1, "total": 0}
+        self._log = []
+
+    # -------------------------------------------------- 查询
+    @property
+    def busy(self):
+        return bool(self._thread and self._thread.is_alive())
+
+    def state_of(self, key):
+        with self._lock:
+            return dict(self._states.get(key) or {})
+
+    def _busy_reason_for(self, key):
+        with self._lock:
+            if not self.busy:
+                return ""
+            if self._active and self._active != key:
+                app = self.by_key.get(self._active) or {}
+                return f"「{app.get('game') or self._active}」清日常进行中，请等待完成或先停止"
+            if self._mode == "queue" and self._active is None:
+                return "清日常队列进行中"
+            return ""
+
+    def busy_reason(self, key):
+        return self._busy_reason_for(key)
+
+    def snapshot(self):
+        with self._lock:
+            queue = dict(self._queue)
+            queue["results"] = [dict(item) for item in queue.get("results") or []]
+            return {
+                "busy": self.busy,
+                "active": self._active,
+                "mode": self._mode,
+                "apps": {key: dict(state) for key, state in self._states.items()},
+                "queue": queue,
+                "log": list(self._log[-200:]),
+            }
+
+    # -------------------------------------------------- 内部
+    def _emit(self, payload):
+        if not self.on_event:
+            return
+        try:
+            self.on_event(payload)
+        except Exception:
+            pass
+
+    def _log_line(self, text):
+        line = time.strftime("%H:%M:%S ") + text
+        with self._lock:
+            self._log.append(line)
+            self._log = self._log[-300:]
+        return line
+
+    def _update_state(self, key, **fields):
+        with self._lock:
+            state = self._states.setdefault(key, {"key": key})
+            state.update(fields)
+            state["state_label"] = STATE_LABELS.get(state.get("state"),
+                                                    state.get("state"))
+            state["updated_at"] = time.time()
+            snapshot = dict(state)
+        self._emit({"type": "state", "key": key, "state": snapshot})
+        return snapshot
+
+    def _apply_result(self, key, result):
+        result = result or {}
+        self._update_state(
+            key,
+            state=result.get("state") or FAILED,
+            reason=result.get("reason") or "",
+            pid=result.get("pid"),
+            started_at=result.get("started_at"),
+            ended_at=result.get("ended_at"),
+            duration=result.get("duration") or 0,
+            command=result.get("command") or "",
+            log_tail=result.get("log_tail") or "",
+        )
+
+    def _runner_event(self, event):
+        if not isinstance(event, dict):
+            return
+        if event.get("type") == "state":
+            key = event.get("key")
+            if key:
+                self._update_state(key, state=event.get("state") or RUNNING,
+                                   pid=event.get("pid"))
+        self._emit({"type": "runner", "event": event})
+
+    def _run_job(self, key):
+        app = self.by_key.get(key)
+        if app is None:
+            result = {"key": key, "game": "", "state": FAILED,
+                      "reason": "卡片不存在"}
+            self._apply_result(key, result)
+            return result
+        self._update_state(key, state=STARTING, started_at=time.time(),
+                           ended_at=None, reason="")
+        result = run(app, stop_event=self._stop,
+                     on_event=self._runner_event, launcher=self.launcher)
+        self._apply_result(key, result)
+        return result
+
+    # -------------------------------------------------- 单游戏
+    def start_single(self, key):
+        with self._lock:
+            if self.busy:
+                return False, self._busy_reason_for(key) or "已有清日常任务在运行"
+            if key not in self.by_key:
+                return False, "卡片不存在"
+            self._stop.clear()
+            self._active = key
+            self._mode = "single"
+            self._queue = {"state": RUNNING, "state_label": STATE_LABELS[RUNNING],
+                           "order": [key], "results": [], "current": key,
+                           "index": 0, "total": 1}
+            self._update_state(key, state=STARTING, started_at=time.time(),
+                               ended_at=None, reason="")
+            self._thread = threading.Thread(
+                target=self._single_worker, args=(key,),
+                name="gamehub-daily-single", daemon=True)
+            self._thread.start()
+        self._emit({"type": "queue", "state": RUNNING, "mode": "single",
+                    "order": [key], "current": key})
+        return True, ""
+
+    def _single_worker(self, key):
+        try:
+            result = self._run_job(key)
+        except Exception as exc:
+            result = {"key": key, "game": (self.by_key.get(key) or {}).get("game", ""),
+                      "state": FAILED, "reason": f"执行异常：{exc}"}
+            self._apply_result(key, result)
+        with self._lock:
+            self._log_line(f"■ {(self.by_key.get(key) or {}).get('game', key)}："
+                           f"{(result or {}).get('state')}")
+            self._queue["results"] = [dict(result or {})]
+            self._queue["state"] = FINISHED
+            self._queue["state_label"] = STATE_LABELS[FINISHED]
+            self._queue["current"] = None
+            self._active = None
+            self._mode = ""
+        self._emit({"type": "done", "key": key, "result": dict(result or {}),
+                    "snapshot": self.snapshot()})
+
+    def stop_single(self, key):
+        with self._lock:
+            if not self.busy or self._active != key:
+                return False
+            self._stop.set()
+            self._log_line(f"用户请求停止：{(self.by_key.get(key) or {}).get('game', key)}")
+        self._emit({"type": "stop", "key": key})
+        return True
+
+    # -------------------------------------------------- 队列
+    def start_queue(self, keys=None):
+        keys = list(keys or enabled_daily_keys(self.apps))
+        keys = [key for key in keys if key in self.by_key]
+        with self._lock:
+            if self.busy:
+                return False, "已有清日常任务在运行"
+            if not keys:
+                return False, "没有勾选任何游戏"
+            self._stop.clear()
+            self._active = None
+            self._mode = "queue"
+            self._queue = {"state": RUNNING, "state_label": STATE_LABELS[RUNNING],
+                           "order": keys, "results": [], "current": None,
+                           "index": -1, "total": len(keys)}
+            self._thread = threading.Thread(
+                target=self._queue_worker, args=(keys,),
+                name="gamehub-daily-queue2", daemon=True)
+            self._thread.start()
+        self._emit({"type": "queue", "state": RUNNING, "mode": "queue",
+                    "order": keys, "current": None})
+        return True, ""
+
+    def _queue_worker(self, keys):
+        try:
+            for index, key in enumerate(keys):
+                with self._lock:
+                    self._queue["index"] = index
+                    if self._stop.is_set():
+                        skipped = {"key": key,
+                                   "game": (self.by_key.get(key) or {}).get("game", ""),
+                                   "state": STOPPED, "reason": "队列已停止"}
+                        self._queue["results"].append(skipped)
+                        self._update_state(key, state=STOPPED,
+                                           reason="队列已停止")
+                        self._emit({"type": "item", "key": key,
+                                    "result": skipped})
+                        continue
+                    self._active = key
+                    self._queue["current"] = key
+                self._update_state(key, state=STARTING, started_at=time.time(),
+                                   ended_at=None, reason="")
+                self._log_line(f"▶ 开始：{(self.by_key.get(key) or {}).get('game', key)}")
+                self._emit({"type": "item_start", "key": key,
+                            "game": (self.by_key.get(key) or {}).get("game", ""),
+                            "index": index})
+                try:
+                    result = self._run_job(key)
+                except Exception as exc:
+                    result = {"key": key, "state": FAILED,
+                              "reason": f"执行异常：{exc}"}
+                    self._apply_result(key, result)
+                with self._lock:
+                    self._queue["results"].append(dict(result or {}))
+                    self._queue["current"] = None
+                    self._log_line(f"■ {(self.by_key.get(key) or {}).get('game', key)}："
+                                   f"{(result or {}).get('state')}")
+                self._emit({"type": "item", "key": key,
+                            "result": dict(result or {})})
+            with self._lock:
+                final_state = STOPPED if self._stop.is_set() else FINISHED
+                self._queue["state"] = final_state
+                self._queue["state_label"] = STATE_LABELS[final_state]
+                self._queue["current"] = None
+                self._active = None
+                self._mode = ""
+        finally:
+            self._emit({"type": "queue", "state": self._queue.get("state"),
+                        "snapshot": self.snapshot()})
+
+    def stop_all(self):
+        with self._lock:
+            if not self.busy:
+                return False
+            self._stop.set()
+            self._log_line("用户请求停止清日常…")
+        self._emit({"type": "stop", "key": self._active})
+        return True
+
+    def reset(self):
+        """清空历史状态（重新加载配置后使用）。"""
+        with self._lock:
+            for key, app in self.by_key.items():
+                self._states[key] = _empty_app_state(app)
+            self._queue = {"state": IDLE, "state_label": STATE_LABELS[IDLE],
+                           "order": [], "results": [], "current": None,
+                           "index": -1, "total": 0}

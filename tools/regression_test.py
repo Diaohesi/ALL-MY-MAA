@@ -26,7 +26,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gamehub import daily, detector, render, store, theme  # noqa: E402
+from gamehub import daily, detector, render, store, theme, ui  # noqa: E402
 
 ASSETS = os.path.join(REPO_ROOT, "assets")
 
@@ -2588,6 +2588,550 @@ class DailyQuotingTests(TempDirTest):
                     + ' --quit-after-run "--opt=a b"')
         self.assertEqual(plan["params"], expected)
         self.assertIn('\\"Daily\\"', plan["params"])
+
+
+# ---------------------------------------------------------------- v0.8 设置 / 勾选 / 独立状态
+def _plain_daily_apps():
+    apps = []
+    for key, game in (("maa", "MAA"), ("nte", "NTE"), ("wuwa", "WW"),
+                      ("maaend", "ENDFIELD")):
+        apps.append({"key": key, "game": game, "script": game, "builtin": True,
+                     "script_exe": "", "script_procs": [], "game_procs": [],
+                     "game_exe": "", "daily": store._clean_daily({}, key)})
+    return apps
+
+
+class SettingsTests(unittest.TestCase):
+    """v0.8 store._clean_settings / ui._refresh_delay_ms 纯逻辑。"""
+
+    def test_settings_defaults(self):
+        defaults = store._clean_settings(None)
+        self.assertEqual(defaults, dict(store.DEFAULT_SETTINGS))
+        self.assertEqual(defaults["accent"], "#4fc3ff")
+        self.assertEqual(defaults["refresh_interval"], 1.5)
+        self.assertEqual(defaults["close_action"], "exit")
+        self.assertEqual(defaults["daily_default_timeout"], 120)
+        self.assertTrue(defaults["check_update_on_start"])
+        self.assertFalse(defaults["adb_enabled"])
+        for bad in ("x", [], 3, True):
+            with self.subTest(bad=bad):
+                self.assertEqual(store._clean_settings(bad),
+                                 dict(store.DEFAULT_SETTINGS))
+
+    def test_settings_clean_valid(self):
+        cleaned = store._clean_settings({
+            "accent": "  #B98BFF  ", "check_update_on_start": False,
+            "refresh_interval": 2.0, "close_action": "Minimize",
+            "clash_exe": r"  C:\Clash\clash-verge.exe  ",
+            "daily_default_timeout": 9999, "daily_show_preview": False,
+            "adb_enabled": True, "daily_close_after": False,
+        })
+        self.assertEqual(cleaned["accent"], "#b98bff")
+        self.assertFalse(cleaned["check_update_on_start"])
+        self.assertEqual(cleaned["refresh_interval"], 2.0)
+        self.assertEqual(cleaned["close_action"], "minimize")
+        self.assertEqual(cleaned["clash_exe"], r"C:\Clash\clash-verge.exe")
+        self.assertEqual(cleaned["daily_default_timeout"], 600)
+        self.assertFalse(cleaned["daily_show_preview"])
+        self.assertTrue(cleaned["adb_enabled"])
+        self.assertFalse(cleaned["daily_close_after"])
+        for interval in store.REFRESH_INTERVALS:
+            with self.subTest(interval=interval):
+                self.assertEqual(store._clean_settings(
+                    {"refresh_interval": interval})["refresh_interval"],
+                    float(interval))
+
+    def test_settings_clean_invalid(self):
+        bad = store._clean_settings({
+            "accent": "red", "refresh_interval": 7,
+            "close_action": "explode", "daily_default_timeout": -3,
+            "check_update_on_start": "false", "enabled": "true"})
+        self.assertEqual(bad["accent"], "#4fc3ff")
+        self.assertEqual(bad["refresh_interval"], 1.5)
+        self.assertEqual(bad["close_action"], "exit")
+        self.assertEqual(bad["daily_default_timeout"], 1)
+        self.assertTrue(bad["check_update_on_start"])
+        self.assertNotIn("enabled", bad)
+        # 各种非法 accent 均回退默认
+        for accent in ("", "#12345", "#GGGGGG", "#12345g", None, 123):
+            with self.subTest(accent=accent):
+                self.assertEqual(store._clean_settings(
+                    {"accent": accent})["accent"], "#4fc3ff")
+        # 非法 refresh / close_action / timeout 回退
+        self.assertEqual(store._clean_settings(
+            {"refresh_interval": "1.5"})["refresh_interval"], 1.5)
+        self.assertEqual(store._clean_settings(
+            {"refresh_interval": True})["refresh_interval"], 1.5)
+        self.assertEqual(store._clean_settings(
+            {"close_action": ""})["close_action"], "exit")
+        self.assertEqual(store._clean_settings(
+            {"daily_default_timeout": "60"})["daily_default_timeout"], 120)
+        self.assertEqual(store._clean_settings(
+            {"daily_default_timeout": 0.5})["daily_default_timeout"], 1)
+
+    def test_refresh_delay_ms(self):
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": 1.0}), 1000)
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": 1.5}), 1500)
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": 2.0}), 2000)
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": 9}), 1500)
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": "2.0"}), 2000)
+        self.assertEqual(ui._refresh_delay_ms({"refresh_interval": "bad"}), 1500)
+        self.assertEqual(ui._refresh_delay_ms({}), 1500)
+        self.assertEqual(ui._refresh_delay_ms(None), 1500)
+
+
+class SettingsConfigTests(TempDirTest):
+    """v0.8 settings 持久化 / 旧配置兼容 / 默认超时只作用于显式 daily。"""
+
+    def test_settings_roundtrip(self):
+        apps = [store.make_builtin("maa", self.tmp),
+                store.make_builtin("wuwa", self.tmp)]
+        clash = _touch(os.path.join(self.tmp, "Clash", "clash-verge.exe"))
+        cfg = os.path.join(self.tmp, "config.json")
+        search_root = os.path.join(self.tmp, "search_root")
+        os.makedirs(search_root, exist_ok=True)
+        settings = {"accent": "#9AE66E", "refresh_interval": 2.0,
+                    "close_action": "minimize", "daily_default_timeout": 45,
+                    "daily_show_preview": False, "adb_enabled": True,
+                    "check_update_on_start": False}
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            self.assertTrue(store.save_state(
+                apps, clash=clash, root=self.tmp,
+                daily_order=["wuwa", "maa"], settings=settings))
+            raw = json.load(open(cfg, "r", encoding="utf-8"))
+            self.assertEqual(raw.get("version"), 4)
+            self.assertEqual(raw["settings"]["accent"], "#9ae66e")
+            self.assertEqual(raw["settings"]["refresh_interval"], 2.0)
+            self.assertEqual(raw["settings"]["close_action"], "minimize")
+            self.assertEqual(raw["settings"]["daily_default_timeout"], 45)
+            self.assertFalse(raw["settings"]["check_update_on_start"])
+            self.assertTrue(raw["settings"]["adb_enabled"])
+            # clash 路径在 settings 内写成相对 root 的便携格式
+            self.assertFalse(os.path.isabs(raw["settings"]["clash_exe"]))
+            self.assertEqual(raw["settings"]["clash_exe"].replace("\\", "/"),
+                             "Clash/clash-verge.exe")
+            self.assertEqual(raw.get("daily_order"), ["wuwa", "maa"])
+            loaded, runtime_clash, _root, meta = store.load_state_full()
+        self.assertEqual(meta["settings"]["accent"], "#9ae66e")
+        self.assertEqual(meta["settings"]["refresh_interval"], 2.0)
+        self.assertEqual(meta["settings"]["close_action"], "minimize")
+        self.assertEqual(meta["settings"]["daily_default_timeout"], 45)
+        self.assertEqual(meta["daily_order"], ["wuwa", "maa", "nte", "maaend"])
+        self.assertEqual(os.path.normpath(runtime_clash),
+                         os.path.normpath(clash),
+                         "运行期 clash 仍应还原为绝对路径")
+        self.assertEqual(os.path.normpath(meta["settings"]["clash_exe"]),
+                         os.path.normpath(clash),
+                         "QA-15：settings.clash_exe 也应按 root 还原为绝对路径")
+        by_key = {app["key"]: app for app in loaded}
+        self.assertTrue(by_key["maa"]["daily"]["enabled"])
+
+    def test_legacy_config_without_settings(self):
+        cfg = os.path.join(self.tmp, "config.json")
+        search_root = os.path.join(self.tmp, "search_root")
+        os.makedirs(search_root, exist_ok=True)
+        _write_json(cfg, {"version": 4, "root": self.tmp,
+                          "apps": {"maa": {}}})
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            loaded, _clash, _root, meta = store.load_state_full()
+        self.assertEqual(meta["settings"], dict(store.DEFAULT_SETTINGS))
+        maa = next(app for app in loaded if app["key"] == "maa")
+        self.assertEqual(maa["daily"]["timeout_min"], 120)
+        self.assertFalse(maa["daily_explicit"])
+        self.assertEqual(meta["daily_order"], store.DEFAULT_DAILY_ORDER)
+
+    def test_daily_default_timeout_applies_only_to_explicit_daily(self):
+        cfg = os.path.join(self.tmp, "config.json")
+        search_root = os.path.join(self.tmp, "search_root")
+        os.makedirs(search_root, exist_ok=True)
+        custom_exe = _touch(os.path.join(self.tmp, "Custom", "s.exe"))
+        _write_json(cfg, {
+            "version": 4, "root": self.tmp,
+            "settings": {"daily_default_timeout": 55},
+            "apps": {"maa": {"daily": {"enabled": True,
+                                       "task": "DailyTask"}},
+                     "nte": {}},
+            "custom_apps": [{"key": "custom_1", "game": "G", "script": "S",
+                             "script_exe": custom_exe,
+                             "daily": {"enabled": True}}],
+        })
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            loaded, _clash, _root, _meta = store.load_state_full()
+        by_key = {app["key"]: app for app in loaded}
+        # 写过 daily 但没写 timeout_min -> 用设置页默认超时
+        self.assertEqual(by_key["maa"]["daily"]["timeout_min"], 55)
+        self.assertTrue(by_key["maa"]["daily_explicit"])
+        self.assertEqual(by_key["custom_1"]["daily"]["timeout_min"], 55)
+        # 完全没写 daily 的内置卡片保持各游戏内置默认值
+        self.assertEqual(by_key["nte"]["daily"]["timeout_min"], 120)
+        self.assertFalse(by_key["nte"]["daily_explicit"])
+
+
+class ClashResolutionTests(TempDirTest):
+    """QA-15（task-29 修复）：clash 顶层/settings 相对路径解析与优先级。"""
+
+    def _load(self, data, candidates=()):
+        cfg = os.path.join(self.tmp, "config.json")
+        _write_json(cfg, data)
+        search = os.path.join(self.tmp, "search_root")
+        os.makedirs(search, exist_ok=True)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search), \
+                mock.patch.object(store, "CLASH_CANDIDATES",
+                                  list(candidates)):
+            return store.load_state_full()
+
+    def test_settings_clash_relative_and_absolute(self):
+        rel = os.path.join("Clash", "clash-verge.exe")
+        absolute = _touch(os.path.join(self.tmp, rel))
+        for value in (rel.replace("\\", "/"), absolute):
+            with self.subTest(value=value):
+                _apps, clash, _root, meta = self._load({
+                    "version": 4, "root": self.tmp,
+                    "settings": {"clash_exe": value}})
+                self.assertEqual(os.path.normpath(clash),
+                                 os.path.normpath(absolute))
+                self.assertEqual(
+                    os.path.normpath(meta["settings"]["clash_exe"]),
+                    os.path.normpath(absolute))
+
+    def test_clash_priority_top_over_settings(self):
+        settings_relative = os.path.join("Clash", "clash-verge.exe")
+        settings_abs = _touch(os.path.join(self.tmp, settings_relative))
+        top_other = _touch(os.path.join(self.tmp, "Other", "clash.exe"))
+        # 顶层绝对路径优先，settings 也独立还原为绝对路径
+        _a, clash, _r, meta = self._load({
+            "version": 4, "root": self.tmp, "clash": top_other,
+            "settings": {"clash_exe": settings_relative.replace("\\", "/")}})
+        self.assertEqual(os.path.normpath(clash), os.path.normpath(top_other))
+        self.assertEqual(os.path.normpath(meta["settings"]["clash_exe"]),
+                         os.path.normpath(settings_abs))
+        # 顶层相对路径同样按 root 还原
+        _a, clash2, _r, _m = self._load({
+            "version": 4, "root": self.tmp,
+            "clash": settings_relative.replace("\\", "/")})
+        self.assertEqual(os.path.normpath(clash2),
+                         os.path.normpath(settings_abs))
+        # 顶层路径失效 -> 回退 settings
+        _a, clash3, _r, _m = self._load({
+            "version": 4, "root": self.tmp,
+            "clash": os.path.join(self.tmp, "nope", "x.exe"),
+            "settings": {"clash_exe": settings_relative.replace("\\", "/")}})
+        self.assertEqual(os.path.normpath(clash3),
+                         os.path.normpath(settings_abs))
+
+    def test_clash_fallback_to_auto_candidates(self):
+        candidate = _touch(os.path.join(self.tmp, "Auto", "clash.exe"))
+        _a, clash, _r, _m = self._load({"version": 4, "root": self.tmp},
+                                       candidates=[candidate])
+        self.assertEqual(os.path.normpath(clash), os.path.normpath(candidate))
+        # settings 路径不存在：保留原值供 UI 显示，运行期回退自动查找
+        _a, clash2, _r, meta2 = self._load({
+            "version": 4, "root": self.tmp,
+            "settings": {"clash_exe": "Clash/nope.exe"}},
+            candidates=[candidate])
+        self.assertEqual(os.path.normpath(clash2),
+                         os.path.normpath(candidate))
+        self.assertEqual(meta2["settings"]["clash_exe"].replace("\\", "/"),
+                         "Clash/nope.exe")
+
+
+class DailySelectionTests(unittest.TestCase):
+    """v0.8 清日常勾选过滤与 daily_order 顺序。"""
+
+    def _apps(self):
+        apps = _plain_daily_apps()
+        apps.append({"key": "custom_1", "game": "G", "builtin": False,
+                     "daily": store._clean_daily({"enabled": True},
+                                                 "custom_1")})
+        return apps
+
+    def test_ordered_daily_keys(self):
+        apps = self._apps()
+        keys = daily.ordered_daily_keys(apps, ["wuwa", "bogus", "maa", "wuwa"])
+        self.assertEqual(keys, ["wuwa", "maa", "nte", "maaend", "custom_1"])
+        # 未指定 order -> 默认顺序 + 末尾补自定义
+        self.assertEqual(daily.ordered_daily_keys(apps),
+                         ["maa", "nte", "wuwa", "maaend", "custom_1"])
+        self.assertEqual(daily.ordered_daily_keys([], None), [])
+
+    def test_enabled_daily_keys(self):
+        apps = self._apps()
+        apps[1]["daily"] = store._clean_daily({"enabled": False}, "nte")
+        apps[4]["daily"] = store._clean_daily({"enabled": False}, "custom_1")
+        keys = daily.enabled_daily_keys(apps, ["maa", "nte", "wuwa", "maaend"])
+        self.assertEqual(keys, ["maa", "wuwa", "maaend"])
+        # 未写 daily 的内置卡片默认勾选
+        bare = [{"key": "maa", "game": "MAA"},
+                {"key": "nte", "game": "NTE"}]
+        self.assertEqual(daily.enabled_daily_keys(bare), ["maa", "nte"])
+
+    def test_selection_reflects_toggle(self):
+        apps = self._apps()
+        self.assertIn("nte",
+                      daily.enabled_daily_keys(
+                          apps, store.DEFAULT_DAILY_ORDER))
+        apps[1]["daily"]["enabled"] = False
+        self.assertNotIn("nte",
+                         daily.enabled_daily_keys(
+                             apps, store.DEFAULT_DAILY_ORDER))
+        apps[1]["daily"]["enabled"] = True
+        self.assertIn("nte",
+                      daily.enabled_daily_keys(
+                          apps, store.DEFAULT_DAILY_ORDER))
+
+
+class DailyManagerTests(TempDirTest):
+    """v0.8 DailyManager：每游戏独立状态 / start_single / stop_single / 队列。"""
+
+    def _wait_idle(self, manager, timeout=5.0):
+        deadline = time.time() + timeout
+        while manager.busy and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(manager.busy, "DailyManager 未在超时内结束")
+
+    def test_initial_and_reset(self):
+        manager = daily.DailyManager(_plain_daily_apps())
+        snapshot = manager.snapshot()
+        self.assertFalse(snapshot["busy"])
+        self.assertIsNone(snapshot["active"])
+        self.assertEqual(snapshot["mode"], "")
+        self.assertEqual(snapshot["queue"]["state"], daily.IDLE)
+        for key in ("maa", "nte", "wuwa", "maaend"):
+            state = manager.state_of(key)
+            self.assertEqual(state["state"], daily.IDLE)
+            self.assertEqual(state["state_label"], "空闲")
+        manager.reset()
+        self.assertEqual(manager.state_of("maa")["state"], daily.IDLE)
+
+    def test_start_single_isolates_other_apps(self):
+        apps = _plain_daily_apps()
+        gate, started = threading.Event(), threading.Event()
+        executed, events = [], []
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            if on_event:
+                on_event({"type": "state", "key": app["key"],
+                          "state": daily.RUNNING, "pid": 4321})
+            started.set()
+            gate.wait(timeout=5)
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.FINISHED, "reason": "mock", "pid": 4321}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps, on_event=events.append)
+            ok, reason = manager.start_single("maa")
+            self.assertTrue(ok, reason)
+            self.assertTrue(started.wait(timeout=2))
+            self.assertTrue(manager.busy)
+            self.assertIn(manager.state_of("maa")["state"],
+                          (daily.STARTING, daily.RUNNING))
+            for key in ("nte", "wuwa", "maaend"):
+                self.assertEqual(manager.state_of(key)["state"], daily.IDLE,
+                                 f"{key} 不应被标记为运行中")
+            ok2, reason2 = manager.start_single("nte")
+            self.assertFalse(ok2)
+            self.assertIn("进行中", reason2)
+            self.assertIn("进行中", manager.busy_reason("nte"))
+            self.assertFalse(manager.stop_single("nte"))
+            gate.set()
+            self._wait_idle(manager)
+        self.assertEqual(executed, ["maa"])
+        self.assertEqual(manager.state_of("maa")["state"], daily.FINISHED)
+        for key in ("nte", "wuwa", "maaend"):
+            self.assertEqual(manager.state_of(key)["state"], daily.IDLE)
+        self.assertFalse(manager.stop_single("maa"))
+        self.assertTrue(any(event.get("type") == "state" for event in events))
+
+    def test_stop_single(self):
+        apps = _plain_daily_apps()
+        started, stop_seen = threading.Event(), threading.Event()
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            started.set()
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            stop_seen.set()
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.STOPPED, "reason": "用户停止"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps)
+            self.assertTrue(manager.start_single("wuwa")[0])
+            self.assertTrue(started.wait(timeout=2))
+            self.assertTrue(manager.stop_single("wuwa"))
+            self.assertTrue(stop_seen.wait(timeout=2))
+            self._wait_idle(manager)
+        self.assertEqual(manager.state_of("wuwa")["state"], daily.STOPPED)
+        self.assertFalse(manager.stop_single("maa"))
+        self.assertFalse(manager.stop_all())
+
+    def test_queue_isolates_non_current_states(self):
+        apps = _plain_daily_apps()
+        gate, started = threading.Event(), threading.Event()
+        executed = []
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            if on_event:
+                on_event({"type": "state", "key": app["key"],
+                          "state": daily.RUNNING, "pid": 2})
+            if app["key"] == "maa":
+                started.set()
+                gate.wait(timeout=5)
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.FINISHED, "reason": "mock"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps)
+            ok, reason = manager.start_queue(["maa", "wuwa"])
+            self.assertTrue(ok, reason)
+            self.assertTrue(started.wait(timeout=2))
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["active"], "maa")
+            self.assertEqual(snapshot["mode"], "queue")
+            self.assertEqual(snapshot["queue"]["current"], "maa")
+            self.assertEqual(manager.state_of("maa")["state"], daily.RUNNING)
+            # 队列里非当前项以及其他未参与卡片都保持空闲
+            for key in ("wuwa", "nte", "maaend"):
+                self.assertEqual(manager.state_of(key)["state"], daily.IDLE)
+            self.assertIn("进行中", manager.busy_reason("wuwa"))
+            gate.set()
+            self._wait_idle(manager)
+        self.assertEqual(executed, ["maa", "wuwa"])
+        for key in ("maa", "wuwa"):
+            self.assertEqual(manager.state_of(key)["state"], daily.FINISHED)
+        for key in ("nte", "maaend"):
+            self.assertEqual(manager.state_of(key)["state"], daily.IDLE)
+        queue = manager.snapshot()["queue"]
+        self.assertEqual(queue["state"], daily.FINISHED)
+        self.assertEqual([item["key"] for item in queue["results"]],
+                         ["maa", "wuwa"])
+
+    def test_queue_stop_marks_remaining_stopped(self):
+        apps = _plain_daily_apps()
+        holder, executed = {}, []
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            if app["key"] == "maa":
+                holder["manager"].stop_all()
+                if stop_event is not None:
+                    stop_event.wait(2)
+                return {"key": app["key"], "game": app["game"],
+                        "state": daily.STOPPED, "reason": "用户停止"}
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.FINISHED, "reason": "mock"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps)
+            holder["manager"] = manager
+            ok, reason = manager.start_queue(["maa", "wuwa", "maaend"])
+            self.assertTrue(ok, reason)
+            self._wait_idle(manager)
+            snapshot = manager.snapshot()
+        self.assertEqual(executed, ["maa"])
+        self.assertEqual(snapshot["queue"]["state"], daily.STOPPED)
+        for key in ("maa", "wuwa", "maaend"):
+            self.assertEqual(manager.state_of(key)["state"], daily.STOPPED)
+
+    def test_queue_selection_and_edges(self):
+        apps = _plain_daily_apps()
+        apps[1]["daily"] = store._clean_daily({"enabled": False}, "nte")
+        keys = daily.enabled_daily_keys(apps, ["maa", "nte", "wuwa"])
+        # 未列出的存在卡片补在末尾（maaend），disabled 的 nte 被过滤
+        self.assertEqual(keys, ["maa", "wuwa", "maaend"])
+        executed = []
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.FINISHED, "reason": "mock"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps)
+            ok, reason = manager.start_queue(keys)
+            self.assertTrue(ok, reason)
+            self._wait_idle(manager)
+            self.assertEqual(executed, ["maa", "wuwa", "maaend"])
+            self.assertEqual(manager.state_of("nte")["state"], daily.IDLE)
+            self.assertEqual(manager.state_of("wuwa")["state"], daily.FINISHED)
+            ok2, reason2 = manager.start_queue(["bogus"])
+            self.assertFalse(ok2)
+            self.assertIn("没有勾选", reason2)
+            ok3, reason3 = manager.start_single("bogus")
+            self.assertFalse(ok3)
+            self.assertIn("不存在", reason3)
+
+    def test_start_while_queue_busy(self):
+        apps = _plain_daily_apps()
+        gate, started = threading.Event(), threading.Event()
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            started.set()
+            gate.wait(timeout=5)
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.FINISHED, "reason": "mock"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            manager = daily.DailyManager(apps)
+            self.assertTrue(manager.start_queue(["maa"])[0])
+            self.assertTrue(started.wait(timeout=2))
+            self.assertFalse(manager.start_single("nte")[0])
+            ok, reason = manager.start_queue(["wuwa"])
+            self.assertFalse(ok)
+            self.assertIn("已有清日常任务在运行", reason)
+            gate.set()
+            self._wait_idle(manager)
+
+
+class UiPureLogicTests(unittest.TestCase):
+    """v0.8 UI 侧可无头测试的纯函数（页面切换为实例方法，见未覆盖点）。"""
+
+    def test_parse_changelog(self):
+        text = "\n".join([
+            "# CHANGELOG",
+            "## v0.7.0（2026-10-18）",
+            "- v0.7 内容",
+            "## v0.8.0 (2026-10-18)",
+            "- v0.8 内容 A",
+            "- v0.8 内容 B",
+            "## v0.6.0",
+            "- v0.6 内容",
+            "随便一段不是标题的文字",
+        ])
+        sections = ui._parse_changelog(text)
+        self.assertEqual([item["version"] for item in sections],
+                         ["v0.8.0", "v0.7.0", "v0.6.0"])
+        self.assertEqual(sections[0]["date"], "2026-10-18")
+        self.assertIn("v0.8 内容 A", sections[0]["body"])
+        self.assertIn("v0.8 内容 B", sections[0]["body"])
+        self.assertEqual(sections[2]["date"], "")
+        self.assertEqual(ui._parse_changelog(""), [])
+
+    def test_find_changelog(self):
+        path = ui._find_changelog()
+        self.assertTrue(path, "源码运行时应能找到仓库根目录 CHANGELOG.md")
+        self.assertTrue(os.path.isfile(path))
+        self.assertEqual(os.path.basename(path), "CHANGELOG.md")
+
+    def test_refresh_delay_mapping(self):
+        settings = {"refresh_interval": 1.0}
+        self.assertEqual(ui._refresh_delay_ms(settings), 1000)
+        settings["refresh_interval"] = 2.0
+        self.assertEqual(ui._refresh_delay_ms(settings), 2000)
+        settings["refresh_interval"] = 9
+        self.assertEqual(ui._refresh_delay_ms(settings), 1500)
 
 
 def main():

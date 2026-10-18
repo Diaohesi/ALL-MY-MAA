@@ -115,6 +115,23 @@ BUILTIN_DAILY = {
 }
 DEFAULT_DAILY_ORDER = ["maa", "nte", "wuwa", "maaend"]
 
+# v0.8 顶层 settings（config.json 可选字段）；加载时缺省补默认、非法值清洗
+DEFAULT_SETTINGS = {
+    "accent": "#4fc3ff",
+    "check_update_on_start": True,
+    "refresh_interval": 1.5,
+    "close_action": "exit",
+    "clash_exe": "",
+    "daily_default_timeout": 120,
+    "daily_show_preview": True,
+    "adb_enabled": False,
+    "daily_close_after": True,
+}
+REFRESH_INTERVALS = (1.0, 1.5, 2.0)
+_ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+ACCENT_PRESETS = ("#4fc3ff", "#b98bff", "#5ee7c7", "#ffe066",
+                  "#ff8f7a", "#ff8fc7", "#9ae66e", "#8fb8ff")
+
 # ------------------------------------------------------------------ 通用小工具
 def version_key(text):
     """取版本号里的数字段；忽略 -rc / +build 等后缀，避免预发布号被当正式版。"""
@@ -953,12 +970,18 @@ _GENERIC_DAILY = {"enabled": False, "task": "", "instance": "", "config": "",
                   "timeout_min": 120, "extra_args": [], "close_after": False}
 
 
-def _clean_daily(value, key=""):
-    """规整某个 app 的清日常设置（缺省补内置默认值）。"""
+def _clean_daily(value, key="", default_timeout=None):
+    """规整某个 app 的清日常设置（缺省补内置默认值）。
+
+    default_timeout：设置页的「清日常默认超时」，仅用于用户写过 daily 但未写
+    timeout_min 的条目（不覆盖各游戏内置默认值）。
+    """
     base = dict(_GENERIC_DAILY)
     if key in BUILTIN_DAILY:
         base.update(BUILTIN_DAILY[key])
         base["extra_args"] = []
+    if isinstance(default_timeout, (int, float)) and not isinstance(default_timeout, bool):
+        base["timeout_min"] = max(1, min(600, int(default_timeout)))
     if not isinstance(value, dict):
         return base
     out = dict(base)
@@ -1007,6 +1030,36 @@ def _clean_daily_order(value, keys):
     return order
 
 
+def _clean_settings(value):
+    """v0.8 顶层 settings 清洗：缺省补默认，非法值回退默认。"""
+    out = dict(DEFAULT_SETTINGS)
+    out["clash_exe"] = ""
+    if not isinstance(value, dict):
+        return out
+    accent = value.get("accent")
+    if isinstance(accent, str) and _ACCENT_RE.match(accent.strip()):
+        out["accent"] = accent.strip().lower()
+    for field in ("check_update_on_start", "daily_show_preview",
+                  "adb_enabled", "daily_close_after"):
+        if isinstance(value.get(field), bool):
+            out[field] = value[field]
+    interval = value.get("refresh_interval")
+    if isinstance(interval, (int, float)) and not isinstance(interval, bool):
+        interval = float(interval)
+        if interval in [float(item) for item in REFRESH_INTERVALS]:
+            out["refresh_interval"] = interval
+    action = str(value.get("close_action") or "").strip().lower()
+    if action in ("exit", "minimize"):
+        out["close_action"] = action
+    clash = value.get("clash_exe")
+    if isinstance(clash, str):
+        out["clash_exe"] = clash.strip()
+    timeout = value.get("daily_default_timeout")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        out["daily_default_timeout"] = max(1, min(600, int(timeout)))
+    return out
+
+
 def load_state_full():
     """读取 config.json，返回 (apps, clash_exe, root, meta)。
 
@@ -1025,6 +1078,7 @@ def load_state_full():
     if not root or not os.path.isdir(root):
         root = SEARCH_ROOT
     root = os.path.abspath(root)
+    settings = _clean_settings(data.get("settings"))
 
     apps = []
     saved_apps = data.get("apps") if isinstance(data.get("apps"), dict) else {}
@@ -1034,6 +1088,10 @@ def load_state_full():
         saved = saved_apps.get(base["key"], {}) if isinstance(saved_apps, dict) else {}
         if isinstance(saved, str):     # 兼容 v1/v2 的纯路径格式
             saved = {"script_exe": saved}
+        saved_daily = saved.get("daily") if isinstance(saved, dict) else None
+        default_timeout = None
+        if isinstance(saved_daily, dict) and "timeout_min" not in saved_daily:
+            default_timeout = settings["daily_default_timeout"]
         if isinstance(saved, dict):
             saved_launch_specs[base["key"]] = saved.get("launch")
             exe = _absolute(saved.get("script_exe"), root)
@@ -1050,7 +1108,9 @@ def load_state_full():
             if detect:
                 app["detect"] = detect          # 用户自定义检测规则优先
                 app["detect_custom"] = True
-            app["daily"] = _clean_daily(saved.get("daily"), base["key"])
+            app["daily"] = _clean_daily(saved_daily, base["key"],
+                                        default_timeout=default_timeout)
+            app["daily_explicit"] = isinstance(saved_daily, dict)
             for field in ("site", "github", "release", "download", "accent"):
                 if saved.get(field):
                     app[field] = saved[field]
@@ -1062,6 +1122,7 @@ def load_state_full():
                     app["icon_path"] = icon
         if "daily" not in app:
             app["daily"] = _clean_daily(None, base["key"])
+            app["daily_explicit"] = False
         apps.append(app)
 
     # 内置应用：路径没找到时自动扫描
@@ -1132,15 +1193,37 @@ def load_state_full():
             launch = _clean_launch(item.get("launch"), root)
             if launch:
                 app["launch"] = launch          # 自定义游戏也可复用启动规格
-            app["daily"] = _clean_daily(item.get("daily"), app["key"])
+            saved_custom_daily = item.get("daily")
+            custom_default = None
+            if isinstance(saved_custom_daily, dict) \
+                    and "timeout_min" not in saved_custom_daily:
+                custom_default = settings["daily_default_timeout"]
+            app["daily"] = _clean_daily(saved_custom_daily, app["key"],
+                                        default_timeout=custom_default)
+            app["daily_explicit"] = isinstance(saved_custom_daily, dict)
             apps.append(app)
 
-    clash = data.get("clash") or ""
-    if not clash or not os.path.exists(clash):
+    # QA-15：settings.clash_exe 与顶层 clash 一样按 root 还原相对路径，
+    # 顶层 clash 仍优先；settings 路径不存在时保留原值并回退自动查找。
+    raw_clash = data.get("clash") or ""
+    top_clash = _absolute(raw_clash, root) if raw_clash else None
+    raw_settings_clash = settings.get("clash_exe") or ""
+    settings_clash = _absolute(raw_settings_clash, root) \
+        if raw_settings_clash else None
+    if settings_clash:
+        settings["clash_exe"] = settings_clash
+    elif raw_settings_clash:
+        settings["clash_exe"] = raw_settings_clash
+    if top_clash:
+        clash = top_clash
+    elif settings_clash:
+        clash = settings_clash
+    else:
         clash = next((p for p in CLASH_CANDIDATES if p and os.path.exists(p)), "")
     builtin_keys = [app["key"] for app in apps if app.get("builtin")]
     meta = {"daily_order": _clean_daily_order(data.get("daily_order"),
-                                             builtin_keys)}
+                                              builtin_keys),
+            "settings": settings}
     return apps, clash, root, meta
 
 
@@ -1150,13 +1233,16 @@ def load_state():
     return apps, clash, root
 
 
-def save_state(apps, clash, root, daily_order=None):
+def save_state(apps, clash, root, daily_order=None, settings=None):
     """写入 config.json（v4），返回是否成功（失败由调用方负责提示用户）。"""
     data = {"version": 4, "apps": {}, "custom_apps": []}
     if os.path.normpath(root) != os.path.normpath(SEARCH_ROOT):
         data["root"] = root
     if clash:
         data["clash"] = clash
+    cleaned_settings = _clean_settings(settings)
+    cleaned_settings["clash_exe"] = (_portable(clash, root) if clash else "")
+    data["settings"] = cleaned_settings
     builtin_keys = [app["key"] for app in apps if app.get("builtin")]
     if daily_order is None:
         daily_order = DEFAULT_DAILY_ORDER

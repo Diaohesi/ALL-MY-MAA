@@ -15,7 +15,9 @@ gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
-TITLE = "游戏脚本中心"
+TITLE = "AllMyMaa · 游戏脚本中心"
+# 兼容旧/新标题：只要求标题包含品牌或中文名
+TITLE_MARKERS = ("AllMyMaa", "游戏脚本中心")
 
 
 class RECT(ctypes.Structure):
@@ -48,7 +50,7 @@ def find_hub():
         if cls.value == "TkTopLevel":
             text = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(hwnd, text, 256)
-            if text.value == TITLE:
+            if text.value == TITLE or any(m in text.value for m in TITLE_MARKERS):
                 found.append(hwnd)
         return True
 

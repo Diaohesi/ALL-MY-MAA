@@ -3,6 +3,10 @@
 
 # 窗口与卡片布局
 W, H = 1200, 560
+# v0.8 主窗口（侧边栏 + 三页）；W/H 保留给旧版 Pillow 背景渲染（回归测试）
+WIN_W, WIN_H = 1200, 720
+MIN_W, MIN_H = 1000, 620
+SIDEBAR_W = 210
 CARD_X = [48, 330, 612, 894]
 CARD_Y, CARD_W, CARD_H = 124, 258, 340
 PER_PAGE = len(CARD_X)

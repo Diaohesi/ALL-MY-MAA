@@ -780,6 +780,12 @@ section[id] {
   color: #ffeaa8;
 }
 
+.chip-ui {
+  border-color: rgba(185, 139, 255, 0.4);
+  background: rgba(185, 139, 255, 0.1);
+  color: #ddc9ff;
+}
+
 .feature-wide code {
   padding: 1px 5px;
   border-radius: 5px;
