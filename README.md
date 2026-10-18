@@ -1,4 +1,4 @@
-# 游戏脚本中心 · GameHub Lite v0.4.0
+# 游戏脚本中心 · GameHub Lite v0.5.0
 
 <p align="center">
   <a href="https://github.com/Diaohesi/ALL-MY-MAA/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/ALL-MY-MAA?label=release&color=4fc3ff"></a>
@@ -7,6 +7,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D7">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
+  <a href="https://diaohesi.github.io/ALL-MY-MAA/"><img alt="homepage" src="https://img.shields.io/badge/homepage-GitHub%20Pages-5ee7c7"></a>
 </p>
 
 一个 Windows 桌面启动器：把 **明日方舟（MAA）**、**异环（MaaNTE）**、
@@ -15,6 +16,10 @@
 
 一键启动脚本、启动游戏、打开游戏下载页、实时运行状态、版本检查与更新入口、
 官网 / GitHub 直达、Clash Verge 快捷打开，还能自动识别脚本路径，换电脑、换盘符都能用。
+从 v0.5.0 起，游戏启动程序也支持**自动检测**：扫一遍注册表和常见安装目录，直接挑候选。
+
+**在线主页（GitHub Pages）**：<https://diaohesi.github.io/ALL-MY-MAA/>
+— 截图、功能一览和下载入口都在这一页。
 
 ![主界面](docs/screenshot.png)
 
@@ -24,6 +29,9 @@
 
 ## 下载
 
+- 想先了解再下载？逛一下
+  [在线主页（GitHub Pages）](https://diaohesi.github.io/ALL-MY-MAA/)，
+  截图、功能和下载入口都在一页里。
 - **推荐**：到 [Releases](https://github.com/Diaohesi/ALL-MY-MAA/releases) 下载
   打包好的 `GameHub.exe`，放到 `GameHub/` 文件夹里双击 `启动游戏中心.bat` 即可，
   **不需要安装 Python 和 Pillow**。
@@ -43,7 +51,8 @@
 | 功能 | 说明 |
 | --- | --- |
 | 一键启动脚本 | 点卡片或「启动脚本」拉起脚本；已在运行则把它的窗口切到最前 |
-| 启动游戏 | 每张卡片有「启动游戏」按钮；首次点击时选择游戏的启动程序，之后记住 |
+| 启动游戏 | 每张卡片有「启动游戏」按钮；未配置启动程序时自动检测候选，之后记住路径与进程名 |
+| 游戏启动程序自动检测 | 编辑卡片时点「自动检测」，扫描注册表卸载项与常见安装目录，按匹配度列出候选（名称 + 路径 + 来源） |
 | 下载游戏 | 卡片底部「下载」直接打开对应游戏的官方下载页；可在编辑里改成任意链接 |
 | 运行状态 | 同时显示「脚本 / 游戏」两个运行状态；每 1.5 秒检测一次，自动刷新 |
 | 版本检查 | 后台检查最新版本，有新版本时显示 `MAA · v6.19.0 → v6.20.0` 并高亮「更新」 |
@@ -108,6 +117,23 @@ D:\All MAA\
 
 内置的 4 个游戏也可以右键 →「编辑此卡片」修改名称、路径、下载页等。
 
+### 游戏启动程序自动检测（v0.5.0）
+
+「游戏启动程序」不用再手动翻文件夹：
+
+1. 右键卡片 →「编辑此卡片」，在「游戏启动程序」旁点 **「自动检测」**；
+2. Hub 会扫描 **注册表卸载项**（HKLM / HKCU，含 WOW6432Node）和常见安装目录
+   （`Program Files`、`Program Files (x86)`、`LOCALAPPDATA\Programs`、
+   各盘 `Games` / `Game` / `游戏` 等目录），按匹配度排序，列出带来源标注
+   （`注册表` / `常见目录`）的候选；双击候选或选中后点「确定」即可填入；
+3. 直接点卡片的「启动游戏」时，如果还没配置启动程序，Hub 也会先自动检测：
+   有候选弹出同一个选择框（也可以点「浏览…」手动选），没有候选则打开文件选择框。
+
+检测总预算 1.8 秒，本机实测每款游戏约 0.2–0.4 秒。内置四款游戏自带关键词；
+自定义游戏会按你填写的游戏名作为关键词扫描。本机示例（仅供参考）：
+明日方舟 → `MuMuNxMain.exe`，异环 → `NTELauncher.exe`，
+鸣潮 → `Wuthering Waves.exe`，终末地 → `Endfield.exe`。
+
 ### 更新是怎么做的
 
 Hub 只负责**检查和提醒**，真正的文件更新由脚本自己完成（MAA 启动时检查更新、
@@ -158,9 +184,9 @@ ok-ww 启动即自动更新、MaaNTE / MaaEnd 启动后自检更新）。点「�
 GameHub/
 ├─ hub.pyw                 程序入口
 ├─ gamehub/                主程序
-│  ├─ ui.py                窗口、卡片交互、添加/编辑对话框
+│  ├─ ui.py                窗口、卡片交互、添加/编辑对话框、候选选择框
 │  ├─ render.py            Pillow 动态绘制界面
-│  ├─ store.py             配置、路径识别、版本、进程、更新检查
+│  ├─ store.py             配置、路径识别、版本、进程、更新检查、游戏自动检测
 │  └─ theme.py             尺寸与配色
 ├─ assets/                 图标资源（4 个内置脚本图标、窗口图标、占位图标）
 ├─ tools/                  开发工具（运行时不需要）
@@ -169,12 +195,21 @@ GameHub/
 │  ├─ build_exe.bat        PyInstaller 打包
 │  ├─ create_shortcut.ps1  创建桌面快捷方式（由根目录 bat 调用）
 │  ├─ grab_hub.py          后台截取窗口（调试 / 文档截图）
-│  └─ preview.py           截图小工具（调试）
+│  ├─ preview.py           截图小工具（调试）
+│  ├─ test_detect.py       游戏启动程序自动检测命令行自测
+│  ├─ regression_test.py   回归测试（标准库 unittest，57 个用例）
+│  └─ verify_exe.ps1       本地打包 exe 验证
+├─ docs/                   文档与 GitHub Pages 站点
+│  ├─ index.html           项目主页
+│  ├─ site.css             主页样式
+│  ├─ assets/              主页用图片（截图 / logo）
+│  ├─ screenshot.png       界面截图
+│  ├─ add-dialog.png       添加游戏对话框截图
+│  └─ qa-report.md         回归测试报告
 ├─ .github/                GitHub 维护配置
 │  ├─ workflows/build-exe.yml   自动打包 GameHub.exe / 发布 Release
+│  ├─ workflows/pages.yml       自动部署 docs/ 到 GitHub Pages
 │  └─ ISSUE_TEMPLATE/bug_report.yml
-├─ docs/screenshot.png     界面截图
-├─ docs/add-dialog.png     添加游戏对话框截图
 ├─ 启动游戏中心.bat
 ├─ 创建桌面快捷方式.bat
 └─ README.md / CHANGELOG.md / LICENSE / .gitignore / requirements.txt
@@ -194,6 +229,11 @@ GameHub/
 
 **Q: 提示“路径缺失”？**
 点卡片按提示选择脚本的 exe，或点右上角「重新识别路径」。选择一次后会写入 `config.json`。
+
+**Q: 游戏自动检测找不到启动程序？**
+自动检测只认注册表卸载项与常见安装目录，绿色版 / 便携版 / 自定义安装位置可能扫不到。
+先在候选框里点「浏览…」手动选择；或确认游戏已正常安装后，再在「编辑此卡片」里点一次
+「自动检测」重试。也可以直接把游戏启动程序的完整路径填进「游戏启动程序」。
 
 **Q: 更新检查显示“无法检查”？**
 GitHub / 官方 API 需要网络访问；点右上角打开 Clash Verge 后按 `F5` 重试。
@@ -220,6 +260,14 @@ git config --local https.proxy http://127.0.0.1:7897
 ## 参与开发
 
 - 欢迎提交 [Issue](https://github.com/Diaohesi/ALL-MY-MAA/issues) 反馈问题或建议；
+- 改动后先跑回归测试（标准库 `unittest`，不需要 pytest，全绿时退出码为 0）：
+
+  ```bat
+  python tools/regression_test.py   :: 57 个用例
+  python tools/test_detect.py       :: 只验证游戏启动程序自动检测，不打开 GUI
+  ```
+
+  详细结果、已知缺陷与未覆盖点见 [docs/qa-report.md](docs/qa-report.md)；
 - Pull Request 前请先跑一遍 Hub，确认添加/编辑卡片、启动脚本、启动游戏等功能正常；
 - 提交信息建议使用 `feat:`、`fix:`、`docs:` 等前缀。
 
@@ -229,7 +277,11 @@ git config --local https.proxy http://127.0.0.1:7897
 2. 提交并推送：`git add -A && git commit -m "release: vX.Y.Z" && git push`；
 3. 打标签并推送：`git tag -a vX.Y.Z -m "GameHub Lite vX.Y.Z" && git push origin vX.Y.Z`；
 4. GitHub Actions 会自动构建 `GameHub.exe` 并创建 / 更新对应的 Release
-   （见 [.github/workflows/build-exe.yml](.github/workflows/build-exe.yml)）。
+   （见 [.github/workflows/build-exe.yml](.github/workflows/build-exe.yml)）；
+5. 改动了 `docs/` 里的主页内容时，推送后会自动部署到
+   [GitHub Pages](https://diaohesi.github.io/ALL-MY-MAA/)
+   （见 [.github/workflows/pages.yml](.github/workflows/pages.yml)；
+   仓库 Settings → Pages 的 Source 需为「GitHub Actions」）。
 
 发布页：<https://github.com/Diaohesi/ALL-MY-MAA/releases>
 

@@ -31,6 +31,16 @@ def _dark_titlebar(root):
         pass
 
 
+def _flat_button(parent, text, command, accent=False):
+    """深色扁平按钮（主界面各对话框共用）。"""
+    bg = "#25445f" if accent else "#1b2432"
+    active = "#2d5577" if accent else "#26313f"
+    return tk.Button(parent, text=text, command=command, bg=bg, fg="#eaf0f8",
+                     activebackground=active, activeforeground="#ffffff",
+                     relief="flat", bd=0, padx=14, pady=5,
+                     font=("Microsoft YaHei", -11), cursor="hand2")
+
+
 class AppDialog(tk.Toplevel):
     """添加 / 编辑一个游戏脚本卡片。"""
 
@@ -76,12 +86,7 @@ class AppDialog(tk.Toplevel):
         return entry
 
     def _button(self, parent, text, command, accent=False):
-        bg = "#25445f" if accent else "#1b2432"
-        active = "#2d5577" if accent else "#26313f"
-        return tk.Button(parent, text=text, command=command, bg=bg, fg="#eaf0f8",
-                         activebackground=active, activeforeground="#ffffff",
-                         relief="flat", bd=0, padx=14, pady=5,
-                         font=("Microsoft YaHei", -11), cursor="hand2")
+        return _flat_button(parent, text, command, accent=accent)
 
     def _build(self):
         pad = 18
@@ -102,7 +107,14 @@ class AppDialog(tk.Toplevel):
             entry = self._entry(body, self.app.get(field, ""))
             entry.grid(row=row, column=1, sticky="we", pady=4)
             self.values[field] = entry
-            if field in ("script_exe", "game_exe", "icon"):
+            if field == "game_exe":
+                box = tk.Frame(body, bg="#0f141d")
+                box.grid(row=row, column=2, sticky="w", padx=(8, 0), pady=4)
+                self._button(box, "浏览", lambda: self._browse("game_exe")).pack(
+                    side="left")
+                self._button(box, "自动检测", self._auto_detect_game).pack(
+                    side="left", padx=(6, 0))
+            elif field in ("script_exe", "icon"):
                 self._button(body, "浏览", lambda f=field: self._browse(f)).grid(
                     row=row, column=2, padx=(8, 0), pady=4)
             elif hint:
@@ -156,6 +168,41 @@ class AppDialog(tk.Toplevel):
             self.values[field].delete(0, "end")
             self.values[field].insert(0, os.path.normpath(path))
 
+    def _detect_target(self):
+        """自动检测用的 app 信息：优先编辑中的游戏，其次看用户刚输入的名称。"""
+        game = ""
+        if "game" in self.values:
+            game = self.values["game"].get().strip()
+        return {"key": self.app.get("key", ""), "game": game or self.app.get("game", "")}
+
+    def _auto_detect_game(self):
+        info = self._detect_target()
+        self.config(cursor="watch")
+        try:
+            self.update_idletasks()
+            candidates = store.find_game_candidates(info)
+        except Exception:
+            candidates = []
+        finally:
+            self.config(cursor="")
+        if not candidates:
+            messagebox.showinfo(
+                "未检测到游戏启动程序",
+                f"没有自动找到「{info['game'] or '该游戏'}」的启动程序。\n"
+                "可以点「浏览」手动选择。",
+                parent=self)
+            return
+        dialog = GameCandidateDialog(self, candidates)
+        self.wait_window(dialog)
+        try:
+            self.grab_set()       # 候选框关掉后恢复编辑框的模态
+        except Exception:
+            pass
+        if dialog.result:
+            entry = self.values["game_exe"]
+            entry.delete(0, "end")
+            entry.insert(0, os.path.normpath(dialog.result))
+
     def _center(self):
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
@@ -195,11 +242,123 @@ class AppDialog(tk.Toplevel):
             self.destroy()
 
 
+class GameCandidateDialog(tk.Toplevel):
+    """游戏启动程序候选选择框（深色）：双击候选或选中后点「确定」返回路径。"""
+
+    def __init__(self, master, candidates, title="选择游戏启动程序"):
+        super().__init__(master)
+        self.title(title)
+        self.configure(bg="#0f141d")
+        self.resizable(False, False)
+        self.transient(master)
+        self.result = None
+        self.candidates = list(candidates or [])
+        self._path_var = tk.StringVar(value="")
+        self._build()
+        self.grab_set()
+        self._center(master)
+
+    def _build(self):
+        pad = 16
+        tk.Label(self, text=f"找到 {len(self.candidates)} 个候选，双击或选中后点「确定」",
+                 bg="#0f141d", fg="#9aa8bc",
+                 font=("Microsoft YaHei", -11)).pack(anchor="w", padx=pad, pady=(14, 8))
+        body = tk.Frame(self, bg="#101620", highlightthickness=1,
+                        highlightbackground="#2a3547")
+        body.pack(fill="both", expand=True, padx=pad)
+        self.listbox = tk.Listbox(
+            body, bg="#101620", fg="#eaf0f8", selectbackground="#25445f",
+            selectforeground="#ffffff", relief="flat", bd=0, highlightthickness=0,
+            activestyle="none", font=("Microsoft YaHei", -11),
+            width=96, height=min(9, max(3, len(self.candidates))))
+        scroll = tk.Scrollbar(body, command=self.listbox.yview, width=10,
+                              bg="#1b2432", troughcolor="#0f141d",
+                              activebackground="#26313f", relief="flat", bd=0,
+                              highlightthickness=0)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.listbox.pack(side="left", fill="both", expand=True)
+        for candidate in self.candidates:
+            name = candidate.get("name") or os.path.basename(candidate.get("path", ""))
+            source = candidate.get("source") or ""
+            path = self._short_path(candidate.get("path", ""))
+            self.listbox.insert("end", f"{name}    〔{source}〕  {path}")
+        if self.candidates:
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            self._show_path(0)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        self.listbox.bind("<Double-Button-1>", lambda event: self._confirm())
+        tk.Label(self, textvariable=self._path_var, bg="#0f141d", fg="#68788e",
+                 font=("Microsoft YaHei", -9), anchor="w", justify="left",
+                 wraplength=720).pack(fill="x", padx=pad, pady=(8, 0))
+        footer = tk.Frame(self, bg="#0f141d")
+        footer.pack(fill="x", padx=pad, pady=(12, 14))
+        _flat_button(footer, "确定", self._confirm, accent=True).pack(side="right")
+        _flat_button(footer, "取消", self._cancel).pack(side="right", padx=(0, 8))
+        _flat_button(footer, "浏览…", self._browse).pack(side="left")
+        self.bind("<Return>", lambda event: self._confirm())
+        self.bind("<Escape>", lambda event: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    @staticmethod
+    def _short_path(path, limit=44):
+        """列表里用中间省略的路径，完整路径在下方单独显示。"""
+        path = str(path or "")
+        if len(path) <= limit:
+            return path
+        head = limit // 2 - 2
+        tail = limit - head - 3
+        return f"{path[:head]}…{path[-tail:]}"
+
+    def _on_select(self, _event=None):
+        selection = self.listbox.curselection()
+        if selection:
+            self._show_path(selection[0])
+
+    def _show_path(self, index):
+        if 0 <= index < len(self.candidates):
+            self._path_var.set(self.candidates[index]["path"])
+
+    def _confirm(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            if not self.candidates:
+                return
+            selection = (0,)
+        self.result = self.candidates[selection[0]]["path"]
+        self.destroy()
+
+    def _browse(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="手动选择游戏启动程序",
+            filetypes=[("可执行程序", "*.exe"), ("所有文件", "*.*")])
+        if path:
+            self.result = os.path.normpath(path)
+            self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+    def _center(self, master):
+        self.update_idletasks()
+        w, h = self.winfo_width(), self.winfo_height()
+        try:
+            x = master.winfo_rootx() + (master.winfo_width() - w) // 2
+            y = master.winfo_rooty() + (master.winfo_height() - h) // 2
+        except Exception:
+            x = y = 100
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - w))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - h))
+        self.geometry(f"+{x}+{y}")
+
+
 class GameHub:
     def __init__(self, root):
         self.root = root
         self.apps, self.clash_exe, self.search_root = store.load_state()
-        store.save_state(self.apps, self.clash_exe, self.search_root)
+        self.config_saved = store.save_state(self.apps, self.clash_exe, self.search_root)
         self.page = 0
         self.versions = {}
         self.latest = {}
@@ -219,11 +378,26 @@ class GameHub:
         self._setup_fonts()
         self._build_ui()
         self._rebuild()
+        if not self.config_saved:
+            self.root.after(300, self._warn_save_failed)
         self.root.after(120, self._poll)
         self.root.after(900, self._start_update_check)
         self._toast(self.toast_msg)
 
     # ---------------------------------------------------------- 基础
+    def _save_config(self):
+        """保存配置；失败时用 toast 提示，返回是否成功。"""
+        saved = store.save_state(self.apps, self.clash_exe, self.search_root)
+        if not saved:
+            self._toast("配置文件无法写入，本次修改无法保存")
+        return saved
+
+    def _warn_save_failed(self):
+        messagebox.showwarning(
+            "配置文件无法写入",
+            "配置文件 config.json 无法写入，之后的修改将无法保存。\n"
+            "请检查 Hub 所在目录是否有写入权限，或 config.json 是否被占用、设为只读。",
+            parent=self.root)
     def _setup_fonts(self):
         fam = "Microsoft YaHei"
         self.f_script = tkfont.Font(family=fam, size=-11)
@@ -736,20 +910,38 @@ class GameHub:
                 self._toast(f"{app['game']} 正在运行中（窗口未找到）")
             return
         exe = app.get("game_exe", "")
+        saved = True
         if not exe or not os.path.isfile(exe):
-            path = filedialog.askopenfilename(
-                parent=self.root, title=f"选择「{app['game']}」的启动程序",
-                filetypes=[("可执行程序", "*.exe"), ("所有文件", "*.*")])
-            if not path:
-                return
-            exe = os.path.normpath(path)
+            self._toast(f"正在自动检测「{app['game']}」的启动程序…")
+            try:
+                self.root.update_idletasks()
+                candidates = store.find_game_candidates(app)
+            except Exception:
+                candidates = []
+            if candidates:
+                dialog = GameCandidateDialog(
+                    self.root, candidates,
+                    title=f"选择「{app['game']}」的游戏启动程序")
+                self.root.wait_window(dialog)
+                if not dialog.result:
+                    self._toast("已取消启动游戏")
+                    return
+                exe = os.path.normpath(dialog.result)
+            else:
+                path = filedialog.askopenfilename(
+                    parent=self.root, title=f"选择「{app['game']}」的启动程序",
+                    filetypes=[("可执行程序", "*.exe"), ("所有文件", "*.*")])
+                if not path:
+                    return
+                exe = os.path.normpath(path)
             app["game_exe"] = exe
             app["game_procs"] = store.proc_names_for_exe(exe)
-            store.save_state(self.apps, self.clash_exe, self.search_root)
+            saved = self._save_config()
             self._rebuild()
         ok, error = store.launch_exe(exe)
         if ok:
-            self._toast(f"正在启动游戏：{app['game']}")
+            note = "" if saved else "（路径未能保存）"
+            self._toast(f"正在启动游戏：{app['game']}{note}")
         else:
             self._toast(f"启动游戏失败：{error}")
 
@@ -813,9 +1005,10 @@ class GameHub:
             return
         app["script_exe"] = os.path.normpath(path)
         app["script_procs"] = store.proc_names_for_exe(path)
-        store.save_state(self.apps, self.clash_exe, self.search_root)
+        saved = self._save_config()
         self._rebuild()
-        self._toast(f"已更新 {app['script']} 的路径")
+        if saved:
+            self._toast(f"已更新 {app['script']} 的路径")
 
     # ---------------------------------------------------------- 添加 / 编辑 / 删除
     def _store_icon(self, key, path):
@@ -849,10 +1042,11 @@ class GameHub:
                 icon_path=icon or store.custom_icon_path(key),
             )
             self.apps.append(app)
-            store.save_state(self.apps, self.clash_exe, self.search_root)
+            saved = self._save_config()
             self.page = (len(self.apps) - 1) // T.PER_PAGE
             self._rebuild()
-            self._toast(f"已添加 {app['game']} · {app['script']}")
+            if saved:
+                self._toast(f"已添加 {app['game']} · {app['script']}")
             self._start_update_check()
         AppDialog(self.root, None, on_save=on_save)
 
@@ -873,9 +1067,10 @@ class GameHub:
             app["download"] = data["download"]
             if data["icon"] and os.path.isfile(data["icon"]):
                 app["icon_path"] = self._store_icon(app["key"], data["icon"])
-            store.save_state(self.apps, self.clash_exe, self.search_root)
+            saved = self._save_config()
             self._rebuild()
-            self._toast(f"已保存 {app['game']} 的配置")
+            if saved:
+                self._toast(f"已保存 {app['game']} 的配置")
 
         def on_delete():
             self.delete_app(i)
@@ -893,10 +1088,11 @@ class GameHub:
                 parent=self.root):
             return
         self.apps = [a for a in self.apps if a["key"] != app["key"]]
-        store.save_state(self.apps, self.clash_exe, self.search_root)
+        saved = self._save_config()
         self.page = min(self.page, max(0, (len(self.apps) - 1) // T.PER_PAGE))
         self._rebuild()
-        self._toast(f"已删除 {app['game']} 的卡片")
+        if saved:
+            self._toast(f"已删除 {app['game']} 的卡片")
 
     def _next_key(self):
         index = 1
@@ -919,12 +1115,13 @@ class GameHub:
                 app["script_exe"] = best
                 app["script_procs"] = store.proc_names_for_exe(best)
                 found += 1
-        store.save_state(self.apps, self.clash_exe, self.search_root)
+        saved = self._save_config()
         self._update_versions()
         self._rebuild()
         total = sum(1 for a in self.apps if os.path.isfile(a.get("script_exe", "")))
-        self._toast(f"路径识别完成：{total}/{len(self.apps)} 个脚本可用"
-                    + (f"，更新了 {found} 个路径" if found else ""))
+        if saved:
+            self._toast(f"路径识别完成：{total}/{len(self.apps)} 个脚本可用"
+                        + (f"，更新了 {found} 个路径" if found else ""))
 
     def open_clash(self):
         path = self.clash_exe
@@ -943,8 +1140,9 @@ class GameHub:
             filetypes=[("可执行程序", "*.exe")])
         if path:
             self.clash_exe = os.path.normpath(path)
-            store.save_state(self.apps, self.clash_exe, self.search_root)
-            self._toast("已记录 Clash Verge 路径，再点一次即可打开")
+            saved = self._save_config()
+            if saved:
+                self._toast("已记录 Clash Verge 路径，再点一次即可打开")
 
     # ---------------------------------------------------------- 更新检查
     def _start_update_check(self, manual=False):

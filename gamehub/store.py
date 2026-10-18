@@ -6,9 +6,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from ctypes import wintypes
+
+try:
+    import winreg
+except ImportError:   # 非 Windows 环境（仅做语法检查时）静默降级
+    winreg = None
 
 # ------------------------------------------------------------------ 路径
 FROZEN = bool(getattr(sys, "frozen", False))
@@ -82,13 +88,22 @@ ICON_FILES = {"maa": "maa.png", "nte": "nte.png", "wuwa": "wuwa.png",
 
 # ------------------------------------------------------------------ 通用小工具
 def version_key(text):
-    nums = re.findall(r"\d+", text or "")
+    """取版本号里的数字段；忽略 -rc / +build 等后缀，避免预发布号被当正式版。"""
+    if not text:
+        return ()
+    text = re.split(r"[-+]", str(text), maxsplit=1)[0]
+    nums = re.findall(r"\d+", text)
     return tuple(int(x) for x in nums[:4])
 
 
 def is_newer(latest, current):
     a, b = version_key(latest), version_key(current)
-    return bool(a and b and a > b)
+    if not a or not b:
+        return False
+    length = max(len(a), len(b))
+    a = a + (0,) * (length - len(a))     # 零补齐：v6.19 == v6.19.0
+    b = b + (0,) * (length - len(b))
+    return a > b
 
 
 def http_get(url, timeout=10):
@@ -212,6 +227,418 @@ def proc_names_for_exe(exe_path):
     return []
 
 
+# ------------------------------------------------------------------ 游戏启动程序自动检测
+# 每款游戏的关键词：匹配注册表名称 / 安装路径 / 可执行文件名
+GAME_KEYWORDS = {
+    "maa": ("明日方舟", "arknights", "mumu", "mumuplayer", "mumunx", "mumu模拟器"),
+    "nte": ("异环", "neverness", "neverness to everness", "perfect world",
+            "perfectworld", "完美世界", "nte"),
+    "wuwa": ("鸣潮", "wuthering", "wuthering waves", "kuro", "库洛"),
+    "maaend": ("终末地", "endfield", "arknights: endfield", "明日方舟终末地"),
+}
+
+# 常见启动程序名（按优先级排列，越靠前越像游戏入口）
+GAME_EXE_HINTS = {
+    "maa": ("mumunxmain.exe", "mumuplayer.exe", "mumunxlauncher.exe", "mumu.exe",
+            "arknights.exe", "mumuplayer64.exe", "mumumanager.exe", "launcher.exe"),
+    "nte": ("ntelauncher.exe", "ntegame.exe", "nte.exe", "htgame.exe"),
+    "wuwa": ("wuthering waves.exe", "launcher.exe", "client-win64-shipping.exe",
+             "wutheringwaves.exe"),
+    "maaend": ("endfield.exe", "launcher.exe", "endfield launcher.exe"),
+}
+
+# 厂商 / 启动器关键词：注册表里常只写「鹰角启动器」这类厂商启动器
+GAME_VENDOR_HINTS = ("hypergryph", "鹰角", "netease", "网易", "kuro", "库洛",
+                     "perfect world", "perfectworld", "完美世界", "yostar", "悠星",
+                     "mumu", "bilibili")
+
+# 明显不是游戏入口的 exe 关键词（卸载、更新、崩溃上报、辅助组件等）
+GAME_EXE_NOISE = ("unins", "uninstall", "setup", "install", "updater", "update",
+                  "repair", "crash", "report", "diagnos", "vcredist", "redist",
+                  "dotnet", "eula", "config", "setting", "helper", "service", "sdk",
+                  "platformprocess", "webengine", "cefview", "benchmark", "watchdog",
+                  "cleaner", "deeplink")
+
+# 自定义游戏名称里过于宽泛、不适合当扫描关键词的词
+_GAME_NAME_STOP = {"game", "games", "游戏", "launcher", "启动器", "脚本",
+                   "客户端", "client", "center", "中心"}
+
+# 扫描安装目录时跳过的子目录（缓存、日志、SDK、反作弊安装包等）
+GAME_SCAN_SKIP = {
+    "cache", "caches", "log", "logs", "temp", "tmp", "crashsightlog", "crashreport",
+    "redistributables", "redist", "thirdparty", "third_party", "drivers", "driver",
+    "docs", "documentation", "sdk", "patchersdk", "pxcrashsdk", "resources", "resource",
+    "localization", "i18n", "locales", "plugins", "config", "configs", "userdata",
+    "save", "saved", "screenshots", "benchmark", "node_modules", "site-packages",
+    "__pycache__", "windows", "winsxs", "$recycle.bin", "system volume information",
+}
+
+_REG_UNINSTALL = (
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE,
+     r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+) if winreg else ()
+
+# 自动检测总预算（秒）：保证界面不会卡太久
+GAME_DETECT_BUDGET = 1.8
+
+
+def _kw_hit(text, keyword):
+    """关键词命中；短英文缩写按单词边界匹配，避免 nte 命中 center。"""
+    if not text or not keyword:
+        return False
+    text, keyword = text.lower(), keyword.lower()
+    if keyword.isascii() and keyword.isalpha() and len(keyword) <= 4:
+        return re.search(r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])",
+                         text) is not None
+    return keyword in text
+
+
+def _kw_hits(text, keywords):
+    if not text:
+        return 0
+    return sum(1 for keyword in keywords if _kw_hit(text, keyword))
+
+
+def _game_profile(app):
+    """返回 (key, 关键词, 启动程序名提示)；app 为空时返回全部游戏的合集。"""
+    app = app or {}
+    key = str(app.get("key") or "")
+    if key in GAME_KEYWORDS:
+        return key, GAME_KEYWORDS[key], GAME_EXE_HINTS.get(key, ())
+    game = str(app.get("game") or "").strip()
+    if game:
+        for name, keywords in GAME_KEYWORDS.items():
+            if _kw_hits(game, keywords):
+                return name, keywords, GAME_EXE_HINTS.get(name, ())
+        tokens = [token for token in re.split(r"[\s·:：,，/|()（）]+", game)
+                  if len(token) >= 2 and token.lower() not in _GAME_NAME_STOP]
+        if not tokens:
+            return "", (), ()      # 名称太宽泛（如「游戏」），不适合做扫描关键词
+        return "", tuple(tokens), ()
+    keywords, hints = [], []
+    for name, words in GAME_KEYWORDS.items():
+        keywords.extend(words)
+        hints.extend(GAME_EXE_HINTS.get(name, ()))
+    return "", tuple(dict.fromkeys(keywords)), tuple(dict.fromkeys(hints))
+
+
+def _exe_name_ok(name):
+    low = name.lower()
+    return low.endswith(".exe") and not any(mark in low for mark in GAME_EXE_NOISE)
+
+
+def _score_exe_path(path, depth, keywords, hints):
+    """给一个 exe 打分；不像游戏启动程序时返回 None。"""
+    name = os.path.basename(path)
+    if not _exe_name_ok(name):
+        return None
+    low = name.lower()
+    hint_rank = hints.index(low) if low in hints else -1
+    name_hits = _kw_hits(low, keywords)
+    path_hits = _kw_hits(path, keywords)
+    if not name_hits and not path_hits:
+        return None          # 文件名和路径里都没有游戏关键词，不是它的启动程序
+    if hint_rank < 0 and (not name_hits or depth > 0):
+        return None          # 没命中常见启动程序名时，只认安装根目录里的 exe
+    if hint_rank >= 0:
+        score = 55 if hint_rank == 0 else (
+            42 if hint_rank == 1 else max(24, 42 - 5 * hint_rank))
+        score += 8 * name_hits + 10 * path_hits
+    else:
+        score = 20 + 14 * name_hits + 10 * path_hits
+    if "launcher" in low or "启动器" in low:
+        score += 6
+    score += (8, 5, 3)[depth] if depth < 3 else 0
+    try:
+        if os.path.getsize(path) < 120 * 1024:   # 过小的通常是辅助程序
+            score -= 18
+    except OSError:
+        pass
+    if score < 22:
+        return None
+    return dict(path=path, score=score)
+
+
+def _find_game_exes(root, keywords, hints, deadline, max_depth=4, max_dirs=300):
+    """在目录内浅层扫描 exe，返回 [{path, score}]。"""
+    hits = []
+    root = os.path.abspath(root) if root else ""
+    if not root or not os.path.isdir(root):
+        return hits
+    stack = [(root, 0)]
+    scanned = 0
+    while stack:
+        if scanned >= max_dirs or time.monotonic() > deadline:
+            break
+        folder, depth = stack.pop()
+        scanned += 1
+        try:
+            with os.scandir(folder) as iterator:
+                entries = list(iterator)
+        except OSError:
+            continue
+        for entry in entries:
+            if time.monotonic() > deadline:
+                return hits
+            try:
+                low = entry.name.lower()
+                if entry.is_dir(follow_symlinks=False):
+                    if depth < max_depth and low not in GAME_SCAN_SKIP \
+                            and not low.startswith("."):
+                        stack.append((entry.path, depth + 1))
+                elif low.endswith(".exe"):
+                    item = _score_exe_path(entry.path, depth, keywords, hints)
+                    if item:
+                        hits.append(item)
+            except OSError:
+                continue
+    return hits
+
+
+def _reg_value(key, name):
+    try:
+        value = winreg.QueryValueEx(key, name)[0]
+        return str(value).strip() if value is not None else ""
+    except OSError:
+        return ""
+
+
+def _clean_icon_path(value):
+    """把 DisplayIcon 规范成 exe 路径；不是 exe 时返回空串。"""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    # 常见形式："C:\x\game.exe",0  /  C:\x\game.exe,0  /  C:\x\game.exe
+    value = value.strip('"').strip()
+    if re.search(r",\s*-?\d+\s*$", value):
+        value = re.sub(r",\s*-?\d+\s*$", "", value).strip().strip('"')
+    if len(value) > 3 and value[1] == ":" and value.lower().endswith(".exe"):
+        return value
+    return ""
+
+
+def _iter_registry_entries(keywords, deadline):
+    """枚举卸载项，返回名称/路径命中关键词的 [{name, install, icon}]。"""
+    entries, seen = [], set()
+    if not _REG_UNINSTALL:
+        return entries
+    views = (0,)
+    if hasattr(winreg, "KEY_WOW64_64KEY"):
+        views = (0, winreg.KEY_WOW64_64KEY)
+    for hive, subkey in _REG_UNINSTALL:
+        for view in views:
+            if time.monotonic() > deadline:
+                return entries
+            try:
+                parent = winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view)
+            except OSError:
+                continue
+            try:
+                count = winreg.QueryInfoKey(parent)[0]
+                for index in range(count):
+                    if time.monotonic() > deadline:
+                        break
+                    try:
+                        name = winreg.EnumKey(parent, index)
+                        with winreg.OpenKey(parent, name) as item:
+                            display = _reg_value(item, "DisplayName")
+                            if not display:
+                                continue
+                            install = _reg_value(item, "InstallLocation").strip('"')
+                            icon = _reg_value(item, "DisplayIcon")
+                            publisher = _reg_value(item, "Publisher")
+                    except OSError:
+                        continue
+                    if not _kw_hits(" ".join((display, install, icon, publisher, name)),
+                                    keywords):
+                        continue
+                    signature = (display.lower(), install.lower(), icon.lower())
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    entries.append(dict(name=display, install=install, icon=icon))
+            finally:
+                try:
+                    parent.Close()
+                except Exception:
+                    pass
+    return entries
+
+
+def _child_dirs(path):
+    try:
+        with os.scandir(path) as iterator:
+            return [entry for entry in iterator if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+
+
+def _drive_roots():
+    try:
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        roots = []
+        for index in range(26):
+            if mask & (1 << index):
+                root = f"{chr(65 + index)}:\\"
+                if os.path.isdir(root):
+                    roots.append(root)
+        return roots
+    except Exception:
+        return [f"{letter}:\\" for letter in "CDEFGH" if os.path.isdir(f"{letter}:\\")]
+
+
+def _fs_scan_roots(keywords, deadline):
+    """常见安装目录：Program Files、LOCALAPPDATA\\Programs、各盘根目录/Games 等。"""
+    roots, seen = [], set()
+    all_hints = tuple(keywords) + GAME_VENDOR_HINTS
+
+    def add(path, name):
+        try:
+            norm = os.path.normpath(path).lower()
+        except (TypeError, ValueError):
+            return
+        if norm in seen or not os.path.isdir(path):
+            return
+        seen.add(norm)
+        roots.append((path, name))
+
+    def matched(name):
+        return _kw_hits(name, all_hints) > 0
+
+    program_bases = []
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        path = os.environ.get(variable)
+        if path and os.path.isdir(path) and path not in program_bases:
+            program_bases.append(path)
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if local:
+        program_bases.append(os.path.join(local, "Programs"))
+    for base in program_bases:
+        if time.monotonic() > deadline:
+            return roots
+        for entry in _child_dirs(base):
+            if time.monotonic() > deadline:
+                return roots
+            if matched(entry.name):
+                add(entry.path, entry.name)
+
+    game_folders = {"games", "game", "游戏", "my games", "游戏库"}
+    for drive in _drive_roots():
+        if time.monotonic() > deadline:
+            return roots
+        for entry in _child_dirs(drive):
+            if time.monotonic() > deadline:
+                return roots
+            low = entry.name.lower()
+            if matched(entry.name):
+                add(entry.path, entry.name)
+            elif low in game_folders:
+                add(entry.path, entry.name)   # 统一扫描 Games/游戏 这类目录
+    return roots
+
+
+def _candidate_name(exe_path, hint):
+    base = os.path.basename(exe_path)
+    hint = (hint or "").strip()
+    if hint and hint.lower() != base.lower():
+        return f"{hint} · {base}"
+    return base
+
+
+def find_game_candidates(app=None, limit=12):
+    """自动检测游戏启动程序候选。
+
+    返回按 score 降序排列的 list[dict(path, name, source, score)]；
+    source 为「注册表」或「常见目录」，全程异常静默、总耗时约 < 2 秒。
+    """
+    started = time.monotonic()
+    deadline = started + GAME_DETECT_BUDGET
+    try:
+        _, keywords, hints = _game_profile(app)
+    except Exception:
+        keywords, hints = (), ()
+    registry_words = tuple(keywords) + GAME_VENDOR_HINTS
+    found, scanned = {}, set()
+
+    def merge(path, name, source, score):
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            norm = os.path.normpath(path).lower()
+        except (TypeError, ValueError):
+            return
+        candidate = dict(path=os.path.normpath(path), name=name, source=source,
+                         score=int(score))
+        old = found.get(norm)
+        if old is None or candidate["score"] > old["score"]:
+            found[norm] = candidate
+
+    def scan(root, hint, source, base_score):
+        if not root:
+            return
+        try:
+            norm = os.path.normpath(root).lower()
+        except (TypeError, ValueError):
+            return
+        if norm in scanned:
+            return
+        scanned.add(norm)
+        bonus = min(24, 12 * _kw_hits(hint or "", keywords))
+        try:
+            hits = _find_game_exes(root, keywords, hints, deadline)
+        except Exception:
+            hits = []
+        for hit in hits:
+            merge(hit["path"], _candidate_name(hit["path"], hint), source,
+                  base_score + hit["score"] + bonus)
+
+    # 1) 注册表卸载项
+    try:
+        entries = _iter_registry_entries(registry_words, deadline)
+    except Exception:
+        entries = []
+    for entry in entries:
+        if time.monotonic() > deadline:
+            break
+        display = entry.get("name") or ""
+        install = entry.get("install") or ""
+        icon_exe = _clean_icon_path(entry.get("icon"))
+        if icon_exe:
+            hit = _score_exe_path(icon_exe, 0, keywords, hints)
+            if hit:
+                merge(icon_exe, _candidate_name(icon_exe, display), "注册表",
+                      40 + hit["score"] + min(24, 12 * _kw_hits(display, keywords)))
+        root = install if os.path.isdir(install) else (
+            os.path.dirname(icon_exe) if icon_exe else "")
+        scan(root, display, "注册表", 40)
+
+    # 2) 常见安装目录
+    try:
+        fs_roots = _fs_scan_roots(registry_words, deadline)
+    except Exception:
+        fs_roots = []
+    for root, root_name in fs_roots:
+        if time.monotonic() > deadline:
+            break
+        scan(root, root_name, "常见目录", 15)
+
+    result = sorted(found.values(), key=lambda item: (-item["score"],
+                                                      item["path"].lower()))
+    try:
+        return result[:max(1, int(limit))]
+    except (TypeError, ValueError):
+        return result[:12]
+
+
+def _version_text(value):
+    """把 JSON 版本值安全转成字符串；非 str/int/float（含 bool/null/list）返回空串。"""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    return str(value).strip()
+
+
 def read_version(app):
     exe = app.get("script_exe", "")
     folder = os.path.dirname(exe)
@@ -222,18 +649,20 @@ def read_version(app):
                 return "v" + v
             cache = os.path.join(folder, "cache", "version", "summary.json")
             with open(cache, "r", encoding="utf-8") as f:
-                v = (json.load(f).get("stable") or {}).get("version", "")
+                v = _version_text((json.load(f).get("stable") or {}).get("version"))
             if v:
                 return v if v.startswith("v") else "v" + v
         elif app.get("key") in ("nte", "maaend"):
             with open(os.path.join(folder, "interface.json"), "r", encoding="utf-8") as f:
-                v = str(json.load(f).get("version", ""))
+                v = _version_text(json.load(f).get("version"))
             if v:
                 return v if v.startswith("v") else "v" + v
         elif app.get("key") == "wuwa":
             with open(os.path.join(folder, "data", "apps", "ok-ww", "app.json"),
                       "r", encoding="utf-8") as f:
-                return json.load(f).get("current_version", "") or ""
+                v = _version_text(json.load(f).get("current_version"))
+            if v:
+                return v
         else:
             v = file_version(exe)
             if v:
@@ -293,7 +722,9 @@ def _clean_procs(value, fallback_exe=""):
         items = []
     procs = []
     for item in items:
-        item = str(item).strip()
+        if not isinstance(item, str):   # 跳过 None / 数字 / 嵌套值，避免出现 "NONE"
+            continue
+        item = item.strip()
         if item:
             procs.append(item.upper())
     if not procs and fallback_exe:
@@ -419,6 +850,7 @@ def load_state():
 
 
 def save_state(apps, clash, root):
+    """写入 config.json，返回是否成功（失败由调用方负责提示用户）。"""
     data = {"version": 3, "apps": {}, "custom_apps": []}
     if os.path.normpath(root) != os.path.normpath(SEARCH_ROOT):
         data["root"] = root
@@ -456,8 +888,9 @@ def save_state(apps, clash, root):
     try:
         with open(CONFIG, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
     except Exception:
-        pass
+        return False
 
 
 # ------------------------------------------------------------------ 进程

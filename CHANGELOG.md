@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v0.5.0 (2026-10-18)
+
+- **游戏启动程序自动检测**：编辑卡片时「游戏启动程序」旁新增「自动检测」按钮，
+  扫描注册表卸载项（HKLM / HKCU，含 WOW6432Node）与常见安装目录
+  （Program Files、LOCALAPPDATA\Programs、各盘 Games / Game / 游戏 等），
+  按匹配度排序列出候选（名称 + 路径 + 来源「注册表 / 常见目录」），双击或「确定」填入；
+  检测总预算 1.8 秒，本机实测每款游戏约 0.2–0.4 秒
+- **启动游戏时自动检测**：未配置游戏启动程序时先自动检测，有候选弹出深色候选选择框
+  （含「浏览…」手动选择），无候选回退文件选择框；选中的路径与进程名会写回配置
+- 新增 `tools/test_detect.py`：游戏自动检测命令行自测，不打开 GUI
+- 修复（来自回归测试，详见 `docs/qa-report.md`）：`save_state` 保存失败不再静默，
+  界面会提示配置保存失败（QA-03）；异环 `app.json` 缺字段时回退版本（QA-01）；
+  `interface.json` 版本值非字符串时回退（QA-02）；版本比较支持预发布号与短版本（QA-04）；
+  进程名清洗忽略非字符串项（QA-05）；注册表 `DisplayIcon` 带图标索引时正确解析（QA-09）
+- 新增回归测试 `tools/regression_test.py`（标准库 unittest，57 个用例）与 `docs/qa-report.md` 测试报告
+- 新增 GitHub Pages 项目主页：<https://diaohesi.github.io/ALL-MY-MAA/>
+  （`docs/index.html` + `docs/site.css`，`.github/workflows/pages.yml` 自动部署）
+- 新增 `tools/verify_exe.ps1` 本地打包验证脚本
+- 更新 README（在线主页入口、自动检测说明、目录结构、常见问题）
+
 ## v0.4.0 (2026-10-18)
 
 - 界面重构为运行时动态渲染（Pillow），卡片数量随数据变化，支持翻页
