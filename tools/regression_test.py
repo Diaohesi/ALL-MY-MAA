@@ -3412,6 +3412,98 @@ class ChangelogFormatTests(unittest.TestCase):
                          "a\n\nb")
 
 
+# ---------------------------------------------------------------- v0.9.1 图标资源
+class V091IconTests(TempDirTest):
+    """v0.9.1 图标资产：LinYuxia 品牌 + 四个页面图标（192×192）、映射、缺失回退。"""
+
+    EXPECTED = (("brand", "LinYuxia.png"),
+                ("home", "page_home.png"),
+                ("daily", "page_daily.png"),
+                ("settings", "page_settings.png"),
+                ("about", "page_about.png"))
+
+    @staticmethod
+    def _copy(src, dst):
+        with open(src, "rb") as fh:
+            data = fh.read()
+        with open(dst, "wb") as fh:
+            fh.write(data)
+
+    def test_icon_assets_exist_and_are_192(self):
+        from PIL import Image
+        for name, filename in self.EXPECTED:
+            with self.subTest(name=name):
+                path = os.path.join(store.ASSETS, filename)
+                self.assertTrue(os.path.isfile(path), path)
+                self.assertGreater(os.path.getsize(path), 0)
+                with Image.open(path) as img:
+                    self.assertEqual(img.size, (192, 192))
+                    self.assertEqual(img.format, "PNG")
+        self.assertEqual(ui.BRAND_ICON_FILE, "LinYuxia.png")
+        self.assertEqual(ui.PAGE_ICON_FILES, {
+            "home": "page_home.png", "daily": "page_daily.png",
+            "settings": "page_settings.png", "about": "page_about.png"})
+
+    def test_icon_mapping_and_size_tokens(self):
+        for name, filename in self.EXPECTED:
+            with self.subTest(name=name):
+                self.assertEqual(ui.icon_asset_file(name), filename)
+                path = ui.icon_path(name)
+                self.assertEqual(os.path.normpath(path),
+                                 os.path.normpath(os.path.join(
+                                     store.ASSETS, filename)))
+                self.assertTrue(os.path.isfile(path))
+        self.assertEqual(ui.icon_asset_file("bogus"), "")
+        self.assertEqual(ui.icon_path("bogus"), "")
+        self.assertEqual(ui.resolve_icon_path("bogus"), "")
+        sizes = ui.ICON_SIZES
+        self.assertEqual((sizes["window"], sizes["window_small"]), (64, 32))
+        self.assertTrue(44 <= sizes["brand"] <= 48)
+        self.assertTrue(20 <= sizes["nav"] <= 22)
+        self.assertTrue(28 <= sizes["page"] <= 32)
+        self.assertGreaterEqual(sizes["about"], 48)
+
+    def test_icon_missing_fallbacks(self):
+        empty = os.path.join(self.tmp, "empty_assets")
+        os.makedirs(empty, exist_ok=True)
+        real_assets = store.ASSETS
+        try:
+            with mock.patch.object(store, "ASSETS", empty):
+                # 空目录：图标路径与回退都为空，不崩溃
+                self.assertEqual(ui.icon_path("brand"), "")
+                self.assertEqual(ui.resolve_icon_path("brand"), "")
+                self.assertEqual(ui.resolve_icon_path("home"), "")
+                # 品牌缺失 -> 回退 hub.png
+                self._copy(os.path.join(real_assets, "hub.png"),
+                           os.path.join(empty, "hub.png"))
+                self.assertEqual(
+                    os.path.normpath(ui.resolve_icon_path("brand")),
+                    os.path.normpath(os.path.join(empty, "hub.png")))
+                # 页面图标没有回退
+                self.assertEqual(ui.resolve_icon_path("home"), "")
+                self._copy(os.path.join(real_assets, "page_home.png"),
+                           os.path.join(empty, "page_home.png"))
+                self.assertEqual(
+                    os.path.normpath(ui.icon_path("home")),
+                    os.path.normpath(os.path.join(empty, "page_home.png")))
+                # 关于页回退顺序：page_about > LinYuxia > hub
+                self.assertEqual(
+                    os.path.normpath(ui.resolve_icon_path("about")),
+                    os.path.normpath(os.path.join(empty, "hub.png")))
+                self._copy(os.path.join(real_assets, "LinYuxia.png"),
+                           os.path.join(empty, "LinYuxia.png"))
+                self.assertEqual(
+                    os.path.normpath(ui.resolve_icon_path("about")),
+                    os.path.normpath(os.path.join(empty, "LinYuxia.png")))
+                self._copy(os.path.join(real_assets, "page_about.png"),
+                           os.path.join(empty, "page_about.png"))
+                self.assertEqual(
+                    os.path.normpath(ui.resolve_icon_path("about")),
+                    os.path.normpath(os.path.join(empty, "page_about.png")))
+        finally:
+            store.ASSETS = real_assets
+
+
 def main():
     suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)

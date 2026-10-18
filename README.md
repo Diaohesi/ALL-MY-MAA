@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.9.0
+# All-My-Maa · 游戏脚本中心 v0.9.1
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -28,6 +28,9 @@
 自绘 **5 态圆角按钮**，窗口可**自由缩放**（默认 1180×760、最小 1000×640），页面滚动 / 换行；
 侧边栏新增「**小工具**」（Clash / 脚本目录 / 日志目录 / 检查脚本更新）与「**关于与更新**」
 （关于软件、检查软件更新）。
+从 v0.9.1 起，应用图标换成 **品牌图标 LinYuxia**，并为四个子页面配上图标：
+主页（手柄）、清日常（剑）、设置（雪花）、关于（角色头像），显示在窗口 / 任务栏、
+侧边栏品牌、导航、页面标题与关于对话框。
 
 **在线主页（GitHub Pages）**：<https://diaohesi.github.io/All-My-Maa/>
 — 截图、功能一览和下载入口都在这一页。
@@ -76,6 +79,7 @@
 | 软件更新 | 读取 GitHub latest release，与本地版本比较并显示更新说明；只提供「打开发布页」，不自动下载 / 安装 |
 | 自由缩放 | 默认 1180×760、最小 1000×640，窗口自由缩放；页面滚动、内容换行，不出现横向溢出 |
 | 统一视觉 | 统一 Microsoft YaHei UI 字体与字号、圆角 12 / 8、间距 8–24、深色分层配色 |
+| 品牌与页面图标 | 窗口 / 任务栏与侧边栏品牌用 `LinYuxia.png`；主页 / 清日常 / 设置 / 关于分别用手柄 / 剑 / 雪花 / 头像图标；缺失时自动回退 |
 | 更新检查 | 小工具「检查脚本更新」检查各脚本版本并高亮更新；「关于与更新」检查 Hub 自身 GitHub latest 版本 |
 | 更新 | 点「更新」打开对应脚本，让它走自己的更新流程（脚本自更新最安全） |
 | 可视化添加游戏 | 顶部「添加游戏」填写名称、脚本路径、游戏路径、官网/下载链接、主题色即可生成游戏行 |
@@ -186,7 +190,7 @@ v0.5 及更早只按进程名判断游戏是否在运行，内置配置甚至把
 留空则继续使用脚本自动规则；「自动检测」选中游戏启动程序后也会带出脚本自带的规则建议。
 检测实现与逆向依据见 [docs/game-detection-research.md](docs/game-detection-research.md)。
 
-### 界面与体验（v0.9.0）
+### 界面与体验（v0.9.1）
 
 v0.8 的三页结构保留，v0.9 重做了视觉与响应式布局：
 
@@ -200,6 +204,10 @@ v0.8 的三页结构保留，v0.9 重做了视觉与响应式布局：
   窗口变窄也不会横向溢出；对话框自动居中并限制在主窗口范围内。
 - **左侧导航**：Logo + All-My-Maa / 游戏脚本中心；分区「导航」（主页 / 清日常 / 设置）、
   「小工具」、「关于与更新」；当前页高亮，底部显示 Hub 状态、运行数与版本（单实例运行）。
+- **品牌与页面图标**：主窗口 / 任务栏与侧边栏品牌使用 `assets/LinYuxia.png`；导航与页面标题
+  分别显示主页（手柄）、清日常（剑）、设置（雪花）图标，「关于软件」按钮与关于对话框显示
+  角色头像（`page_about.png`）。图标缺失时品牌回退 `hub.png`、关于回退 `LinYuxia` / `hub.png`，
+  其它图标缺失时正常显示文字；资源从 `assets/`（打包版 `_MEIPASS/assets`）加载。
 - **主页**：更大的游戏行（图标 / 名称 / 版本 / 脚本状态 / 游戏状态）。行内按钮：
   **「打开脚本」**（未运行则启动，已在运行时变成 **「唤到前台」**）、**「启动游戏」**、
   **「清日常」**、**「更多 ▾」**（编辑卡片、检查更新、脚本官网、GitHub、游戏下载页、
@@ -422,7 +430,14 @@ GameHub/
 │  ├─ detector.py          游戏运行检测（窗口 / 进程 / ADB 规则）
 │  ├─ daily.py             一键清日常（计划 / 执行 / 独立状态 / 队列）
 │  └─ theme.py             设计令牌（字体 / 字号 / 圆角 / 间距 / 深色配色、窗口尺寸）
-├─ assets/                 图标资源（4 个内置脚本图标、窗口图标、占位图标）
+├─ assets/                 图标资源
+│  ├─ LinYuxia.png         品牌 / 窗口 / 侧边栏图标
+│  ├─ page_home.png        主页图标（手柄）
+│  ├─ page_daily.png       清日常图标（剑）
+│  ├─ page_settings.png    设置图标（雪花）
+│  ├─ page_about.png       关于图标（角色头像）
+│  ├─ maa.png / nte.png / wuwa.png / maaend.png  内置脚本图标
+│  └─ hub.png / hub.ico / custom.png             窗口回退 / 占位图标
 ├─ tools/                  开发工具（运行时不需要）
 │  ├─ make_assets.py       生成程序图标 / 占位图标
 │  ├─ extract_icons.py     从本地脚本提取图标
@@ -479,7 +494,11 @@ GameHub/
   `daily_order`）；改完跑 `python tools/test_daily.py`（mock，不启动脚本）。
 - 鸣潮启动规格在 `gamehub/store.py`（`build_okww_launch` / `launch_app` / `launch_running_pids`）；
   自测 `python tools/test_launch_spec.py`，加 `--live` 只读核对本机 ok-ww 安装。
-- 换图标：替换 `assets/*.png`（256×256 透明背景），或直接在行内「更多 ▾」→「编辑卡片」里指定图标。
+- UI 图标：`gamehub/ui.py` 顶部 `BRAND_ICON_FILE` / `PAGE_ICON_FILES` / `ICON_SIZES` /
+  `ICON_FALLBACKS` 定义品牌与四个页面图标，资源从 `store.ASSETS`（源码 `assets/`、
+  打包版 `_MEIPASS/assets`）加载；替换同名 PNG 即可（建议 256×256 透明背景），
+  缺失时品牌回退 `hub.png`、关于回退 `LinYuxia` / `hub.png`。
+- 游戏卡片图标：行内「更多 ▾」→「编辑卡片」可指定自定义图标（会自动复制到 `user_icons/`）。
 - 改完代码后重新截图：运行 Hub 后执行 `python tools/grab_hub.py docs/screenshot.png`。
 
 ## 常见问题
@@ -571,6 +590,11 @@ v0.9 默认窗口 1180×760、最小 1000×640，直接拖动边缘就能放大�
 
 **Q: 软件更新会自动下载安装吗？**
 不会。发现新版本只显示更新说明，并提供「打开发布页」；下载与覆盖由你手动在 Releases 页面完成。
+
+**Q: 图标没显示 / 想换成自己的图标？**
+v0.9.1 起窗口 / 任务栏与侧边栏品牌使用 `assets/LinYuxia.png`，主页 / 清日常 / 设置 / 关于使用
+`assets/page_*.png`。图标缺失时品牌回退 `hub.png`、关于回退 `LinYuxia.png` / `hub.png`；
+替换同名 PNG 即可（源码运行读 `assets/`，打包版读 exe 内的 `_MEIPASS/assets`）。
 
 **Q: 访问 / 推送 GitHub 很慢或失败？**
 先打开 Clash Verge，再给 git 设置一次本地代理即可：

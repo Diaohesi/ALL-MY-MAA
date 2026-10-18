@@ -25,6 +25,56 @@ PROJECT_GITHUB = "https://github.com/Diaohesi/All-My-Maa"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASE_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
+# v0.9.1 UI 图标资源（assets/ 或 PyInstaller _MEIPASS/assets，见 store.ASSETS）
+BRAND_ICON_FILE = "LinYuxia.png"
+PAGE_ICON_FILES = {
+    "home": "page_home.png",
+    "daily": "page_daily.png",
+    "settings": "page_settings.png",
+    "about": "page_about.png",
+}
+ICON_SIZES = {
+    "window": 64,       # 主窗口/任务栏大图
+    "window_small": 32,  # 主窗口/任务栏小图
+    "brand": 46,        # 侧边栏品牌 44-48
+    "nav": 21,          # 导航按钮 20-22
+    "page": 30,         # 页面标题 28-32
+    "about": 64,        # 关于对话框
+}
+# 缺失时的优雅回退（按顺序查找）
+ICON_FALLBACKS = {
+    "brand": ("hub.png",),
+    "about": ("LinYuxia.png", "hub.png"),
+}
+
+
+def icon_asset_file(name):
+    """图标逻辑名 -> 文件名；未知名称返回空串。"""
+    if name == "brand":
+        return BRAND_ICON_FILE
+    return PAGE_ICON_FILES.get(name, "")
+
+
+def icon_path(name):
+    """图标文件的绝对路径；文件不存在返回空串。"""
+    filename = icon_asset_file(name)
+    if not filename:
+        return ""
+    path = os.path.join(store.ASSETS, filename)
+    return path if os.path.isfile(path) else ""
+
+
+def resolve_icon_path(name):
+    """带回退的图标路径：缺品牌/关于图标时回退到旧 hub.png / LinYuxia。"""
+    path = icon_path(name)
+    if path:
+        return path
+    for fallback in ICON_FALLBACKS.get(name, ()):
+        candidate = os.path.join(store.ASSETS, fallback)
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
 
 def _parent_bg(master):
     try:
@@ -60,7 +110,7 @@ class RoundButton(tk.Canvas):
     def __init__(self, master, text="", command=None, kind="normal",
                  width=None, font=None, state="normal", height=36,
                  accent=None, radius=None, bg=None, anchor="center",
-                 **kwargs):
+                 photo=None, **kwargs):
         self._parent_bg = bg or _parent_bg(master)
         super().__init__(master, bg=self._parent_bg, highlightthickness=0,
                          bd=0, height=height, cursor="hand2",
@@ -70,6 +120,7 @@ class RoundButton(tk.Canvas):
         self._kind = kind
         self._anchor = anchor
         self._state = state
+        self._photo = photo
         self._hover = False
         self._pressed = False
         self._focused = False
@@ -84,7 +135,8 @@ class RoundButton(tk.Canvas):
         if width:
             self._width = int(width) * 9 + 26
         else:
-            self._width = max(78, self._font.measure(self._text) + 30)
+            extra = (photo.width() + 12) if photo is not None else 0
+            self._width = max(78, self._font.measure(self._text) + 30 + extra)
         super().configure(width=self._width)
         self.bind("<Configure>", lambda e: self._redraw(), add="+")
         self.bind("<Enter>", self._on_enter, add="+")
@@ -109,6 +161,9 @@ class RoundButton(tk.Canvas):
                 redraw = True
             elif key == "command":
                 self._command = value
+            elif key == "photo":
+                self._photo = value
+                redraw = True
             elif key == "font":
                 self._font = value
                 redraw = True
@@ -234,6 +289,22 @@ class RoundButton(tk.Canvas):
         fill, fg, border = self._colors()
         _round_rect(self, 0.5, 0.5, width - 1, height - 1, self._radius,
                     fill, border, 1)
+        if self._photo is not None:
+            photo_w = self._photo.width()
+            if self._anchor == "w":
+                self.create_image(16, height / 2, image=self._photo,
+                                  anchor="w")
+                text_x = 16 + photo_w + 10
+            else:
+                text_w = self._font.measure(self._text)
+                total = photo_w + 10 + text_w
+                start = max(8, (width - total) / 2)
+                self.create_image(start, height / 2, image=self._photo,
+                                  anchor="w")
+                text_x = start + photo_w + 10
+            self.create_text(text_x, height / 2, text=self._text, fill=fg,
+                             font=self._font, anchor="w")
+            return
         if self._anchor == "w":
             text_x = 16
             anchor = "w"
@@ -879,15 +950,40 @@ class GameHub:
         self._photos[key] = photo
         return photo
 
+    def _ui_icon_photo(self, name, size):
+        """v0.9.1 图标：PIL RGBA + LANCZOS + ImageTk，并缓存引用防 GC。"""
+        path = resolve_icon_path(name)
+        if not path:
+            return None
+        key = ("ui", path, int(size))
+        if key in self._photos:
+            return self._photos[key]
+        try:
+            img = Image.open(path).convert("RGBA")
+            bbox = img.getbbox()
+            if bbox:
+                img = img.crop(bbox)
+            side = max(img.size)
+            square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            square.paste(img, ((side - img.size[0]) // 2,
+                               (side - img.size[1]) // 2), img)
+            img = square.resize((max(1, int(size)), max(1, int(size))),
+                                Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img, master=self.root)
+        except Exception:
+            photo = None
+        self._photos[key] = photo
+        return photo
+
     # ---------------------------------------------------------- 控件
     def _button(self, parent, text, command, kind="normal", width=None,
-                font=None, state=None, anchor="center"):
+                font=None, state=None, anchor="center", photo=None):
         """v0.9：统一自绘圆角按钮（正常/悬停/按下/禁用/主按钮）。"""
         accent = self.settings.get("accent") or T.UI_ACCENT
         button = RoundButton(parent, text=text, command=command, kind=kind,
                              width=width, font=font or self.f_btn,
                              state=state or "normal", accent=accent,
-                             anchor=anchor)
+                             anchor=anchor, photo=photo)
         if kind == "primary":
             self._accent_buttons.append(button)
         return button
@@ -939,9 +1035,19 @@ class GameHub:
         self.root.geometry(
             f"{width}x{height}+{max(0, (sw - width) // 2)}"
             f"+{max(0, (sh - height) // 2 - 20)}")
+        self._window_icons = []
+        for icon_size in (ICON_SIZES["window"], ICON_SIZES["window_small"]):
+            photo = self._ui_icon_photo("brand", icon_size)
+            if photo is not None:
+                self._window_icons.append(photo)
         try:
-            self.root.iconphoto(
-                True, tk.PhotoImage(file=os.path.join(store.ASSETS, "hub.png")))
+            if self._window_icons:
+                self.root.iconphoto(True, *self._window_icons)
+            else:
+                fallback = tk.PhotoImage(
+                    file=os.path.join(store.ASSETS, "hub.png"))
+                self.root.iconphoto(True, fallback)
+                self._window_icons.append(fallback)
         except Exception:
             pass
         _dark_titlebar(self.root)
@@ -983,7 +1089,7 @@ class GameHub:
 
         head = tk.Frame(sidebar, bg=T.UI_SIDEBAR)
         head.pack(fill="x", padx=20, pady=(18, 6))
-        logo = self._icon_photo(os.path.join(store.ASSETS, "hub.png"), 42)
+        logo = self._ui_icon_photo("brand", ICON_SIZES["brand"])
         if logo is not None:
             tk.Label(head, image=logo, bg=T.UI_SIDEBAR).pack(side="left")
             self._logo_photo = logo
@@ -999,10 +1105,12 @@ class GameHub:
         nav.pack(fill="x", padx=12)
         items = (("home", "主页"), ("daily", "清日常"), ("settings", "设置"))
         for name, label in items:
+            icon = self._ui_icon_photo(name, ICON_SIZES["nav"])
             button = RoundButton(nav, text=label,
                                  command=lambda page=name: self.show_page(page),
                                  kind="ghost", height=37, anchor="w",
-                                 font=self.f_small, bg=T.UI_SIDEBAR)
+                                 font=self.f_small, bg=T.UI_SIDEBAR,
+                                 photo=icon)
             button.pack(fill="x", pady=1)
             button._selected = (name == "home")
             self._nav_buttons[name] = button
@@ -1033,8 +1141,10 @@ class GameHub:
             fill="x", padx=8, pady=(0, 3))
         about_buttons = tk.Frame(bottom, bg=T.UI_SIDEBAR)
         about_buttons.pack(fill="x")
+        about_icon = self._ui_icon_photo("about", 20)
         self._button(about_buttons, "关于软件", self.open_about,
-                     kind="ghost", anchor="w").pack(fill="x", pady=1)
+                     kind="ghost", anchor="w",
+                     photo=about_icon).pack(fill="x", pady=1)
         self._button(about_buttons, "检查软件更新", self.check_software_update,
                      kind="ghost", anchor="w").pack(fill="x", pady=1)
 
@@ -1091,6 +1201,21 @@ class GameHub:
         elif name == "settings":
             self._refresh_settings_view()
 
+    # ---------------------------------------------------------- 页面标题
+    def _page_title_box(self, parent, icon_name, title, subtitle):
+        box = tk.Frame(parent, bg=T.UI_BG)
+        photo = self._ui_icon_photo(icon_name, ICON_SIZES["page"])
+        if photo is not None:
+            tk.Label(box, image=photo, bg=T.UI_BG).pack(side="left",
+                                                       padx=(0, 10))
+        text = tk.Frame(box, bg=T.UI_BG)
+        text.pack(side="left")
+        self._label(text, title, color=T.UI_TEXT, font=self.f_title,
+                    bg=T.UI_BG).pack(anchor="w")
+        self._label(text, subtitle, color=T.UI_TEXT_3, font=self.f_small,
+                    bg=T.UI_BG).pack(anchor="w", pady=(3, 0))
+        return box
+
     # ---------------------------------------------------------- 主页
     def _build_home_page(self):
         page = self.pages["home"]
@@ -1100,12 +1225,10 @@ class GameHub:
         header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
                     pady=(T.SPACE_XL, T.SPACE_SM))
         header.columnconfigure(1, weight=1)
-        self._label(header, "主页", color=T.UI_TEXT, font=self.f_title,
-                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
-        self._label(header, "选择游戏行或「打开脚本」：未运行则启动，运行中则唤到前台",
-                    color=T.UI_TEXT_3, font=self.f_small,
-                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
-                                     pady=(4, 0))
+        self._page_title_box(
+            header, "home", "主页",
+            "选择游戏行或「打开脚本」：未运行则启动，运行中则唤到前台").grid(
+            row=0, column=0, rowspan=2, sticky="w")
         actions = tk.Frame(header, bg=T.UI_BG)
         actions.grid(row=0, column=2, rowspan=2, sticky="e")
         self._button(actions, "添加游戏", self.add_app,
@@ -1306,12 +1429,10 @@ class GameHub:
         header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
                     pady=(T.SPACE_XL, 6))
         header.columnconfigure(0, weight=1)
-        self._label(header, "清日常", color=T.UI_TEXT, font=self.f_title,
-                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
-        self._label(header, "使用脚本自身已配置的任务；勾选决定队列，顺序可调；同一时刻只运行一项。",
-                    color=T.UI_TEXT_3, font=self.f_small,
-                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
-                                     pady=(4, 0))
+        self._page_title_box(
+            header, "daily", "清日常",
+            "使用脚本自身已配置的任务；勾选决定队列，顺序可调；同一时刻只运行一项。").grid(
+            row=0, column=0, rowspan=2, sticky="w")
         toolbar = tk.Frame(page, bg=T.UI_BG)
         toolbar.grid(row=1, column=0, sticky="we", padx=T.SPACE_XL,
                      pady=(4, 8))
@@ -1765,12 +1886,10 @@ class GameHub:
         header.grid(row=0, column=0, sticky="we", padx=T.SPACE_XL,
                     pady=(T.SPACE_XL, T.SPACE_SM))
         header.columnconfigure(0, weight=1)
-        self._label(header, "设置", color=T.UI_TEXT, font=self.f_title,
-                    bg=T.UI_BG).grid(row=0, column=0, sticky="w")
-        self._label(header, "配置会立即持久化到 config.json（保存失败会提示）",
-                    color=T.UI_TEXT_3, font=self.f_small,
-                    bg=T.UI_BG).grid(row=1, column=0, sticky="w",
-                                     pady=(4, 0))
+        self._page_title_box(
+            header, "settings", "设置",
+            "配置会立即持久化到 config.json（保存失败会提示）").grid(
+            row=0, column=0, rowspan=2, sticky="w")
         self._button(header, "保存设置", self._apply_settings,
                      kind="primary").grid(row=0, column=1, rowspan=2,
                                           sticky="e")
@@ -1951,7 +2070,7 @@ class GameHub:
         panel.pack(fill="both", expand=True, padx=T.SPACE_MD,
                    pady=T.SPACE_MD)
         body = panel.inner
-        logo = self._icon_photo(os.path.join(store.ASSETS, "hub.png"), 64)
+        logo = self._ui_icon_photo("about", ICON_SIZES["about"])
         if logo is not None:
             tk.Label(body, image=logo, bg=T.UI_PANEL).pack(pady=(0, 6))
         self._label(body, "All-My-Maa", color=T.UI_TEXT, font=self.f_title,

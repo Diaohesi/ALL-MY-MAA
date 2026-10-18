@@ -2,6 +2,23 @@
 
 > 最新版本在最上方。
 
+## v0.9.1 (2026-10-18)
+
+- **品牌图标**：应用图标改为 `assets/LinYuxia.png`，用于主窗口 / 任务栏（64 / 32px）与
+  侧边栏品牌（46px）
+- **四个子页面图标**：主页（手柄 `page_home.png`）、清日常（剑 `page_daily.png`）、
+  设置（雪花 `page_settings.png`）接入侧边栏导航与页面标题；关于（角色头像 `page_about.png`）
+  用于「关于软件」按钮与关于对话框
+- **图标回退**：品牌图标缺失时回退旧 `hub.png`；关于图标缺失时回退 `LinYuxia.png` / `hub.png`；
+  其它图标缺失时正常显示文字，不报错
+- **资源加载**：图标统一从 `store.ASSETS` 读取（源码运行 `assets/`，PyInstaller 打包版
+  `_MEIPASS/assets`），打包脚本的 `--add-data "assets;assets"` 会一并带上
+- 图标常量集中在 `gamehub/ui.py`（`BRAND_ICON_FILE` / `PAGE_ICON_FILES` / `ICON_SIZES` /
+  `ICON_FALLBACKS`）；新增 `assets/page_home.png`、`page_daily.png`、`page_settings.png`、
+  `page_about.png`、`LinYuxia.png`
+- 自测：`tools/test_ui_state.py` 增加图标映射 / 尺寸档 / 缺失回退断言（全绿）
+- 更新 README / 主页图标说明
+
 ## v0.9.0 (2026-10-18)
 
 - **界面美化与统一设计**：新增设计令牌（`gamehub/theme.py`）——统一 Microsoft YaHei UI 字体与

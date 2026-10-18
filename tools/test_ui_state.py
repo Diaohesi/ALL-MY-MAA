@@ -338,6 +338,56 @@ def test_format_changelog():
     check("License 清晰一行", ui._license_label(), "License：MIT License")
 
 
+def test_ui_icons():
+    print("\n=== v0.9.1 UI 图标映射/尺寸/回退 ===")
+    from PIL import Image
+    import shutil
+
+    check("品牌图标文件", ui.BRAND_ICON_FILE, "LinYuxia.png")
+    check("页面图标映射", ui.PAGE_ICON_FILES, {
+        "home": "page_home.png", "daily": "page_daily.png",
+        "settings": "page_settings.png", "about": "page_about.png"})
+    check("窗口尺寸档", (ui.ICON_SIZES["window"],
+                        ui.ICON_SIZES["window_small"]), (64, 32))
+    check("品牌尺寸 44-48", 44 <= ui.ICON_SIZES["brand"] <= 48, True)
+    check("导航尺寸 20-22", 20 <= ui.ICON_SIZES["nav"] <= 22, True)
+    check("页面尺寸 28-32", 28 <= ui.ICON_SIZES["page"] <= 32, True)
+    check("关于尺寸", ui.ICON_SIZES["about"] >= 48, True)
+
+    for name in ("brand", "home", "daily", "settings", "about"):
+        path = ui.icon_path(name)
+        check(f"{name} 图标存在", bool(path) and os.path.isfile(path), True)
+        check(f"{name} 图标文件名", os.path.basename(path),
+              ui.BRAND_ICON_FILE if name == "brand"
+              else ui.PAGE_ICON_FILES[name])
+    for name in ("brand", "home", "daily", "settings", "about"):
+        path = ui.icon_path(name)
+        with Image.open(path) as image:
+            check(f"{name} 源图 192×192", image.size, (192, 192))
+    check("未知图标返回空", ui.icon_path("bogus"), "")
+    check("未知图标无回退", ui.resolve_icon_path("bogus"), "")
+
+    real_hub = os.path.join(store.ASSETS, "hub.png")
+    real_brand = os.path.join(store.ASSETS, "LinYuxia.png")
+    real_page_home = os.path.join(store.ASSETS, "page_home.png")
+    empty = tempfile.mkdtemp(prefix="gh_icons_empty_")
+    with mock.patch.object(store, "ASSETS", empty):
+        check("缺资源 path 为空", ui.icon_path("brand"), "")
+        check("缺资源回退为空", ui.resolve_icon_path("brand"), "")
+        check("缺页面图标不崩溃", ui.resolve_icon_path("home"), "")
+        shutil.copyfile(real_hub, os.path.join(empty, "hub.png"))
+        check("品牌回退旧 hub.png",
+              ui.resolve_icon_path("brand"), os.path.join(empty, "hub.png"))
+        check("页面图标无回退", ui.resolve_icon_path("home"), "")
+        shutil.copyfile(real_brand, os.path.join(empty, "LinYuxia.png"))
+        check("关于回退 LinYuxia",
+              ui.resolve_icon_path("about"), os.path.join(empty, "LinYuxia.png"))
+        shutil.copyfile(real_page_home,
+                        os.path.join(empty, "page_home.png"))
+        check("补齐页面图标",
+              ui.icon_path("home"), os.path.join(empty, "page_home.png"))
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -351,6 +401,7 @@ def main():
         test_theme_tokens()
         test_release_parsing()
         test_format_changelog()
+        test_ui_icons()
     print("\nFAILURES:", failures if failures else "none")
     return 1 if failures else 0
 
