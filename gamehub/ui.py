@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import VERSION, daily, detector, render, store
+from . import VERSION, daily, detector, render, store, tray
 from . import theme as T
 
 TITLE = "All-My-Maa · 游戏脚本中心"
@@ -1366,6 +1366,18 @@ class GameHub:
         self._setup_borderless()
         self.root.after_idle(self._setup_borderless)
         self.root.after(300, self._setup_borderless)
+        self.tray = None
+        self._tray_hidden = False
+        try:
+            self.tray = tray.TrayManager(
+                self.root, on_show=self._show_from_tray,
+                on_exit=self._tray_exit,
+                icon_path=os.path.join(store.ASSETS, "hub.ico"),
+                tooltip=f"All-My-Maa v{VERSION}")
+            if self.settings.get("minimize_to_tray", True):
+                self.tray.start()
+        except Exception:
+            self.tray = None
 
     # ---------------------------------------------------------- 无边框窗口/标题栏
     def _build_titlebar(self):
@@ -1478,6 +1490,8 @@ class GameHub:
                     self.root.winfo_screenheight())
 
     def minimize_window(self):
+        if self._hide_to_tray():
+            return
         try:
             self.root.iconify()
         except Exception:
@@ -1487,6 +1501,46 @@ class GameHub:
                 ctypes.windll.user32.ShowWindow(hwnd, 6)
             except Exception:
                 pass
+
+    def _tray_enabled(self):
+        return bool(self.settings.get("minimize_to_tray", True))
+
+    def _hide_to_tray(self):
+        if not (self.tray and bool(
+                self.settings.get("minimize_to_tray", True))):
+            return False
+        try:
+            if not self.tray.start():
+                return False
+            self.root.withdraw()
+            self._tray_hidden = True
+            return True
+        except Exception:
+            return False
+
+    def _show_from_tray(self):
+        self._tray_hidden = False
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _tray_exit(self):
+        self._on_close(force=True)
+
+    def _sync_tray(self):
+        if self.tray is None:
+            return
+        try:
+            if self._tray_enabled():
+                self.tray.start()
+            else:
+                self.tray.stop()
+                self._tray_hidden = False
+        except Exception:
+            pass
 
     def toggle_maximize(self):
         if self._maximized:
@@ -2320,7 +2374,12 @@ class GameHub:
                 stop_btn.configure(state="normal" if active == key
                                    else "disabled")
             if hint is not None:
-                hint.configure(text=reason, fg="#ffce6b" if reason else T.UI_TEXT_3)
+                if reason:
+                    hint.configure(text=reason, fg="#ffce6b")
+                elif key == "nte":
+                    hint.configure(text=daily.MXU_UI_NOTE, fg=T.UI_TEXT_3)
+                else:
+                    hint.configure(text="", fg=T.UI_TEXT_3)
 
     # ---------------------------------------------------------- 设置页
     def _build_settings_page(self):
@@ -2434,13 +2493,26 @@ class GameHub:
                     bg=T.UI_PANEL).pack(side="left")
         self.close_action_var = tk.StringVar(
             value=self.settings.get("close_action", "exit"))
-        for value, label in (("exit", "退出程序"), ("minimize", "最小化到任务栏")):
+        for value, label in (("exit", "退出程序"),
+                             ("minimize", "最小化（按托盘设置）")):
             tk.Radiobutton(row2, text=label, value=value,
                            variable=self.close_action_var, bg=T.UI_PANEL,
                            fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
                            activebackground=T.UI_PANEL,
                            activeforeground=T.UI_TEXT,
                            font=self.f_small).pack(side="left", padx=(0, 12))
+        self.minimize_to_tray_var = tk.BooleanVar(
+            value=bool(self.settings.get("minimize_to_tray", True)))
+        tk.Checkbutton(launcher, text="最小化到系统托盘（关闭窗口选「最小化」时也隐藏到托盘）",
+                       variable=self.minimize_to_tray_var,
+                       bg=T.UI_PANEL, fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
+                       activebackground=T.UI_PANEL,
+                       activeforeground=T.UI_TEXT,
+                       font=self.f_small).pack(anchor="w", pady=2)
+        self._label(launcher,
+                    "关闭后可从托盘左键恢复或右键菜单退出；退出时会清理托盘图标。",
+                    color=T.UI_TEXT_3, font=self.f_aux, bg=T.UI_PANEL,
+                    wraplength=440, justify="left").pack(anchor="w")
 
         # 路径
         paths = section("路径", left_col)
@@ -3068,6 +3140,13 @@ class GameHub:
             return
         self.settings_root_var.set(self.search_root)
         self.clash_var.set(self.clash_exe or "")
+        try:
+            self.minimize_to_tray_var.set(
+                bool(self.settings.get("minimize_to_tray", True)))
+            self.close_action_var.set(
+                self.settings.get("close_action", "exit"))
+        except Exception:
+            pass
         self._refresh_accent_chips()
         try:
             labels = getattr(self, "_font_scale_map", {})
@@ -3125,6 +3204,7 @@ class GameHub:
             "check_update_on_start": bool(self.check_update_var.get()),
             "refresh_interval": float(self.refresh_var.get() or 1.5),
             "close_action": self.close_action_var.get() or "exit",
+            "minimize_to_tray": bool(self.minimize_to_tray_var.get()),
             "clash_exe": self.clash_var.get().strip(),
             "daily_default_timeout": timeout,
             "daily_show_preview": bool(self.preview_var.get()),
@@ -3137,6 +3217,7 @@ class GameHub:
             self.clash_exe = ""
             self.settings["clash_exe"] = ""
         self.adb_enabled = bool(self.settings.get("adb_enabled"))
+        self._sync_tray()
         try:
             detector.set_adb_enabled(self.adb_enabled)
         except Exception:
@@ -3833,8 +3914,10 @@ class GameHub:
                 pass
         self._toast_after = self.root.after(6000, lambda: self.toast_var.set(""))
 
-    def _on_close(self):
-        if self.settings.get("close_action") == "minimize":
+    def _on_close(self, force=False):
+        if not force and self.settings.get("close_action") == "minimize":
+            if self._hide_to_tray():
+                return
             self.root.iconify()
             return
         self._closing = True
@@ -3847,6 +3930,11 @@ class GameHub:
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         try:
             self.root.destroy()
         except Exception:

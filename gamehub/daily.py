@@ -14,7 +14,7 @@
 - 只结束「本次由 Hub 启动的进程」（ShellExecuteEx 拿到的进程句柄），
   绝不对用户自己开的进程做 taskkill；MAA 已在运行时只发热键、不接管进程。
 - 不自动改 MAA / ok-ww / MXU 的配置；前置不满足时明确提示设置方法。
-- 只启动脚本自身；异环例外：清日常前会先按 game_launch 打开启动器并等待游戏。
+- 只启动脚本自身；异环清日常会先打开 MaaNTE，再发送开始任务热键并等待结束。
 """
 import ctypes
 import json
@@ -23,6 +23,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.request
 from ctypes import wintypes
 
 from . import detector, store
@@ -54,7 +55,13 @@ MAA_FAILURE_MARKERS = ("任务出错:", "任务出错：")
 MAA_STOP_MARKERS = ("已停止", "正在停止……")
 MAA_DAILY_TASK_HINTS = ("开始唤醒", "自动公招", "基建换班", "信用收支",
                         "理智作战", "剩余理智", "领取奖励")
-PRE_GAME_WAIT_SECONDS = 300
+MXU_UI_START_MARKERS = ("开始执行任务", "任务已提交")
+MXU_UI_DONE_MARKERS = ("tasks-completed", "停止任务", "已停止",
+                       "任务已全部完成")
+MXU_UI_FAIL_MARKERS = ("任务出错", "执行失败")
+MXU_UI_NOTE = "异环：打开 MaaNTE → 发送开始任务（Ctrl+F10）→ 等待任务结束"
+MXU_HTTP_DEFAULT_PORT = 12701
+MXU_HTTP_FALLBACK_SECONDS = 10
 
 # 运行时可被测试替换的钩子
 _now = time.monotonic
@@ -331,6 +338,125 @@ def _suggest_mxu_instance(app, instances):
 def mxu_config(app):
     """读取 MXU 配置文件。"""
     return _read_json(mxu_paths(app)["config"])
+
+
+def mxu_instance_id(app, name):
+    for row in mxu_instances(app):
+        if row["name"] == name:
+            return row.get("id") or row.get("uuid") or ""
+    return ""
+
+
+def mxu_ui_hotkey(app):
+    """读取 MaaNTE「开始任务」全局热键；未启用/无效返回 None。"""
+    data = mxu_config(app)
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) \
+        else {}
+    hotkeys = settings.get("hotkeys")
+    if not isinstance(hotkeys, dict):
+        return None
+    if hotkeys.get("globalEnabled") is False:
+        return None
+    raw = hotkeys.get("startTasks")
+    if isinstance(raw, dict):
+        key = str(raw.get("key") or "").strip()
+        mods = raw.get("modifiers") or raw.get("mods") or []
+        if isinstance(mods, str):
+            mods = [part.strip() for part in re.split(r"[+,]", mods)
+                    if part.strip()]
+        if key and _vk_code(key) is not None:
+            mods = [str(item).strip() for item in mods if str(item).strip()]
+            return {"key": key, "modifiers": mods,
+                    "text": " + ".join(mods + [key])}
+        return None
+    if isinstance(raw, str) and raw.strip():
+        return _parse_hotkey_text(raw)
+    return None
+
+
+def mxu_latest_log(app):
+    """MaaNTE debug 目录下最新的 .log（tauri 日志按日期滚动）。"""
+    paths = mxu_paths(app)
+    debug = os.path.join(paths["base"], "debug") if paths["base"] else ""
+    if debug and os.path.isdir(debug):
+        try:
+            files = [os.path.join(debug, name)
+                     for name in os.listdir(debug)
+                     if name.lower().endswith(".log")
+                     and not name.lower().startswith("maafw")]
+            files = [path for path in files if os.path.isfile(path)]
+            if files:
+                return max(files, key=os.path.getmtime)
+        except OSError:
+            pass
+    return paths["log"] if paths["log"] and os.path.isfile(paths["log"]) \
+        else ""
+
+
+def mxu_web_port(app):
+    settings = mxu_config(app).get("settings")
+    if isinstance(settings, dict):
+        try:
+            return int(settings.get("webServerPort")
+                       or MXU_HTTP_DEFAULT_PORT)
+        except (TypeError, ValueError):
+            pass
+    return MXU_HTTP_DEFAULT_PORT
+
+
+def mxu_http_url(app):
+    return f"http://127.0.0.1:{mxu_web_port(app)}/maa/state"
+
+
+def _mxu_state_row(data, instance_id, instance_name):
+    """在 /maa/state 的任意嵌套结构中按 id/name 找实例状态。"""
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if instance_id and str(node.get("id") or
+                                   node.get("instance_id") or "") == \
+                    str(instance_id):
+                found.append(node)
+            elif instance_name and str(node.get("name") or "") == \
+                    str(instance_name):
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return found[0] if found else None
+
+
+def mxu_http_state(app, instance_name=""):
+    """轮询 MaaNTE 本地 HTTP /maa/state；返回 running/status/found。"""
+    url = mxu_http_url(app)
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as response:
+            body = response.read()
+        data = json.loads(body.decode("utf-8", "replace"))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "url": url}
+    instance_id = mxu_instance_id(app, instance_name) if instance_name else ""
+    row = _mxu_state_row(data, instance_id, instance_name)
+    if not isinstance(row, dict):
+        return {"ok": True, "found": False, "running": False,
+                "status": "", "url": url}
+    state = row.get("task_run_state") or row.get("taskRunState") or {}
+    if not isinstance(state, dict):
+        state = {}
+    running = row.get("is_running")
+    if running is None:
+        running = row.get("isRunning")
+    if running is None:
+        running = state.get("is_running", state.get("isRunning", False))
+    status = (state.get("overall_status") or state.get("overallStatus")
+              or row.get("overall_status") or row.get("overallStatus") or "")
+    return {"ok": True, "found": True, "running": bool(running),
+            "status": str(status), "url": url}
 
 
 def effective_settings(app, settings=None):
@@ -739,33 +865,7 @@ def _plan_mxu(app, settings, plan):
         elif row["enabled_count"] <= 1:
             plan["warnings"].append(
                 f"实例「{instance}」只启用了 {row['enabled_count']} 个任务，请确认这就是日常任务")
-        if app.get("key") == "nte":
-            # 异环没有 MaaNTE LaunchGamePC：由 Hub 先打开启动器等游戏
-            if _game_running(app):
-                plan["notes"].append("已检测到异环游戏在运行")
-            else:
-                try:
-                    launch_spec = store.build_game_launch(app)
-                except Exception as exc:
-                    launch_spec = {}
-                    plan["warnings"].append(f"读取异环启动器失败：{exc}")
-                if not launch_spec.get("exe") or \
-                        not os.path.isfile(launch_spec["exe"]):
-                    plan["errors"].append(
-                        "未找到异环启动器 NTELauncher.exe：请先在卡片「启动游戏」"
-                        "里设置，或确认异环安装完整")
-                else:
-                    plan["pre_game"] = {
-                        "spec": launch_spec,
-                        "timeout_s": PRE_GAME_WAIT_SECONDS,
-                        "hint": "将先打开异环启动器，请登录并进入游戏",
-                    }
-                    plan["notes"].append(
-                        "将先打开异环启动器并等待游戏窗口（最长 "
-                        f"{PRE_GAME_WAIT_SECONDS} 秒）：请登录并点击开始游戏")
-                    plan["notes"].append(
-                        "确认游戏运行后再启动 MaaNTE --autostart")
-        elif not row["has_launch_pretask"] and not _game_running(app):
+        if not row["has_launch_pretask"] and not _game_running(app):
             plan["warnings"].append(
                 "该实例没有 LaunchGamePC 前置任务且游戏未运行，任务可能失败")
     if _script_running(app):
@@ -800,6 +900,73 @@ def _plan_mxu(app, settings, plan):
         plan["notes"].append("（--quit-after-run 为完成判定所需，任务结束后 MXU 仍会退出）")
 
 
+def _plan_mxu_ui(app, settings, plan):
+    """异环：打开 MaaNTE UI → 发送开始任务热键 → 等待任务结束。"""
+    paths = mxu_paths(app)
+    if not paths["exe"] or not os.path.isfile(paths["exe"]):
+        plan["errors"].append(
+            f"未找到 {os.path.basename(paths['exe']) or 'MaaNTE'} 程序")
+        return
+    if _script_running(app):
+        plan["errors"].append(
+            f"{app.get('script') or '脚本'} 已在运行：请先关闭脚本再执行清日常")
+    instances = mxu_instances(app)
+    names = [row["name"] for row in instances]
+    instance = str(settings.get("instance") or "").strip()
+    row = next((item for item in instances if item["name"] == instance), None)
+    if not names:
+        plan["errors"].append(
+            "没有读到 MXU 实例配置：请先在脚本里创建实例并配置日常任务")
+    elif not instance:
+        plan["errors"].append(
+            "未选择 MXU 实例：请在一键清日常设置里选择实例（可用："
+            + "、".join(names) + "）")
+    elif row is None:
+        plan["errors"].append(
+            f"实例「{instance}」不存在：请到脚本里创建/选择实例（可用："
+            + "、".join(names) + "）")
+    elif row["enabled_count"] <= 0:
+        plan["errors"].append(
+            f"实例「{instance}」没有启用任何任务：请先在该实例里勾选日常任务")
+    hotkey = mxu_ui_hotkey(app)
+    log_path = mxu_latest_log(app)
+    port = mxu_web_port(app)
+    command = _build_command(paths["exe"], [])
+    plan.update({
+        "mode": "mxu_ui",
+        "exe": paths["exe"],
+        "cwd": paths["base"],
+        "log_path": log_path,
+        "success_patterns": list(MXU_UI_DONE_MARKERS),
+        "failure_patterns": list(MXU_UI_FAIL_MARKERS),
+        "settle_seconds": 0,
+        "hotkey": hotkey,
+        "instance": instance,
+        "instance_id": mxu_instance_id(app, instance),
+        "web_port": port,
+        "params": "",
+        "argv": [paths["exe"]],
+        "args": [],
+        "command_text": command["command_text"],
+        "_app": app,
+    })
+    if hotkey:
+        plan["notes"].append(f"打开 MaaNTE 后发送开始任务热键：{hotkey['text']}")
+    else:
+        plan["warnings"].append(
+            "未读到 MaaNTE「开始任务」热键或 globalEnabled=false："
+            "打开后需要手动点击开始任务（不会静默成功）")
+        plan["notes"].append(MXU_UI_NOTE)
+    plan["notes"].append(
+        f"等待任务结束：优先轮询 http://127.0.0.1:{port}/maa/state"
+        f"（实例 {instance}）；HTTP 不可用回退 debug 日志")
+    plan["notes"].append(
+        "任务完成后保留 MaaNTE 窗口（不结束本次启动的进程）；"
+        "后续清日常若需要脚本会提示先关闭")
+    plan["notes"].append(
+        "将以管理员权限启动 MaaNTE（正常 UI，不带 --autostart/--quit-after-run）")
+
+
 def plan_for(app, settings=None):
     """生成某张卡片的清日常执行计划（不启动任何进程）。"""
     app = app or {}
@@ -823,7 +990,7 @@ def plan_for(app, settings=None):
     elif key == "maa":
         _plan_maa(app, plan["settings"], plan)
     elif key == "nte":
-        _plan_mxu(app, plan["settings"], plan)
+        _plan_mxu_ui(app, plan["settings"], plan)
     elif key == "maaend":
         _plan_mxu(app, plan["settings"], plan)
     else:
@@ -982,83 +1149,18 @@ def _run_okww(plan, stop_event, on_event, launcher):
     return result
 
 
-def _launch_pre_game(spec):
-    """按 game_launch spec 普通权限启动游戏启动器（不强制提权）。"""
-    exe = str(spec.get("exe") or "").strip()
-    if not exe or not os.path.isfile(exe):
-        return None, f"启动器不存在：{exe or '(空)'}"
-    args = [str(item) for item in (spec.get("args") or []) if str(item)]
-    cwd = spec.get("cwd") or os.path.dirname(exe)
-    try:
-        proc = subprocess.Popen(
-            [exe] + args, cwd=cwd, close_fds=True,
-            creationflags=0x00000008 | 0x00000200)
-        return proc, ""
-    except Exception as exc:
-        return None, f"启动异环启动器失败：{exc}"
-
-
-def _terminate_quiet(proc):
-    try:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-    except Exception:
-        pass
-
-
 def _run_mxu(plan, stop_event, on_event, launcher):
+    """终末地 MXU：--autostart/--quit-after-run，按进程退出判定完成。"""
     started = time.time()
     watcher = LogWatcher(plan.get("log_path"))
-    app = plan.get("_app") or {}
-    pre_handle = None
-    pre = plan.get("pre_game") or {}
-    if pre.get("spec") and app and not _game_running(app):
-        hint = pre.get("hint") or "将先打开异环启动器，请登录并进入游戏"
-        _emit(on_event, type="log", text=hint)
-        try:
-            pre_handle, error = _launch_pre_game(pre["spec"])
-        except Exception as exc:
-            pre_handle, error = None, str(exc)
-        if pre_handle is None:
-            result = _base_result(plan, FAILED, error or "启动器启动失败",
-                                  started=started, log_watcher=watcher)
-            _emit(on_event, type="done", result=result)
-            return result
-        deadline = _now() + int(pre.get("timeout_s")
-                                or PRE_GAME_WAIT_SECONDS)
-        wait_state = ""
-        while _now() < deadline:
-            if _stop_requested(stop_event):
-                wait_state = "stop"
-                break
-            if _game_running(app):
-                wait_state = "ok"
-                break
-            _sleep(1)
-        if wait_state != "ok":
-            _terminate_quiet(pre_handle)
-            if wait_state == "stop":
-                result = _base_result(plan, STOPPED, "用户停止（未启动 MaaNTE）",
-                                      started=started, log_watcher=watcher)
-            else:
-                result = _base_result(
-                    plan, FAILED,
-                    f"等待异环游戏启动超时（{pre.get('timeout_s') or PRE_GAME_WAIT_SECONDS} 秒）："
-                    "请在启动器中登录并进入游戏后重试",
-                    started=started, log_watcher=watcher)
-            _emit(on_event, type="done", result=result)
-            return result
-        _emit(on_event, type="log", text="已检测到异环游戏窗口，开始 MaaNTE 清日常")
     try:
         handle = launcher(plan["exe"], plan["params"], plan["cwd"])
     except DailyError as exc:
-        _terminate_quiet(pre_handle)
         result = _base_result(plan, FAILED, str(exc), started=started,
                               log_watcher=watcher)
         _emit(on_event, type="done", result=result)
         return result
     except Exception as exc:
-        _terminate_quiet(pre_handle)
         result = _base_result(plan, FAILED, f"启动失败：{exc}", started=started,
                               log_watcher=watcher)
         _emit(on_event, type="done", result=result)
@@ -1073,7 +1175,6 @@ def _run_mxu(plan, stop_event, on_event, launcher):
             wait = _wait_handle(handle, stop_event, 400)
             if wait == "stop":
                 handle.terminate()
-                _terminate_quiet(pre_handle)
                 result = _base_result(plan, STOPPED, "用户停止，已结束本次启动的进程",
                                       pid=handle.pid, started=started,
                                       log_watcher=watcher)
@@ -1090,13 +1191,192 @@ def _run_mxu(plan, stop_event, on_event, launcher):
                 break
             if _now() > deadline:
                 handle.terminate()
-                _terminate_quiet(pre_handle)
                 result = _base_result(
                     plan, TIMEOUT,
                     f"超时 {plan['timeout_min']} 分钟，已结束本次启动的 MXU 进程",
                     pid=handle.pid, started=started, log_watcher=watcher)
                 break
             _sleep(POLL_SECONDS)
+    finally:
+        handle.close()
+        if result:
+            _emit(on_event, type="done", result=result)
+    return result
+
+
+def _mxu_ui_window(pid=None):
+    try:
+        windows = detector.snapshot_windows(force=True)
+    except Exception:
+        return None
+    for win in windows:
+        try:
+            win_pid = int(win.get("pid") or 0)
+        except (TypeError, ValueError):
+            win_pid = 0
+        title = str(win.get("title") or "").lower()
+        if pid and win_pid == int(pid):
+            return win
+        if not pid and any(word in title for word in ("maante", "maa", "mxu")):
+            return win
+    return None
+
+
+def _mxu_marker_hit(text, markers):
+    if not text:
+        return ""
+    low = text.lower()
+    for marker in markers:
+        if marker.lower() in low:
+            return marker
+    return ""
+
+
+def _run_mxu_ui(plan, stop_event, on_event, launcher):
+    """异环：打开 MaaNTE UI → 发送开始任务热键 → HTTP/日志等待结束。"""
+    started = time.time()
+    watcher = LogWatcher(plan.get("log_path"))
+    app = plan.get("_app") or {}
+    handle = None
+    try:
+        handle = launcher(plan["exe"], "", plan["cwd"])
+    except DailyError as exc:
+        result = _base_result(plan, FAILED, str(exc), started=started,
+                              log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
+    except Exception as exc:
+        result = _base_result(plan, FAILED, f"启动失败：{exc}", started=started,
+                              log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
+    pid = handle.pid
+    _emit(on_event, type="state", key=plan["key"], state=STARTING,
+          pid=pid, game=plan.get("game"))
+    window = None
+    deadline = _now() + 60
+    while _now() < deadline:
+        if _stop_requested(stop_event):
+            handle.terminate()
+            result = _base_result(plan, STOPPED, "用户停止", pid=pid,
+                                  started=started, log_watcher=watcher)
+            handle.close()
+            _emit(on_event, type="done", result=result)
+            return result
+        window = _mxu_ui_window(pid)
+        if window:
+            break
+        _sleep(0.5)
+    if not window:
+        handle.terminate()
+        handle.close()
+        result = _base_result(plan, FAILED, "未检测到 MaaNTE 主窗口",
+                              pid=pid, started=started, log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
+    try:
+        detector.focus_window(window.get("hwnd"))
+    except Exception:
+        pass
+    _sleep(0.4)
+    hotkey = plan.get("hotkey")
+    sent = False
+    if hotkey:
+        try:
+            sent = send_hotkey(hotkey)
+        except Exception:
+            sent = False
+    if not sent:
+        text = ("未找到/无法发送 MaaNTE「开始任务」热键："
+                "请手动点击 MaaNTE 中的开始任务")
+        _emit(on_event, type="manual", text=text)
+        handle.close()
+        result = _base_result(plan, FAILED, text, pid=pid,
+                              started=started, log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
+    _emit(on_event, type="state", key=plan["key"], state=RUNNING,
+          pid=pid, game=plan.get("game"))
+    _emit(on_event, type="log", text=f"已发送开始任务热键 {hotkey['text']}")
+    timeout_deadline = _now() + plan["timeout_min"] * 60
+    http_fail_since = None
+    use_http = True
+    http_started = False
+    result = None
+    try:
+        while True:
+            if use_http:
+                state = mxu_http_state(app, plan.get("instance") or "")
+                if state.get("ok"):
+                    http_fail_since = None
+                    status = str(state.get("status") or "").lower()
+                    if state.get("running"):
+                        if not http_started:
+                            http_started = True
+                            _emit(on_event, type="log",
+                                  text="HTTP 检测到任务正在运行")
+                    elif http_started:
+                        ok_state = "fail" not in status and \
+                            "error" not in status
+                        result = _base_result(
+                            plan, FINISHED if ok_state else FAILED,
+                            f"任务结束（HTTP overall_status={status or 'unknown'}）；"
+                            "MaaNTE 窗口保留", pid=pid, started=started,
+                            log_watcher=watcher)
+                        break
+                    elif status in ("succeeded", "failed", "stopped"):
+                        result = _base_result(
+                            plan, FINISHED if status != "failed" else FAILED,
+                            f"任务已结束（HTTP overall_status={status}）；"
+                            "MaaNTE 窗口保留", pid=pid, started=started,
+                            log_watcher=watcher)
+                        break
+                else:
+                    if http_fail_since is None:
+                        http_fail_since = _now()
+                    elif _now() - http_fail_since >= MXU_HTTP_FALLBACK_SECONDS:
+                        use_http = False
+                        _emit(on_event, type="log",
+                              text="HTTP 状态不可用，改用 MaaNTE debug 日志判定")
+            text = watcher.read()
+            if text:
+                if _mxu_marker_hit(text, MXU_UI_START_MARKERS):
+                    http_started = True
+                done = _mxu_marker_hit(text, MXU_UI_DONE_MARKERS)
+                if done:
+                    result = _base_result(
+                        plan, FINISHED,
+                        f"日志检测到任务结束标记「{done}」；MaaNTE 窗口保留",
+                        pid=pid, started=started, log_watcher=watcher)
+                    break
+                failed_marker = _mxu_marker_hit(text, MXU_UI_FAIL_MARKERS)
+                if failed_marker:
+                    result = _base_result(
+                        plan, FAILED,
+                        f"日志检测到失败标记「{failed_marker}」",
+                        pid=pid, started=started, log_watcher=watcher)
+                    break
+            if _stop_requested(stop_event):
+                handle.terminate()
+                result = _base_result(plan, STOPPED,
+                                      "用户停止，已结束本次启动的 MaaNTE",
+                                      pid=pid, started=started,
+                                      log_watcher=watcher)
+                break
+            wait = _wait_handle(handle, stop_event, 400)
+            if wait == "exit":
+                result = _base_result(
+                    plan, FAILED, "MaaNTE 已退出，但未检测到任务结束",
+                    pid=pid, started=started, log_watcher=watcher)
+                break
+            if _now() > timeout_deadline:
+                handle.terminate()
+                result = _base_result(
+                    plan, TIMEOUT,
+                    f"超时 {plan['timeout_min']} 分钟，已结束本次启动的 MaaNTE",
+                    pid=pid, started=started, log_watcher=watcher)
+                break
+            _sleep(1)
     finally:
         handle.close()
         if result:
@@ -1305,6 +1585,8 @@ def run(app, settings=None, *, dry_run=False, stop_event=None, on_event=None,
             return _run_maa(plan, stop_event, on_event, launcher)
         if mode == "mxu":
             return _run_mxu(plan, stop_event, on_event, launcher)
+        if mode == "mxu_ui":
+            return _run_mxu_ui(plan, stop_event, on_event, launcher)
     except Exception as exc:       # 兜底：执行层异常不静默崩溃
         result = _base_result(plan, FAILED, f"执行异常：{exc}")
         _emit(on_event, type="done", result=result)

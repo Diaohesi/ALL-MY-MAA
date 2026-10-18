@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,6 +38,7 @@ def test_settings_clean():
     check("缺省 accent", defaults["accent"], "#4fc3ff")
     check("缺省刷新间隔", defaults["refresh_interval"], 1.5)
     check("缺省关闭行为", defaults["close_action"], "exit")
+    check("缺省最小化到托盘", defaults["minimize_to_tray"], True)
 
     cleaned = store._clean_settings({
         "accent": "#B98BFF", "check_update_on_start": False,
@@ -44,11 +46,13 @@ def test_settings_clean():
         "clash_exe": r"C:\Clash\clash-verge.exe",
         "daily_default_timeout": 9999, "daily_show_preview": False,
         "adb_enabled": True, "daily_close_after": False,
+        "minimize_to_tray": False,
     })
     check("accent 小写归一", cleaned["accent"], "#b98bff")
     check("check_update_on_start", cleaned["check_update_on_start"], False)
     check("refresh 2.0 保留", cleaned["refresh_interval"], 2.0)
     check("close_action minimize", cleaned["close_action"], "minimize")
+    check("minimize_to_tray false 保留", cleaned["minimize_to_tray"], False)
     check("默认超时上限", cleaned["daily_default_timeout"], 600)
     check("adb_enabled", cleaned["adb_enabled"], True)
     check("daily_show_preview", cleaned["daily_show_preview"], False)
@@ -59,6 +63,7 @@ def test_settings_clean():
     check("非法 accent 回退", bad["accent"], "#4fc3ff")
     check("非法刷新间隔回退", bad["refresh_interval"], 1.5)
     check("非法关闭行为回退", bad["close_action"], "exit")
+    check("非法托盘设置回退", bad["minimize_to_tray"], True)
     check("负超时回退最小值", bad["daily_default_timeout"], 1)
 
     check("refresh_delay 1.0", ui._refresh_delay_ms({"refresh_interval": 1.0}),
@@ -477,6 +482,50 @@ def test_auto_update_logic():
               "auto_download_update"], True)
 
 
+def test_minimize_to_tray_branch():
+    print("\n=== 最小化到托盘分支（mock tray） ===")
+
+    class FakeTray:
+        def __init__(self, ok=True):
+            self.ok = ok
+            self.starts = 0
+            self.stops = 0
+
+        def start(self):
+            self.starts += 1
+            return self.ok
+
+        def stop(self):
+            self.stops += 1
+
+    class FakeRoot:
+        def __init__(self):
+            self.withdraw_calls = 0
+
+        def withdraw(self):
+            self.withdraw_calls += 1
+
+    obj = SimpleNamespace(settings={"minimize_to_tray": True},
+                          tray=FakeTray(True), root=FakeRoot(),
+                          _tray_hidden=False)
+    check("开启托盘 -> 隐藏", ui.GameHub._hide_to_tray(obj), True)
+    check("withdraw 调用", obj.root.withdraw_calls, 1)
+    check("隐藏标记", obj._tray_hidden, True)
+
+    obj2 = SimpleNamespace(settings={"minimize_to_tray": False},
+                           tray=FakeTray(True), root=FakeRoot(),
+                           _tray_hidden=False)
+    check("关闭托盘 -> 传统最小化",
+          ui.GameHub._hide_to_tray(obj2), False)
+    check("不 withdraw", obj2.root.withdraw_calls, 0)
+
+    obj3 = SimpleNamespace(settings={"minimize_to_tray": True},
+                           tray=FakeTray(False), root=FakeRoot(),
+                           _tray_hidden=False)
+    check("托盘失败 -> 回退", ui.GameHub._hide_to_tray(obj3), False)
+    check("失败不 withdraw", obj3.root.withdraw_calls, 0)
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -492,6 +541,7 @@ def main():
         test_format_changelog()
         test_ui_icons()
         test_auto_update_logic()
+        test_minimize_to_tray_branch()
     print("\nFAILURES:", failures if failures else "none")
     return 1 if failures else 0
 

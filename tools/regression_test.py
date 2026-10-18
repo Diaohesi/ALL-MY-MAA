@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 # 保证从任意 CWD 运行都能 import gamehub
@@ -28,7 +29,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gamehub import daily, detector, elevation, render, store, theme, ui  # noqa: E402
+from gamehub import (daily, detector, elevation, render, store, theme, tray,
+                     ui)  # noqa: E402
 
 ASSETS = os.path.join(REPO_ROOT, "assets")
 
@@ -1744,11 +1746,13 @@ def _make_mxu_daily(tmp_dir, key="nte", instances=None):
     script = "MaaNTE" if key == "nte" else "MaaEnd"
     exe = _touch(os.path.join(tmp_dir, script, f"{script}.exe"))
     if key == "nte" and instances is None:
-        # v0.10.4：异环与终末地同用 MXU --autostart（不再热键/UI）
-        instances = [{"name": "挂机任务", "tasks": [
+        # v0.11.0：异环打开 MaaNTE UI + 热键开始任务
+        instances = [{"id": "nte-inst", "name": "挂机任务", "tasks": [
             {"taskName": "FishNew", "enabled": True},
             {"taskName": "DailyTask", "enabled": False}]}]
-        config = {"instances": instances}
+        config = {"settings": {"hotkeys": {
+            "startTasks": "Ctrl+F10", "globalEnabled": True}},
+            "instances": instances}
     elif instances is None:
         config = {"instances": [
             {"name": "全套日常", "tasks": [
@@ -1874,10 +1878,13 @@ class DailyPlanTests(TempDirTest):
         self.assertEqual(maa["hotkey"]["text"], "Alt, Control, Shift + L")
         self.assertEqual(maa["enabled_tasks"], ["开始唤醒", "自动公招"])
         nte = by_key["nte"]
-        self.assertEqual(nte["mode"], "mxu")
+        self.assertEqual(nte["mode"], "mxu_ui")
         self.assertIn("MaaNTE.exe", nte["command_text"])
-        self.assertIn('--instance "挂机任务"', nte["params"])
-        self.assertIn("--quit-after-run", nte["params"])
+        self.assertNotIn("--autostart", nte["params"])
+        self.assertNotIn("--quit-after-run", nte["params"])
+        self.assertEqual(nte["hotkey"]["text"], "Ctrl + F10")
+        self.assertEqual(nte["instance"], "挂机任务")
+        self.assertEqual(nte["web_port"], 12701)
         self.assertEqual(nte["errors"], [])
         maaend = by_key["maaend"]
         self.assertIn('--instance "全套日常"', maaend["params"])
@@ -1920,34 +1927,26 @@ class DailyPlanTests(TempDirTest):
             override["daily"] = store._clean_daily(
                 {"instance": "快速日常"}, "maaend")
             override_plan = daily.plan_for(override)
-        # 异环/终末地共用 MXU --autostart --instance ... --quit-after-run
-        self.assertEqual(nte_plan["mode"], "mxu")
-        self.assertIn('--instance "挂机任务"', nte_plan["params"])
-        self.assertIn("--autostart", nte_plan["params"])
-        self.assertTrue(nte_plan["params"].endswith("--quit-after-run"))
+        # 异环 v0.11 为 mxu_ui（打开 UI+热键），终末地/覆盖仍为 MXU CLI
+        self.assertEqual(nte_plan["mode"], "mxu_ui")
+        self.assertEqual(nte_plan["hotkey"]["text"], "Ctrl + F10")
+        self.assertEqual(nte_plan["instance"], "挂机任务")
+        self.assertNotIn("--autostart", nte_plan["params"])
         self.assertIn('--instance "全套日常"', maaend_plan["params"])
         self.assertIn('--instance "快速日常"', override_plan["params"])
         self.assertIn("--autostart", override_plan["params"])
         self.assertTrue(override_plan["params"].endswith("--quit-after-run"))
 
-    def test_nte_and_maaend_command_shape_consistent(self):
-        """异环与终末地命令形状一致：--autostart/--instance/--quit-after-run。"""
-        nte = _make_mxu_daily(self.tmp, "nte")
+    def test_maaend_mxu_command_shape(self):
         maaend = _make_mxu_daily(self.tmp, "maaend")
         p1, p2, p3 = self._patches()
         with p1, p2, p3:
-            nte_plan = daily.plan_for(nte)
-            maaend_plan = daily.plan_for(maaend)
-        for plan in (nte_plan, maaend_plan):
-            self.assertEqual(plan["mode"], "mxu")
-            self.assertEqual(plan["args"][:1], ["--autostart"])
-            self.assertEqual(plan["args"][-1], "--quit-after-run")
-            self.assertIn("--instance", plan["args"])
-            self.assertEqual(plan["argv"][1:4],
-                             ["--autostart", "--instance",
-                              plan["settings"]["instance"]])
-        self.assertEqual(nte_plan["timeout_min"], 120)
-        self.assertEqual(maaend_plan["timeout_min"], 150)
+            plan = daily.plan_for(maaend)
+        self.assertEqual(plan["mode"], "mxu")
+        self.assertEqual(plan["args"][:1], ["--autostart"])
+        self.assertEqual(plan["args"][-1], "--quit-after-run")
+        self.assertIn("--instance", plan["args"])
+        self.assertEqual(plan["timeout_min"], 150)
 
     def test_plan_settings_override(self):
         app, _log, _gui = _make_maa_daily(self.tmp)
@@ -2062,37 +2061,6 @@ class DailyPreconditionTests(TempDirTest):
             self.assertTrue(any("没有启用任何任务" in error
                                 for error in plan3["errors"]))
 
-    def test_nte_pre_game_plan_and_missing_launcher(self):
-        nte = _make_mxu_daily(self.tmp, "nte")
-        p1, p2, p3 = self._patch(game_running=False)
-        with p1, p2, p3:
-            plan = daily.plan_for(nte)
-        self.assertEqual(plan["mode"], "mxu")
-        self.assertTrue(plan.get("pre_game", {}).get("spec"))
-        self.assertEqual(os.path.basename(plan["pre_game"]["spec"]["exe"]),
-                         "NTELauncher.exe")
-        self.assertEqual(plan["pre_game"]["timeout_s"], 300)
-        self.assertEqual(plan["errors"], [])
-        self.assertIn("--quit-after-run", plan["params"])
-        self.assertTrue(any("启动器" in note or "登录" in note
-                            for note in plan["notes"]))
-
-        # 游戏已运行 -> 不安排 pre_game
-        p1, p2, p3 = self._patch(game_running=True)
-        with p1, p2, p3:
-            plan2 = daily.plan_for(nte)
-        self.assertIsNone(plan2.get("pre_game"))
-        self.assertEqual(plan2["errors"], [])
-
-        # 启动器缺失 -> 明确报错
-        missing = _make_mxu_daily(os.path.join(self.tmp, "missing"), "nte")
-        os.remove(missing["game_exe"])
-        missing["game_exe"] = missing["game_exe"] + ".gone"
-        p1, p2, p3 = self._patch(game_running=False)
-        with p1, p2, p3:
-            plan3 = daily.plan_for(missing)
-        self.assertTrue(any("启动器" in error for error in plan3["errors"]))
-
 
 class DailyStateMachineTests(TempDirTest):
     """单游戏状态机：finished / failed / timeout / stopped / attach。"""
@@ -2155,95 +2123,24 @@ class DailyStateMachineTests(TempDirTest):
         self.assertTrue(handle2.terminated)
 
     def test_mxu_finished_and_timeout(self):
-        # 异环/终末地同走 --autostart MXU：进程退出 finished / 超时 timeout
-        for key in ("nte", "maaend"):
-            app = _make_mxu_daily(self.tmp, key)
-            clock = FakeClock()
-            result = self._run(app, clock,
-                               FakeHandle(clock, exit_calls=1),
-                               os.path.join(self.tmp, key + ".log"))
-            self.assertEqual(result["state"], daily.FINISHED)
-            self.assertIn("MXU 进程已退出", result["reason"])
-
-            app2 = _make_mxu_daily(os.path.join(self.tmp, "mxu2_" + key),
-                                   key)
-            app2["daily"] = store._clean_daily({"timeout_min": 1}, key)
-            clock2 = FakeClock()
-            handle2 = FakeHandle(clock2, exit_calls=None)
-            result2 = self._run(app2, clock2, handle2,
-                                os.path.join(self.tmp, "mxu2_" + key + ".log"))
-            self.assertEqual(result2["state"], daily.TIMEOUT)
-            self.assertTrue(handle2.terminated)
-
-    def test_mxu_pre_game_then_autostart(self):
-        class PreProc:
-            def __init__(self):
-                self.terminated = False
-
-            def poll(self):
-                return None
-
-            def terminate(self):
-                self.terminated = True
-
-        nte = _make_mxu_daily(self.tmp, "nte")
+        # 终末地 MXU CLI：进程退出 finished / 超时 timeout
+        key = "maaend"
+        app = _make_mxu_daily(self.tmp, key)
         clock = FakeClock()
-        handle = FakeHandle(clock, exit_calls=1)
-        pre = PreProc()
-        calls = []
-        states = [False, False, True]      # 计划/启动前/启动后
-
-        def game_state(*args, **kwargs):
-            return states.pop(0) if states else True
-
-        def pre_launch(spec):
-            calls.append(("pre", spec["exe"]))
-            return pre, ""
-
-        def launcher(exe, params, cwd):
-            calls.append(("mxu", params))
-            return handle
-
-        with mock.patch.object(daily, "_now", clock.now), \
-                mock.patch.object(daily, "_sleep", clock.sleep), \
-                mock.patch.object(daily, "_game_running",
-                                  side_effect=game_state), \
-                mock.patch.object(daily, "_launch_pre_game",
-                                  side_effect=pre_launch), \
-                mock.patch.object(daily, "_script_running",
-                                  return_value=False), \
-                mock.patch.object(store, "snapshot_processes",
-                                  return_value=set()):
-            result = daily.run(nte, launcher=launcher)
-        self.assertEqual(calls[0][0], "pre")
-        self.assertEqual(calls[0][1], nte["game_exe"])
-        self.assertEqual(calls[-1][0], "mxu")
-        self.assertIn("--autostart", calls[-1][1])
-        self.assertIn("--quit-after-run", calls[-1][1])
+        result = self._run(app, clock,
+                           FakeHandle(clock, exit_calls=1),
+                           os.path.join(self.tmp, key + ".log"))
         self.assertEqual(result["state"], daily.FINISHED)
+        self.assertIn("MXU 进程已退出", result["reason"])
 
-        # 等待游戏超时 -> failed，结束本次 pre_game 进程，不启动 MXU
-        timeout_app = _make_mxu_daily(os.path.join(self.tmp, "timeout"),
-                                      "nte")
-        timeout_pre = PreProc()
-        mxu_calls = []
+        app2 = _make_mxu_daily(os.path.join(self.tmp, "mxu2_" + key), key)
+        app2["daily"] = store._clean_daily({"timeout_min": 1}, key)
         clock2 = FakeClock()
-        with mock.patch.object(daily, "_now", clock2.now), \
-                mock.patch.object(daily, "_sleep", clock2.sleep), \
-                mock.patch.object(daily, "_game_running",
-                                  return_value=False), \
-                mock.patch.object(daily, "_launch_pre_game",
-                                  return_value=(timeout_pre, "")), \
-                mock.patch.object(daily, "_script_running",
-                                  return_value=False), \
-                mock.patch.object(store, "snapshot_processes",
-                                  return_value=set()):
-            result2 = daily.run(
-                timeout_app, launcher=lambda *args: mxu_calls.append(1))
-        self.assertEqual(result2["state"], daily.FAILED)
-        self.assertIn("等待异环游戏启动超时", result2["reason"])
-        self.assertTrue(timeout_pre.terminated)
-        self.assertEqual(mxu_calls, [])
+        handle2 = FakeHandle(clock2, exit_calls=None)
+        result2 = self._run(app2, clock2, handle2,
+                            os.path.join(self.tmp, "mxu2_" + key + ".log"))
+        self.assertEqual(result2["state"], daily.TIMEOUT)
+        self.assertTrue(handle2.terminated)
 
     def test_maa_success_failure_attach(self):
         maa, maa_log, _gui = _make_maa_daily(self.tmp)
@@ -2701,7 +2598,7 @@ class DailyQuotingTests(TempDirTest):
         self.assertEqual(plan["argv"][2:4], ["--config", config])
 
     def test_mxu_instance_with_space_and_quote(self):
-        # 异环与终末地同用 --instance/--quit-after-run，实例名包含空格/引号
+        # 终末地仍用 --instance/--quit-after-run；异环已改 mxu_ui（无 CLI 参数）
         name = 'Full "Daily" Run'
         app = _make_mxu_daily(self.tmp, "maaend", instances=[{
             "name": name,
@@ -2720,19 +2617,6 @@ class DailyQuotingTests(TempDirTest):
                     + ' --quit-after-run "--opt=a b"')
         self.assertEqual(plan["params"], expected)
         self.assertIn('\\"Daily\\"', plan["params"])
-
-        nte = _make_mxu_daily(os.path.join(self.tmp, "nte_quote"), "nte",
-                              instances=[{"name": name, "tasks": [
-                                  {"taskName": "DailyTask",
-                                   "enabled": True}]}])
-        nte["daily"] = store._clean_daily({"instance": name}, "nte")
-        p1, p2, p3 = self._patch()
-        with p1, p2, p3:
-            nte_plan = daily.plan_for(nte)
-        self.assertTrue(nte_plan["ok"], nte_plan["errors"])
-        self.assertIn('--instance ' + daily._quote_arg(name, force=True),
-                      nte_plan["params"])
-        self.assertTrue(nte_plan["params"].endswith("--quit-after-run"))
 
 
 # ---------------------------------------------------------------- v0.8 设置 / 勾选 / 独立状态
@@ -2755,6 +2639,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(defaults["accent"], "#4fc3ff")
         self.assertEqual(defaults["refresh_interval"], 1.5)
         self.assertEqual(defaults["close_action"], "exit")
+        self.assertTrue(defaults["minimize_to_tray"])
         self.assertEqual(defaults["daily_default_timeout"], 120)
         self.assertTrue(defaults["check_update_on_start"])
         self.assertFalse(defaults["adb_enabled"])
@@ -4332,311 +4217,587 @@ class V0103ElevationTests(TempDirTest):
 
 
 # ---------------------------------------------------------------- v0.10.4 异环回 MXU autostart
-class V0104RevertTests(TempDirTest):
-    """v0.10.4 异环清日常回 MXU 同款：命令形状/实例推断/旧热键-UIPI 无残留。"""
+class V0110MxuUiTests(TempDirTest):
+    """v0.11 异环清日常：打开 MaaNTE UI + 热键开始 + HTTP/日志等待结束。"""
 
     def _patches(self):
         return (
             mock.patch.object(store, "snapshot_processes", return_value=set()),
-            mock.patch.object(daily, "_game_running", return_value=True),
+            mock.patch.object(daily, "_mxu_ui_window",
+                              return_value={"hwnd": 1}),
+            mock.patch.object(detector, "focus_window", return_value=True),
         )
 
-    def test_mxu_ui_and_uipi_removed(self):
-        for name in ("mxu_ui_hotkey", "mxu_latest_log", "mxu_autostart_instance",
-                     "mxu_target_elevated", "mxu_ui_hint", "_plan_mxu_ui",
-                     "_run_mxu_ui", "_mxu_ui_window", "MXU_UI_DONE_MARKERS",
-                     "MXU_UI_FAIL_MARKERS", "MXU_UI_NOTE"):
-            with self.subTest(name=name):
-                self.assertFalse(hasattr(daily, name),
-                                 f"旧热键/UIPI 符号残留: {name}")
-        app = _make_mxu_daily(self.tmp, "nte")
-        p1, p2 = self._patches()
-        with p1, p2:
-            plan = daily.plan_for(app)
-        for key in ("hotkey", "use_hotkey", "manual_start", "manual_reason",
-                    "target_elevated", "elevated", "attach",
-                    "autostart_instance"):
-            with self.subTest(key=key):
-                self.assertNotIn(key, plan)
-        daily_src = open(os.path.join(REPO_ROOT, "gamehub", "daily.py"),
-                         "r", encoding="utf-8").read()
-        ui_src = open(os.path.join(REPO_ROOT, "gamehub", "ui.py"),
-                      "r", encoding="utf-8").read()
-        for text, label in ((daily_src, "daily.py"), (ui_src, "ui.py")):
-            for mark in ("mxu_ui", "mxu_ui_hint", "mxu_target_elevated",
-                         "Ctrl+F10", "Ctrl + F10", "UIPI"):
-                with self.subTest(file=label, mark=mark):
-                    self.assertNotIn(mark, text)
+    def _run_ui(self, app, handle, http_states, hotkey=None):
+        p1, p2, p3 = self._patches()
+        clock = FakeClock()
+        handle.clock = clock
+        sent = []
 
-    def test_instance_inference_autostart_and_override(self):
-        app = _make_mxu_daily(self.tmp, "nte")
-        cfg = daily.mxu_paths(app)["config"]
-        # autoStartInstanceId 按 id 匹配
-        _write_json(cfg, {
-            "settings": {"autoStartInstanceId": "cfg-two"},
-            "instances": [
-                {"id": "cfg-one", "name": "实例一",
-                 "tasks": [{"enabled": True}]},
-                {"id": "cfg-two", "name": "实例二",
-                 "tasks": [{"enabled": True}]}]})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)),
-            "实例二")
-        # autoStartInstanceId 按 uuid / name 匹配
-        _write_json(cfg, {
-            "settings": {"autoStartInstanceId": "uuid-9"},
-            "instances": [{"uuid": "uuid-9", "name": "实例九",
-                           "tasks": [{"enabled": True}]}]})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)),
-            "实例九")
-        _write_json(cfg, {
-            "settings": {"autoStartInstanceId": "实例一"},
-            "instances": [{"name": "实例一", "tasks": [{"enabled": True}]}]})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)),
-            "实例一")
-        # 无 autoStart：取第一个有启用任务的实例（跳过 0 任务）
-        _write_json(cfg, {"instances": [
-            {"name": "无任务", "tasks": [{"enabled": False}]},
-            {"name": "有任务", "tasks": [{"enabled": True}]}]})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)),
-            "有任务")
-        # 无实例 / 全部未启用 -> ""
-        _write_json(cfg, {"instances": []})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)), "")
-        _write_json(cfg, {"instances": [
-            {"name": "空", "tasks": [{"enabled": False}]}]})
-        self.assertEqual(
-            daily._suggest_mxu_instance(app, daily.mxu_instances(app)), "")
-        # 用户显式实例覆盖 autoStart 推断
-        _write_json(cfg, {
-            "settings": {"autoStartInstanceId": "cfg-two"},
-            "instances": [
-                {"id": "cfg-one", "name": "实例一",
-                 "tasks": [{"enabled": True}]},
-                {"id": "cfg-two", "name": "实例二",
-                 "tasks": [{"enabled": True}]}]})
-        app["daily"] = store._clean_daily({"instance": "实例一"}, "nte")
-        p1, p2 = self._patches()
-        with p1, p2:
-            plan = daily.plan_for(app)
-        self.assertEqual(plan["args"],
-                         ["--autostart", "--instance", "实例一",
-                          "--quit-after-run"])
-        self.assertIn('--instance "实例一"', plan["params"])
+        def sender(hotkey_value):
+            sent.append(hotkey_value)
+            return True
 
-    def test_nte_maaend_plan_parity(self):
+        with p1, p2, p3, \
+                mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey",
+                                  side_effect=sender if hotkey is None
+                                  else hotkey), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(daily, "mxu_http_state",
+                                  side_effect=http_states if callable(
+                                      http_states) else http_states):
+            result = daily.run(app, launcher=lambda *args: handle)
+        return result, sent
+
+    def test_plan_hotkey_and_missing_hotkey(self):
         nte = _make_mxu_daily(self.tmp, "nte")
-        maaend = _make_mxu_daily(self.tmp, "maaend")
-        p1, p2 = self._patches()
-        with p1, p2:
-            nte_plan = daily.plan_for(nte)
-            maaend_plan = daily.plan_for(maaend)
-        for plan, exe_name, timeout in ((nte_plan, "MaaNTE.exe", 120),
-                                        (maaend_plan, "MaaEnd.exe", 150)):
-            with self.subTest(exe=exe_name):
-                self.assertEqual(plan["mode"], "mxu")
-                self.assertEqual(plan["args"][:1], ["--autostart"])
-                self.assertIn("--instance", plan["args"])
-                self.assertEqual(plan["args"][-1], "--quit-after-run")
-                self.assertEqual(plan["argv"][0], plan["exe"])
-                self.assertEqual(plan["argv"][1:4], [
-                    "--autostart", "--instance",
-                    plan["settings"]["instance"]])
-                self.assertTrue(plan["params"].endswith("--quit-after-run"))
-                self.assertIn("--instance ", plan["params"])
-                self.assertEqual(plan["timeout_min"], timeout)
-                self.assertIn(exe_name, plan["command_text"])
-                self.assertEqual(plan["errors"], [])
-        # 默认实例推断：异环「挂机任务」/ 终末地「全套日常」
-        self.assertEqual(nte_plan["settings"]["instance"], "挂机任务")
-        self.assertEqual(maaend_plan["settings"]["instance"], "全套日常")
-        # 清日常顺序/勾选仍包含异环与终末地（v0.8 行为无回归）
-        apps = [nte, maaend]
-        self.assertIn("nte", daily.enabled_daily_keys(
-            apps, store.DEFAULT_DAILY_ORDER))
-        self.assertIn("maaend", daily.enabled_daily_keys(
-            apps, store.DEFAULT_DAILY_ORDER))
-
-
-# ---------------------------------------------------------------- v0.10.5 异环 pre_game
-class V0105PreGameTests(TempDirTest):
-    """v0.10.5 异环清日常 pre_game：启动器→等待游戏→MaaNTE autostart。"""
-
-    class PreProc:
-        def __init__(self):
-            self.terminated = False
-
-        def poll(self):
-            return None
-
-        def terminate(self):
-            self.terminated = True
-
-    def _plan_patches(self, game_running=False):
-        return (
-            mock.patch.object(daily, "_script_running", return_value=False),
-            mock.patch.object(daily, "_game_running",
-                              return_value=game_running),
-            mock.patch.object(store, "snapshot_processes", return_value=set()))
-
-    def test_pre_game_plan_variants(self):
-        self.assertEqual(daily.PRE_GAME_WAIT_SECONDS, 300)
-        nte = _make_mxu_daily(self.tmp, "nte")
-        p1, p2, p3 = self._plan_patches(game_running=False)
-        with p1, p2, p3:
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3, \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False):
             plan = daily.plan_for(nte)
-        pre = plan.get("pre_game")
-        self.assertTrue(pre)
-        self.assertEqual(os.path.basename(pre["spec"]["exe"]),
-                         "NTELauncher.exe")
-        self.assertEqual(pre["timeout_s"], daily.PRE_GAME_WAIT_SECONDS)
-        self.assertIn("登录", pre["hint"])
-        self.assertEqual(plan["mode"], "mxu")
-        self.assertEqual(plan["args"][:1], ["--autostart"])
-        self.assertEqual(plan["args"][-1], "--quit-after-run")
+        self.assertEqual(plan["mode"], "mxu_ui")
+        self.assertEqual(plan["hotkey"]["text"], "Ctrl + F10")
+        self.assertEqual(plan["instance"], "挂机任务")
+        self.assertEqual(plan["instance_id"], "nte-inst")
+        self.assertEqual(plan["web_port"], 12701)
+        self.assertEqual(plan["params"], "")
+        self.assertNotIn("--autostart", plan["params"])
         self.assertEqual(plan["errors"], [])
-        for key in ("hotkey", "use_hotkey", "manual_start", "attach"):
-            self.assertNotIn(key, plan)
-        # 游戏已运行 -> 不安排 pre_game
-        p1, p2, p3 = self._plan_patches(game_running=True)
-        with p1, p2, p3:
-            plan2 = daily.plan_for(nte)
-        self.assertIsNone(plan2.get("pre_game"))
-        self.assertTrue(any("在运行" in note for note in plan2["notes"]))
-        # 启动器缺失 -> 明确报错、不产生 pre_game
-        missing = _make_mxu_daily(os.path.join(self.tmp, "missing"), "nte")
-        for root, _dirs, files in os.walk(os.path.join(self.tmp, "missing")):
-            for name in files:
-                if name.lower() == "ntelauncher.exe":
-                    os.remove(os.path.join(root, name))
-        missing["game_exe"] = os.path.join(self.tmp, "missing", "gone.exe")
-        p1, p2, p3 = self._plan_patches(game_running=False)
-        with p1, p2, p3:
-            plan3 = daily.plan_for(missing)
-        self.assertIsNone(plan3.get("pre_game"))
-        self.assertTrue(any("启动器" in error for error in plan3["errors"]))
 
-    def test_launch_pre_game_subprocess_spec(self):
-        launcher = _touch(os.path.join(self.tmp, "NTELauncher.exe"), b"MZ")
-        spec = {"exe": launcher, "args": ["--x"], "cwd": self.tmp}
-        proc = mock.Mock()
-        with mock.patch.object(daily.subprocess, "Popen",
-                               return_value=proc) as popen:
-            got, error = daily._launch_pre_game(spec)
-        self.assertIs(got, proc)
-        self.assertEqual(error, "")
-        popen.assert_called_once_with(
-            [launcher, "--x"], cwd=self.tmp, close_fds=True,
-            creationflags=0x00000008 | 0x00000200)
-        # 启动器不存在 / Popen 异常 -> 返回 None + 错误文案
-        got2, error2 = daily._launch_pre_game(
-            {"exe": os.path.join(self.tmp, "nope.exe")})
-        self.assertIsNone(got2)
-        self.assertIn("启动器不存在", error2)
-        with mock.patch.object(daily.subprocess, "Popen",
-                               side_effect=OSError("denied")):
-            got3, error3 = daily._launch_pre_game(spec)
-        self.assertIsNone(got3)
-        self.assertIn("启动异环启动器失败", error3)
+        no_hot = _make_mxu_daily(os.path.join(self.tmp, "no_hot"), "nte")
+        _write_json(daily.mxu_paths(no_hot)["config"], {
+            "settings": {"hotkeys": {
+                "startTasks": "Ctrl+F10", "globalEnabled": False}},
+            "instances": [{"name": "挂机任务", "tasks": [
+                {"taskName": "DailyTask", "enabled": True}]}]})
+        with p1, p2, p3, \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False):
+            plan2 = daily.plan_for(no_hot)
+        self.assertIsNone(plan2.get("hotkey"))
+        self.assertTrue(any("手动" in warning
+                            for warning in plan2["warnings"]))
 
-    def test_pre_game_failure_and_stop_no_mxu(self):
-        # 启动器启动失败 -> failed，不启动 MaaNTE
-        app = _make_mxu_daily(os.path.join(self.tmp, "fail"), "nte")
+    def test_http_running_then_succeeded_keeps_window(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
         clock = FakeClock()
-        mxu_calls = []
-        patches = [
-            mock.patch.object(daily, "_now", clock.now),
-            mock.patch.object(daily, "_sleep", clock.sleep),
-            mock.patch.object(daily, "_game_running", return_value=False),
-            mock.patch.object(daily, "_launch_pre_game",
-                              return_value=(None, "启动器不存在：x")),
-            mock.patch.object(daily, "_script_running", return_value=False),
-            mock.patch.object(store, "snapshot_processes", return_value=set()),
-        ]
-        for patcher in patches:
-            patcher.start()
-        try:
-            result = daily.run(app, launcher=lambda *a: mxu_calls.append(1))
-        finally:
-            for patcher in reversed(patches):
-                patcher.stop()
+        handle = FakeHandle(clock, exit_calls=None)
+        result, sent = self._run_ui(nte, handle, [
+            {"ok": True, "running": True},
+            {"ok": True, "running": False, "status": "succeeded"},
+        ])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertFalse(handle.terminated)
+        self.assertIn("窗口保留", result["reason"])
+
+    def test_http_failed(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        result, _sent = self._run_ui(nte, handle, [
+            {"ok": True, "running": True},
+            {"ok": True, "running": False, "status": "failed"},
+        ])
         self.assertEqual(result["state"], daily.FAILED)
-        self.assertIn("启动器", result["reason"])
-        self.assertEqual(mxu_calls, [])
-        # 等待中用户停止 -> stopped，结束本次启动器进程、不启动 MaaNTE
-        app2 = _make_mxu_daily(os.path.join(self.tmp, "stop"), "nte")
-        clock2 = FakeClock()
-        pre = self.PreProc()
-        stop_event = threading.Event()
-        mxu_calls2 = []
 
-        def sleep_stop(seconds):
-            stop_event.set()
-            clock2.sleep(seconds)
-
-        patches2 = [
-            mock.patch.object(daily, "_now", clock2.now),
-            mock.patch.object(daily, "_sleep", side_effect=sleep_stop),
-            mock.patch.object(daily, "_game_running", return_value=False),
-            mock.patch.object(daily, "_launch_pre_game",
-                              return_value=(pre, "")),
-            mock.patch.object(daily, "_script_running", return_value=False),
-            mock.patch.object(store, "snapshot_processes", return_value=set()),
-        ]
-        for patcher in patches2:
-            patcher.start()
-        try:
-            result2 = daily.run(app2, stop_event=stop_event,
-                                launcher=lambda *a: mxu_calls2.append(1))
-        finally:
-            for patcher in reversed(patches2):
-                patcher.stop()
-        self.assertEqual(result2["state"], daily.STOPPED)
-        self.assertIn("未启动 MaaNTE", result2["reason"])
-        self.assertTrue(pre.terminated)
-        self.assertEqual(mxu_calls2, [])
-
-    def test_stop_after_mxu_only_own_processes(self):
-        app = _make_mxu_daily(os.path.join(self.tmp, "chain"), "nte")
+    def test_timeout_terminates_own_pid(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        nte["daily"] = store._clean_daily({"timeout_min": 1}, "nte")
         clock = FakeClock()
-        pre = self.PreProc()
+        handle = FakeHandle(clock, exit_calls=None)
+        result, _sent = self._run_ui(
+            nte, handle,
+            lambda *args, **kwargs: {"ok": False, "error": "down"})
+        self.assertEqual(result["state"], daily.TIMEOUT)
+        self.assertTrue(handle.terminated)
+
+    def test_log_fallback_when_http_down(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        log = daily.mxu_paths(nte)["log"]
+
+        def sender(hotkey_value):
+            _append_text(log, "[Task] tasks-completed\n")
+            return True
+
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3, \
+                mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey", side_effect=sender), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(daily, "mxu_http_state",
+                                  return_value={"ok": False, "error": "down"}):
+            result = daily.run(nte, launcher=lambda *args: handle)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertIn("日志检测到", result["reason"])
+
+    def test_hotkey_send_failure_manual_keeps_window(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3, \
+                mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey", return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False):
+            result = daily.run(nte, launcher=lambda *args: handle)
+        self.assertEqual(result["state"], daily.FAILED)
+        self.assertIn("手动", result["reason"])
+        self.assertFalse(handle.terminated)
+
+    def test_mxu_http_state_parser(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        payload = {"instances": [{
+            "id": "nte-inst", "name": "挂机任务", "is_running": True,
+            "task_run_state": {"overall_status": "running"}}]}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with mock.patch.object(daily.urllib.request, "urlopen",
+                               return_value=Resp()) as fake:
+            state = daily.mxu_http_state(nte, "挂机任务")
+        self.assertTrue(state["ok"])
+        self.assertTrue(state["running"])
+        self.assertEqual(state["status"], "running")
+        self.assertIn("12701", fake.call_args.args[0])
+
+    def test_window_not_found_fails(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "_mxu_ui_window",
+                                  return_value=None), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False):
+            result = daily.run(nte, launcher=lambda *args: handle)
+        self.assertEqual(result["state"], daily.FAILED)
+        self.assertIn("未检测到 MaaNTE 主窗口", result["reason"])
+        self.assertTrue(handle.terminated)
+
+    def test_stop_terminates_own_pid(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
         handle = FakeHandle(clock, exit_calls=None)
         stop_event = threading.Event()
-        states = [False, False, True]   # 计划 / run 前置检查 / 等待循环
 
-        def game_state(*args, **kwargs):
-            return states.pop(0) if states else True
-
-        def launcher(exe, params, cwd):
+        def sender(hotkey_value):
             stop_event.set()
-            return handle
+            return True
 
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "_mxu_ui_window",
+                                  return_value={"hwnd": 1}), \
+                mock.patch.object(detector, "focus_window",
+                                  return_value=True), \
+                mock.patch.object(daily, "send_hotkey", side_effect=sender), \
+                mock.patch.object(daily, "mxu_http_state",
+                                  return_value={"ok": True,
+                                                "running": True}), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False):
+            result = daily.run(nte, stop_event=stop_event,
+                               launcher=lambda *args: handle)
+        self.assertEqual(result["state"], daily.STOPPED)
+        self.assertTrue(handle.terminated)
+
+
+# ---------------------------------------------------------------- v0.11.0 QA 补充
+class V0110MxuUiGapsTests(TempDirTest):
+    """v0.11 异环 mxu_ui 补充：计划错误/HTTP 解析/无状态结束/旧分支无残留。"""
+
+    def _plan(self, app):
+        patches = (
+            mock.patch.object(daily, "_script_running", return_value=False),
+            mock.patch.object(store, "snapshot_processes", return_value=set()),
+        )
+        for patcher in patches:
+            patcher.start()
+        try:
+            return daily.plan_for(app)
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_plan_missing_exe_no_instance_and_old_residue(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        plan = self._plan(nte)
+        self.assertEqual(plan["mode"], "mxu_ui")
+        self.assertNotIn("--autostart", plan["params"])
+        self.assertNotIn("--quit-after-run", plan["params"])
+        self.assertNotIn("pre_game", plan)
+        for name in ("_launch_pre_game", "_terminate_quiet",
+                     "PRE_GAME_WAIT_SECONDS", "_game_running"):
+            if name == "_game_running":
+                continue
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(daily, name),
+                                 f"旧 pre_game 符号残留: {name}")
+        src = open(os.path.join(REPO_ROOT, "gamehub", "daily.py"),
+                   "r", encoding="utf-8").read()
+        for mark in ("pre_game", "PRE_GAME_WAIT_SECONDS", "_launch_pre_game",
+                     "_terminate_quiet"):
+            with self.subTest(mark=mark):
+                self.assertNotIn(mark, src)
+        # MaaNTE.exe 缺失 -> 明确错误
+        missing = dict(nte)
+        missing["script_exe"] = os.path.join(self.tmp, "nope", "MaaNTE.exe")
+        plan2 = self._plan(missing)
+        self.assertTrue(any("未找到" in error for error in plan2["errors"]))
+        # 未选择实例（禁用自动建议）-> 明确错误
+        noinst = _make_mxu_daily(os.path.join(self.tmp, "noinst"), "nte")
+        with mock.patch.object(daily, "_suggest_mxu_instance",
+                               return_value=""), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            plan3 = daily.plan_for(noinst)
+        self.assertTrue(any("未选择 MXU 实例" in error
+                            for error in plan3["errors"]))
+
+    def test_http_parser_edges_and_custom_port(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        cfg = daily.mxu_paths(nte)["config"]
+        _write_json(cfg, {
+            "settings": {"webServerPort": 12888, "hotkeys": {
+                "startTasks": "Ctrl+F10", "globalEnabled": True}},
+            "instances": [{"id": "nte-inst", "name": "挂机任务",
+                           "tasks": [{"enabled": True}]}]})
+        self.assertEqual(daily.mxu_web_port(nte), 12888)
+        self.assertTrue(daily.mxu_http_url(nte).endswith(
+            ":12888/maa/state"))
+
+        payload = {"data": [{"id": "nte-inst", "name": "挂机任务",
+                             "task_run_state": {
+                                 "is_running": True,
+                                 "overall_status": "running"}}]}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with mock.patch.object(daily.urllib.request, "urlopen",
+                               return_value=Resp()):
+            state = daily.mxu_http_state(nte, "挂机任务")
+        self.assertTrue(state["ok"])
+        self.assertTrue(state["found"])
+        self.assertTrue(state["running"])
+        self.assertEqual(state["status"], "running")
+        # 无匹配实例 -> found False
+        with mock.patch.object(daily.urllib.request, "urlopen",
+                               return_value=Resp()):
+            state2 = daily.mxu_http_state(nte, "不存在的实例")
+        self.assertTrue(state2["ok"])
+        self.assertFalse(state2["found"])
+        self.assertFalse(state2["running"])
+        # HTTP 不可用 -> ok False 带错误
+        with mock.patch.object(daily.urllib.request, "urlopen",
+                               side_effect=OSError("down")):
+            state3 = daily.mxu_http_state(nte, "挂机任务")
+        self.assertFalse(state3["ok"])
+        self.assertIn("down", state3["error"])
+
+    def test_http_running_then_stops_without_status_finished(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        handle.clock = clock
+        states = [{"ok": True, "running": True},
+                  {"ok": True, "running": False, "status": ""}]
         patches = [
             mock.patch.object(daily, "_now", clock.now),
             mock.patch.object(daily, "_sleep", clock.sleep),
-            mock.patch.object(daily, "_game_running",
-                              side_effect=game_state),
-            mock.patch.object(daily, "_launch_pre_game",
-                              return_value=(pre, "")),
+            mock.patch.object(daily, "_mxu_ui_window",
+                              return_value={"hwnd": 1}),
+            mock.patch.object(detector, "focus_window", return_value=True),
+            mock.patch.object(daily, "send_hotkey", return_value=True),
+            mock.patch.object(daily, "mxu_http_state",
+                              side_effect=lambda *a, **k: states.pop(0)),
             mock.patch.object(daily, "_script_running", return_value=False),
             mock.patch.object(store, "snapshot_processes", return_value=set()),
         ]
         for patcher in patches:
             patcher.start()
         try:
-            result = daily.run(app, stop_event=stop_event, launcher=launcher)
+            result = daily.run(nte, launcher=lambda *a: handle)
         finally:
             for patcher in reversed(patches):
                 patcher.stop()
-        self.assertEqual(result["state"], daily.STOPPED)
-        self.assertTrue(handle.terminated)
-        self.assertTrue(pre.terminated)
-        self.assertIn("已结束本次启动的进程", result["reason"])
-        self.assertEqual(result["pid"], handle.pid)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertIn("HTTP overall_status=unknown", result["reason"])
+        self.assertIn("窗口保留", result["reason"])
+        self.assertFalse(handle.terminated)
+        self.assertTrue(handle.closed)
+
+
+class V0110TrayTests(TempDirTest):
+    """v0.11 最小化到托盘：设置/生命周期/降级/回调/最小化分支/退出清理。"""
+
+    class FakeRoot:
+        def __init__(self):
+            self.after_calls = []
+            self.withdraw_calls = 0
+            self.iconify_calls = 0
+            self.destroyed = False
+            self.deiconified = 0
+            self.lifted = 0
+            self.focused = 0
+
+        def after(self, delay, callback):
+            self.after_calls.append((delay, callback))
+            return "after-id"
+
+        def withdraw(self):
+            self.withdraw_calls += 1
+
+        def iconify(self):
+            self.iconify_calls += 1
+
+        def destroy(self):
+            self.destroyed = True
+
+        def deiconify(self):
+            self.deiconified += 1
+
+        def lift(self):
+            self.lifted += 1
+
+        def focus_force(self):
+            self.focused += 1
+
+        def after_cancel(self, _after_id):
+            pass
+
+    class FakeTray:
+        def __init__(self, ok=True):
+            self.ok = ok
+            self.starts = 0
+            self.stops = 0
+
+        def start(self):
+            self.starts += 1
+            return self.ok
+
+        def stop(self):
+            self.stops += 1
+
+    def test_setting_default_persist_invalid(self):
+        defaults = store._clean_settings(None)
+        self.assertTrue(defaults["minimize_to_tray"])
+        self.assertIn("minimize_to_tray", store.DEFAULT_SETTINGS)
+        self.assertFalse(store._clean_settings(
+            {"minimize_to_tray": False})["minimize_to_tray"])
+        self.assertTrue(store._clean_settings(
+            {"minimize_to_tray": True})["minimize_to_tray"])
+        for bad in ("yes", 1, 0, None, [], "false"):
+            with self.subTest(bad=bad):
+                self.assertTrue(store._clean_settings(
+                    {"minimize_to_tray": bad})["minimize_to_tray"])
+        cfg = os.path.join(self.tmp, "config.json")
+        search = os.path.join(self.tmp, "search_root")
+        os.makedirs(search, exist_ok=True)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search):
+            self.assertTrue(store.save_state(
+                [], "", self.tmp,
+                settings=store._clean_settings(
+                    {"minimize_to_tray": False})))
+            raw = json.load(open(cfg, "r", encoding="utf-8"))
+            self.assertIs(raw["settings"]["minimize_to_tray"], False)
+            _apps, _clash, _root, meta = store.load_state_full()
+            self.assertFalse((meta.get("settings") or {})
+                             .get("minimize_to_tray"))
+
+    def test_start_stop_idempotent(self):
+        manager = tray.TrayManager(None)
+        starts, stops = [], []
+        manager._start_native = lambda: starts.append(1)
+        manager._stop_native = lambda: stops.append(1)
+        self.assertTrue(manager.start())
+        self.assertTrue(manager.start())
+        self.assertEqual(len(starts), 1)
+        self.assertTrue(manager.started)
+        self.assertTrue(manager.stop())
+        self.assertTrue(manager.stop())
+        self.assertEqual(len(stops), 1)
+        self.assertFalse(manager.started)
+        self.assertEqual(manager.available(), tray._ENABLED)
+
+    def test_failure_degradation(self):
+        old = tray._ENABLED
+        try:
+            tray._ENABLED = False
+            manager = tray.TrayManager(None)
+            self.assertFalse(manager.start())
+            self.assertTrue(manager.failed)
+            self.assertIn("不支持", manager.last_error)
+            self.assertTrue(manager.stop())
+        finally:
+            tray._ENABLED = old
+        broken = tray.TrayManager(None)
+
+        def boom():
+            raise RuntimeError("no shell")
+
+        broken._start_native = boom
+        self.assertFalse(broken.start())
+        self.assertTrue(broken.failed)
+        self.assertFalse(broken.started)
+        self.assertIn("no shell", broken.last_error)
+        self.assertTrue(broken.stop())
+
+    def test_tooltip_and_callback_scheduling(self):
+        manager = tray.TrayManager(None, tooltip="All-My-Maa")
+        self.assertEqual(manager.tooltip, "All-My-Maa")
+        manager.update_tooltip("x" * 300)
+        self.assertEqual(len(manager.tooltip), 127)
+        manager.update_tooltip("")
+        self.assertEqual(manager.tooltip, "All-My-Maa")
+        self.assertFalse(manager.update_tooltip("hi"))  # 未启动
+        manager.started = True
+        manager._modify_native = lambda: None
+        self.assertTrue(manager.update_tooltip("运行中"))
+        self.assertEqual(manager.tooltip, "运行中")
+        root = self.FakeRoot()
+        shown, exited = [], []
+        m2 = tray.TrayManager(root, on_show=lambda: shown.append(1),
+                              on_exit=lambda: exited.append(1))
+        m2._handle_menu_command(tray.MENU_SHOW)
+        m2._handle_menu_command(tray.MENU_EXIT)
+        m2._handle_menu_command(999)
+        self.assertEqual((len(shown), len(exited)), (0, 0))
+        self.assertEqual(len(root.after_calls), 2)
+        for _delay, callback in root.after_calls:
+            callback()
+        self.assertEqual((shown, exited), ([1], [1]))
+        m3 = tray.TrayManager(None, on_show=lambda: None)
+        m3._schedule(None)  # 空回调安全
+
+    def test_minimize_branches_and_show_sync(self):
+        obj = SimpleNamespace(settings={"minimize_to_tray": True},
+                              tray=self.FakeTray(True), root=self.FakeRoot(),
+                              _tray_hidden=False)
+        self.assertTrue(ui.GameHub._hide_to_tray(obj))
+        self.assertTrue(obj._tray_hidden)
+        self.assertEqual(obj.root.withdraw_calls, 1)
+        obj2 = SimpleNamespace(settings={"minimize_to_tray": False},
+                               tray=self.FakeTray(True), root=self.FakeRoot(),
+                               _tray_hidden=False)
+        self.assertFalse(ui.GameHub._hide_to_tray(obj2))
+        self.assertEqual(obj2.root.withdraw_calls, 0)
+        obj3 = SimpleNamespace(settings={"minimize_to_tray": True},
+                               tray=self.FakeTray(False), root=self.FakeRoot(),
+                               _tray_hidden=False)
+        self.assertFalse(ui.GameHub._hide_to_tray(obj3))
+        self.assertEqual(obj3.tray.starts, 1)
+        obj4 = SimpleNamespace(settings={"minimize_to_tray": True},
+                               tray=None, root=self.FakeRoot(),
+                               _tray_hidden=False)
+        self.assertFalse(ui.GameHub._hide_to_tray(obj4))
+        # minimize_window：托盘隐藏成功 -> 不 iconify；失败 -> iconify
+        win = SimpleNamespace(_hide_to_tray=lambda: True,
+                              root=self.FakeRoot())
+        ui.GameHub.minimize_window(win)
+        self.assertEqual(win.root.iconify_calls, 0)
+        win2 = SimpleNamespace(_hide_to_tray=lambda: False,
+                               root=self.FakeRoot())
+        ui.GameHub.minimize_window(win2)
+        self.assertEqual(win2.root.iconify_calls, 1)
+        # _show_from_tray 恢复窗口
+        shown = SimpleNamespace(_tray_hidden=True, root=self.FakeRoot())
+        ui.GameHub._show_from_tray(shown)
+        self.assertFalse(shown._tray_hidden)
+        self.assertEqual(shown.root.deiconified, 1)
+        self.assertEqual(shown.root.lifted, 1)
+        self.assertEqual(shown.root.focused, 1)
+        # _sync_tray：开 -> start；关 -> stop + hidden False
+        on = SimpleNamespace(tray=self.FakeTray(True),
+                             settings={"minimize_to_tray": True},
+                             _tray_hidden=False,
+                             _tray_enabled=lambda: True)
+        ui.GameHub._sync_tray(on)
+        self.assertEqual(on.tray.starts, 1)
+        off = SimpleNamespace(tray=self.FakeTray(True),
+                              settings={"minimize_to_tray": False},
+                              _tray_hidden=True,
+                              _tray_enabled=lambda: False)
+        ui.GameHub._sync_tray(off)
+        self.assertEqual(off.tray.stops, 1)
+        self.assertFalse(off._tray_hidden)
+
+    def test_exit_cleanup(self):
+        tray_obj = self.FakeTray(True)
+        root = self.FakeRoot()
+        obj = SimpleNamespace(settings={"close_action": "minimize"},
+                              _hide_to_tray=lambda: True, root=root,
+                              tray=tray_obj, _closing=False)
+        ui.GameHub._on_close(obj)
+        self.assertFalse(root.destroyed)
+        self.assertEqual(tray_obj.stops, 0)
+        # 隐藏失败 -> iconify
+        obj2 = SimpleNamespace(settings={"close_action": "minimize"},
+                               _hide_to_tray=lambda: False,
+                               root=self.FakeRoot(),
+                               tray=self.FakeTray(True), _closing=False)
+        ui.GameHub._on_close(obj2)
+        self.assertEqual(obj2.root.iconify_calls, 1)
+        self.assertFalse(obj2.root.destroyed)
+        # 强制退出 -> stop 托盘 + destroy
+        root3 = self.FakeRoot()
+        tray3 = self.FakeTray(True)
+        obj3 = SimpleNamespace(settings={"close_action": "minimize"},
+                               _hide_to_tray=lambda: True, root=root3,
+                               tray=tray3, _closing=False)
+        ui.GameHub._on_close(obj3, force=True)
+        self.assertEqual(tray3.stops, 1)
+        self.assertTrue(root3.destroyed)
+        # tray.stop 抛异常也被吞掉
+        class BadTray:
+            def stop(self):
+                raise RuntimeError("dead")
+        root4 = self.FakeRoot()
+        obj4 = SimpleNamespace(settings={"close_action": "exit"},
+                               _hide_to_tray=lambda: False, root=root4,
+                               tray=BadTray(), _closing=False)
+        ui.GameHub._on_close(obj4)
+        self.assertTrue(root4.destroyed)
 
 
 def main():

@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.10.5
+# All-My-Maa · 游戏脚本中心 v0.11.0
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -37,10 +37,11 @@
 打包版替换 exe 重启、源码模式 `git pull`，安装前确认、失败降级到发布页）；
 「启动游戏」按各脚本自己的方式重构：鸣潮直启 `Wuthering Waves.exe`、终末地走鹰角启动器、
 MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（登录后点开始游戏，避免直启
-`HTGame.exe` 的 UE map 报错）。异环清日常 v0.10.4 起改为与终末地 MaaEnd 同款 MXU autostart：
-`MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`，完成判定为进程退出。
-v0.10.5 起异环清日常会**先打开 NTELauncher 并等待异环窗口（最长 300 秒，需登录并进入游戏）**，
-确认游戏运行后才启动 MaaNTE；游戏已运行则跳过这一步，等待超时 / 启动器失败不会启动 MaaNTE。
+`HTGame.exe` 的 UE map 报错）。异环清日常 v0.11.0 起改为「打开 MaaNTE → 发送开始任务热键
+（Ctrl+F10）→ 通过本地 HTTP `/maa/state` / debug 日志等待任务结束」，任务完成后保留 MaaNTE 窗口；
+不再使用 `--autostart` 或启动器等待。
+v0.11.0 还新增**最小化到系统托盘**：点标题栏「—」或关闭行为选「最小化」时隐藏到托盘，
+托盘左键恢复、右键菜单打开主界面 / 退出；设置里可关闭该行为。
 从 v0.10.3 起，Hub **默认以管理员身份启动**（源码自提权 + 打包 `--uac-admin` manifest）：
 取消 UAC 会回退普通权限并提示，`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过提权；
 关于 / 设置页会显示当前权限。
@@ -93,6 +94,7 @@ v0.10.5 起异环清日常会**先打开 NTELauncher 并等待异环窗口（最
 | 自由缩放 | 默认 1180×760、最小 1000×640，可最大化到工作区；标题栏拖动 / 8 向缩放，页面滚动换行不横向溢出 |
 | 圆润淡紫渐变 | 默认强调色淡紫 `#b98bff`，面板 / 标题栏 / 侧栏淡紫渐变，更圆润的圆角与间距 |
 | 自定义标题栏 | 自绘渐变标题栏：最小化 / 最大化 / 关闭、拖动移动、双击最大化、8 向边缘 / 角落缩放 |
+| 最小化到托盘 | v0.11.0 起点「—」或关闭行为选最小化时隐藏到托盘；托盘左键恢复、右键菜单打开 / 退出；设置可关闭；ctypes Shell_NotifyIcon，无新依赖 |
 | 字体大小 | 小 / 标准 / 大 / 特大（0.9 / 1.0 / 1.12 / 1.25），保存后立即生效 |
 | 默认管理员启动 | v0.10.3 起默认管理员：源码模式 UAC 自重启、打包版 `--uac-admin` manifest；取消 UAC 回退普通权限并提示；`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过 |
 | 统一视觉 | 统一 Microsoft YaHei UI 字体与字号、圆角 / 间距、淡紫深色分层配色 |
@@ -240,7 +242,7 @@ v0.8 的三页结构保留，v0.10 在 v0.9 基础上换成更圆润的淡紫渐
 ### 管理员权限（v0.10.3）
 
 v0.10.3 起 Hub **默认以管理员身份启动**——游戏脚本的输入模拟、截图与「一键清日常」通常需要管理员
-权限（异环清日常 v0.10.4 起与终末地一样由 MXU `--autostart` 执行，不再依赖热键）：
+权限（异环清日常 v0.11.0 起会打开 MaaNTE 并发送开始任务热键，默认管理员下热键可用）：
 
 - **源码运行**：当前不是管理员时，启动会先用 `pythonw.exe` + `ShellExecuteW(runas)` 重新拉起自己
   （带内部参数 `--elevated`），原进程退出；因此第一次启动会弹一次 UAC；
@@ -251,8 +253,23 @@ v0.10.3 起 Hub **默认以管理员身份启动**——游戏脚本的输入模
 - **跳过提权**：源码模式可加 `--no-elevate`，或设置环境变量 `GAMEHUB_NO_ELEVATE=1`
   （也接受 `true` / `yes` / `on`）；`--elevated` 是自重启内部标记，不要手动使用；
 - **权限展示**：关于对话框与设置页会显示「当前权限：管理员 / 普通用户」，方便确认是否提权成功；
-- **权限与功能**：一键清日常的每一项会以管理员权限启动（UAC）；异环 / 终末地同为 MXU autostart，
-  不再依赖热键。部分脚本的输入 / 截图在普通权限下可能失败，遇到问题请右键「以管理员身份运行」。
+- **权限与功能**：一键清日常的每一项会以管理员权限启动（UAC）；异环清日常靠发送「开始任务」
+  热键（Ctrl+F10），普通权限 Hub 可能受 UIPI 限制，默认管理员启动可避免。部分脚本的输入 / 截图在
+  普通权限下可能失败，遇到问题请右键「以管理员身份运行」。
+
+### 最小化到托盘（v0.11.0）
+
+v0.11.0 起 Hub 支持**最小化到系统托盘**，不新增第三方依赖（`gamehub/tray.py` 用 `ctypes` 调
+Windows `Shell_NotifyIconW`，图标使用 `assets/hub.ico`）：
+
+- **最小化按钮**：点标题栏「—」时隐藏主窗口到托盘（默认开启）；
+- **恢复 / 退出**：托盘图标**左键单击 / 双击**恢复主界面；**右键菜单**可选「打开主界面」/「退出」；
+- **关闭行为**：设置 → 启动器 → 关闭窗口选「最小化（按托盘设置）」时，点「✕」也会隐藏到托盘；
+  选「退出程序」则直接退出；
+- **开关**：设置 → 启动器 →「最小化到系统托盘」勾选（默认开）；取消勾选后「—」恢复传统最小化，
+  关闭行为选最小化时也退化为最小化到任务栏；
+- **清理与降级**：退出程序 / 托盘菜单「退出」会停止托盘并删除图标；托盘不可用或创建失败时
+  安全降级为传统最小化，不影响主程序。
 
 ### 设置（v0.10.0）
 
@@ -261,7 +278,8 @@ v0.10.3 起 Hub **默认以管理员身份启动**——游戏脚本的输入模
 
 - **外观**：强调色（8 种淡紫系预设，默认淡紫）与**字体大小**（小 / 标准 / 大 / 特大）；强调色应用到导航高亮与主按钮；
 - **启动器**：启动时检查更新（默认开）、**自动下载更新**（默认关，安装前仍确认）、
-  状态刷新间隔（1.0 / 1.5 / 2.0 秒）、关闭窗口行为（退出程序 / 最小化到任务栏）；
+  状态刷新间隔（1.0 / 1.5 / 2.0 秒）、关闭窗口行为（退出程序 / 最小化（按托盘设置））、
+  **最小化到系统托盘**（默认开，取消后恢复传统最小化到任务栏）；
 - **路径**：脚本根目录展示与「重新识别」、Clash Verge 可执行文件（浏览 / 自动查找）；
 - **清日常**：默认超时（1–600 分钟，仅用于未单独设置超时的条目）、执行前显示命令预览、
   启用 ADB 检测（模拟器内游戏，默认关闭）、完成后结束脚本默认值；
@@ -314,18 +332,18 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 - **明日方舟 MAA**：在 MAA 里勾选日常任务队列（建议单独建一个「日常」配置），并在
   MAA 设置 → 热键里配置 **LinkStart（开始任务）** 热键；Hub 会带 `--skip-startup-auto-run`
   启动 MAA，等窗口 / 日志就绪后自动发送这个热键。MAA 已经在运行时，Hub 只发热键、不接管进程。
-- **异环 MaaNTE / 终末地 MaaEnd（v0.10.4 起同款 MXU autostart）**：在 MXU 里准备实例
-  （本机示例：「挂机任务」/「全套日常」），并在清日常页对应行内填写**实例名**；Hub 会执行
-  `MaaNTE.exe / MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`。
-  - 执行前请**先关闭已在运行的 MaaNTE / MaaEnd**（脚本在运行会报错）；
-  - **异环额外步骤（v0.10.5）**：若异环游戏未运行，Hub 会**先自动打开 `NTELauncher.exe` 并等待
-    异环窗口（最长 300 秒）**；请在启动器里**登录并进入游戏**，检测到游戏运行后才启动 MaaNTE。
-    游戏已运行则跳过这一步；等待超时 / 启动器找不到或启动失败时**不会启动 MaaNTE**，该行记为失败并提示
-    「请在启动器中登录并进入游戏后重试」；点「停止」也不会启动 MaaNTE；结束时只结束本次打开的启动器 /
-    MaaNTE 进程，不结束你自己开的实例；
-  - 实例必须存在且有启用任务；实例带「启动游戏」前置任务时会自动拉起游戏；
-  - 终末地 MaaEnd 没有 `LaunchGamePC` 前置任务且游戏未运行时只给警告（任务可能失败）；
-  - 完成判定为 MXU 进程退出（`--quit-after-run`，退出码恒 0，不区分成败）。
+- **异环 MaaNTE（v0.11.0：打开 MaaNTE + 开始任务热键）**：在 MXU 里准备实例并启用日常任务，
+  在清日常页对应行内填写**实例名**；Hub 会打开 MaaNTE（正常 UI，管理员），等主窗口就绪并置前后
+  发送 MaaNTE 设置里的「开始任务」全局热键（默认 `Ctrl+F10`，等价点击「开始任务」），然后轮询本地
+  HTTP `http://127.0.0.1:<端口>/maa/state`（端口取 MaaNTE `webServerPort`，默认 12701）等待结束；
+  HTTP 不可用 10 秒后回退 MaaNTE `debug` 日志。
+  - 执行前请**先关闭已在运行的 MaaNTE**（脚本在运行会报错）；实例必须存在且有启用任务；
+  - 热键未启用 / 读不到 / 发送失败 → 提示手动点击「开始任务」，该行记为失败（不静默成功）；
+  - 任务完成后**保留 MaaNTE 窗口**（不结束本次启动的进程）；点「停止」/ 超时才结束本次启动的 MaaNTE；
+  - 游戏未运行且实例没有「启动游戏」前置任务时任务可能失败，请先点卡片「启动游戏」。
+- **终末地 MaaEnd（v0.10.4 起 MXU autostart）**：在 MXU 里准备实例并填写实例名；Hub 执行
+  `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`，实例带「启动游戏」前置任务会
+  自动拉起游戏；完成判定为 MXU 进程退出（退出码恒 0，不区分成败）；执行前请先关闭已运行的 MaaEnd。
 
 **怎么用**
 
@@ -347,7 +365,7 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 | --- | --- | --- | --- |
 | 鸣潮 ok-ww | `pythonw.exe "<working>\main.py" -t DailyTask -e`（cwd=working，管理员） | 进程退出 + 日志出现 `Successfully Executed Task, Exiting Game and App!` | 90 分钟 |
 | 明日方舟 MAA | `MAA.exe --skip-startup-auto-run [--config "<配置名>"]` → 就绪后发送 LinkStart 热键 | `MAA\debug\gui.log` 出现「任务已全部完成！」；失败「任务出错」、停止「已停止」 | 120 分钟 |
-| 异环 MaaNTE | 游戏未运行：先打开 `NTELauncher.exe` → 等待异环窗口（最长 300 秒，需登录）→ `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`；游戏已运行则直接启动 MaaNTE | MXU 进程退出（退出码恒 0，不区分成败）；等待超时 / 启动器失败 → 不启动 MaaNTE、该行失败 | 120 分钟 |
+| 异环 MaaNTE | 打开 `MaaNTE.exe`（正常 UI）→ 等待主窗口 / 置前 → 发送「开始任务」全局热键（默认 `Ctrl+F10`）→ 轮询 HTTP `/maa/state`（默认端口 12701），HTTP 不可用 10 秒后回退 debug 日志 | HTTP 检测到任务结束 / 日志出现「停止任务 / tasks-completed / 已停止」等；热键缺失 / 发送失败 → 提示手动点击（不静默成功）；完成后保留 MaaNTE 窗口 | 120 分钟 |
 | 终末地 MaaEnd | `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出 | 150 分钟 |
 
 **超时、停止与失败处理**
@@ -404,9 +422,9 @@ v0.7.0 起，Hub 为鸣潮生成**启动规格**（`launch`，type=python）：�
   启动用任务队列 + `LinkStart` 热键触发；
 - **MXU（MaaNTE / MaaEnd）**：Tauri + React 的通用 GUI，读取符合 PI V2 的 `interface.json`，
   内嵌 MaaFramework，官方支持 `--autostart --instance "<实例名>" --quit-after-run` 自启动执行；
-  v0.10.4 起异环 MaaNTE 与终末地 MaaEnd 都走这条命令行（异环此前短暂用过 UI + 热键，已移除），
-  完成判定为 MXU 进程退出；v0.10.5 起异环清日常会先复用「启动游戏」的 NTELauncher 规格打开启动器、
-  等待异环窗口（最长 300 秒）后才启动 MaaNTE；
+  终末地 MaaEnd 走这条命令行，完成判定为进程退出；异环 v0.11.0 起改为打开 MaaNTE 正常 UI、
+  发送「开始任务」热键（Ctrl+F10），再通过 MaaNTE 本地 HTTP `/maa/state`（默认 12701）或 debug
+  日志等待任务结束，任务完成后保留 MaaNTE 窗口；
 - **ok-script / ok-ww**：Python + PySide6 自动化框架，任务可被命令行 `-t <任务名> -e` 指定，
   完成后退出并关闭游戏；ok-ww 官方计划任务也是这么调用的；
 - **PyAppify**：Rust / Tauri 启动器 + 更新器，负责把 Python 与脚本装到 `data/apps/<app>/`，
@@ -472,6 +490,7 @@ ok-ww 启动即自动更新、MaaNTE / MaaEnd 启动后自检更新）。点「�
     "check_update_on_start": true,
     "refresh_interval": 1.5,
     "close_action": "exit",
+    "minimize_to_tray": true,
     "clash_exe": "",
     "daily_default_timeout": 120,
     "daily_show_preview": true,
@@ -491,7 +510,7 @@ ok-ww 启动即自动更新、MaaNTE / MaaEnd 启动后自检更新）。点「�
 - `daily_order` 是清日常队列顺序；`launch` 是启动规格（v0.7 自动为鸣潮生成
   `pythonw + main.py` 规格，旧配置会自动补齐）；
 - `settings` 是顶层设置（强调色、字体大小、自动下载更新、启动检查更新、刷新间隔、关闭行为、
-  Clash 路径、清日常默认值），保存后立即生效（字体大小会立即应用到界面）；
+  `minimize_to_tray` 托盘开关、Clash 路径、清日常默认值），保存后立即生效；
 - 配置 v4 起，内置游戏的 `game_procs` 会迁移为游戏本体进程（旧配置里误填的启动器进程会被纠正）；
 - 想恢复默认：删除 `config.json` 后重新打开即可。
 
@@ -501,11 +520,12 @@ ok-ww 启动即自动更新、MaaNTE / MaaEnd 启动后自检更新）。点「�
 GameHub/
 ├─ hub.pyw                 程序入口（默认管理员启动 / 可 --no-elevate 跳过）
 ├─ gamehub/                主程序
-│  ├─ ui.py                侧边栏三页、自绘渐变标题栏、字体缩放、小工具、自动更新、主页行、清日常页、设置页、对话框
+│  ├─ ui.py                侧边栏三页、自绘渐变标题栏、字体缩放、托盘集成、小工具、自动更新、主页行、清日常页、设置页、对话框
 │  ├─ render.py            Pillow 图标 / 旧版画布渲染
 │  ├─ store.py             配置、路径识别、版本、进程、更新检查、游戏自动检测、启动规格（游戏 / 脚本）、自动更新、设置
 │  ├─ detector.py          游戏运行检测（窗口 / 进程 / ADB 规则）
-│  ├─ daily.py             一键清日常（计划 / 执行 / 独立状态 / 队列）
+│  ├─ daily.py             一键清日常（计划 / 执行 / 独立状态 / 队列；异环 UI+热键+HTTP 等待）
+│  ├─ tray.py              最小化到托盘（ctypes Shell_NotifyIcon，无第三方依赖）
 │  ├─ elevation.py         提权决策 / 源码自重启（runas）/ 权限提示
 │  └─ theme.py             设计令牌（淡紫渐变配色、字体 / 字号 / 更圆润圆角 / 间距、标题栏高度、窗口尺寸）
 ├─ assets/                 图标资源
@@ -531,6 +551,7 @@ GameHub/
 │  ├─ test_game_exe.py     游戏启动器发现自测（各游戏 exe 解析，不启动游戏）
 │  ├─ test_game_launch.py  游戏启动规格 / 等待逻辑自测（mock，不启动游戏）
 │  ├─ test_elevation.py    提权决策自测（--elevation-check，不弹 UAC）
+│  ├─ test_tray.py         托盘设置 / 幂等 / 降级自测（不建真实托盘）
 │  ├─ regression_test.py   回归测试（标准库 unittest）
 │  └─ verify_exe.ps1       本地打包 exe 验证
 ├─ docs/                   文档与 GitHub Pages 站点
@@ -560,6 +581,10 @@ GameHub/
   `RoundButton`（5 态）/ `RoundPanel` / `RoundEntry` / `TitleBar` / `PageHeader` 在 `ui.py`。
 - 自定义标题栏：`TitleBar`（拖动 / 双击 / 最小化 / 最大化 / 关闭）、`_build_resize_grips`
   （8 向缩放）、`_setup_borderless`（隐藏原生标题栏并恢复任务栏 / Alt+Tab / DWM 圆角）。
+- 最小化到托盘在 `gamehub/tray.py`：`TrayManager.start/stop/update_tooltip` 用 ctypes
+  `Shell_NotifyIconW`（NIM_ADD/NIM_DELETE）建隐藏消息窗口；左键/右键回调经 `root.after(0, ...)`
+  回 Tk 线程；`ui._hide_to_tray` / `_show_from_tray` / `_sync_tray` 接入「—」与关闭行为；自测
+  `tools/test_tray.py`（设置默认/幂等/降级，不建真实托盘）。
 - 字体大小：`ui._apply_font_scale`（`store.FONT_SCALES` = 0.9 / 1.0 / 1.12 / 1.25），
   保存设置后立即重建字体并同步标题栏 / 按钮 / 页面标题尺寸。
 - 默认管理员启动在 `gamehub/elevation.py`：`should_elevate`（判断是否自提权，支持
@@ -583,10 +608,11 @@ GameHub/
 - 清日常页的勾选 / 独立状态由 `gamehub/daily.py` 的 `DailyManager` 维护
   （`start_single` / `stop_single` / `start_queue` / `snapshot`），可运行
   `python tools/test_ui_state.py` 验证状态隔离与勾选逻辑。
-- 异环 / 终末地清日常共用 `daily._plan_mxu`（`--autostart --instance "<实例名>" --quit-after-run`，
-  完成 = MXU 进程退出）；实例名可由 `_suggest_mxu_instance`（autoStartInstanceId → 首个有启用任务的
-  实例）推荐；异环额外生成 `pre_game`（用 `store.build_game_launch` 打开 NTELauncher，等待游戏
-  300 秒；游戏已运行则跳过），`_run_mxu` 确认游戏后才启动 MXU；自测在 `tools/test_daily.py`（mock）。
+- 终末地清日常在 `daily._plan_mxu`（`--autostart --instance "<实例名>" --quit-after-run`，
+  完成 = MXU 进程退出）；异环在 `daily._plan_mxu_ui` / `_run_mxu_ui`：打开 MaaNTE UI → 发
+  `send_hotkey`（Ctrl+F10）→ 轮询 `mxu_http_state`（`/maa/state`，默认 12701）→ 失败 10 秒后
+  回退 `mxu_latest_log` 日志；完成后保留窗口。实例名可由 `_suggest_mxu_instance` 推荐；
+  自测在 `tools/test_daily.py`（mock）。
 - 游戏运行检测规则在 `gamehub/detector.py`（`BUILTIN_RULES` / `read_game_rules`）：
   MaaNTE / MaaEnd 优先读各自 `interface.json`，其余用内置规则；改完可运行
   `python tools/test_detect_game.py` 查看每行当前生效的规则与真实检测结果。
@@ -655,29 +681,27 @@ manifest，参数无法跳过，需要自行用不带 `--uac-admin` 的 PyInstal
 可能仍需管理员；一键清日常的每一项会单独以管理员权限启动（UAC）。
 
 **Q: 异环清日常没有自动开始？**
-v0.10.5 起异环清日常流程是「打开启动器等游戏 → 启动 MaaNTE autostart」：
+v0.11.0 起异环走「打开 MaaNTE → 发送开始任务热键（Ctrl+F10）→ 等待任务结束」：
 1. 先在 MaaNTE 里建好实例并勾选日常任务，在一键清日常行内填写**实例名**（可点卡片「启动脚本」
    打开脚本界面查看实例）；
 2. **先关闭已经打开的 MaaNTE**（脚本运行中会报错）；
-3. 若异环游戏未运行，Hub 会自动打开 `NTELauncher.exe` 并等待异环窗口（**最长 300 秒**）：
-   请在启动器里**登录账号并点击开始 / 进入游戏**；检测到游戏运行后 Hub 才会启动 MaaNTE。
-   游戏已经在运行则自动跳过这一步；
-4. **等待超时 / 没有登录 / 启动器找不到或启动失败**：不会启动 MaaNTE，该项记为失败，日志提示
-   「请在启动器中登录并进入游戏后重试」；点「停止」同样不会启动 MaaNTE；
-5. 完成后 MaaNTE 进程退出即算完成（`--quit-after-run`，退出码恒 0、不区分成败），
-   可看下方日志确认任务结果；Hub 只结束本次自己打开的启动器 / MaaNTE 进程，不动你手动开的实例；
-6. 找不到实例 / 实例不存在 / 没启用任务 / 启动器缺失 → 日志与 toast 会给出原因，按提示修正后重跑；
-   可先用「查看命令(dry-run)」确认实际命令。
+3. 确认 MaaNTE 设置 → 热键里已启用「开始任务」**全局热键**（默认 `Ctrl+F10`）且没有被其它软件占用；
+   Hub 打开 MaaNTE 并置前后会发送该热键（默认管理员启动，热键可用），等价手动点「开始任务」；
+4. 任务结束由 MaaNTE 本地 HTTP `/maa/state`（默认 12701，取 `webServerPort`）判定；HTTP 不可用
+   10 秒后回退 `debug` 日志；任务完成后 **保留 MaaNTE 窗口**，方便查看结果；
+5. 热键缺失 / 发送失败 / HTTP 与日志都判断不了 → 提示手动操作，该项失败（不静默成功）；
+6. 点「停止」/ 超时会结束本次启动的 MaaNTE；实例 / 任务 / 热键问题看日志与 dry-run 命令，
+   修正后重跑。
 
 **Q: 点「清日常」没反应 / 一直没开始？**
-先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA 热键读不到、
-异环 / 终末地实例名为空或不存在、异环启动器等游戏超时 / 未登录、UAC 弹窗被点「否」。
+先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA / 异环热键
+读不到、异环 / 终末地实例名为空或不存在、UAC 弹窗被点「否」。
 可先用「查看命令(dry-run)」确认调用参数。
 
 **Q: 提示「任务未配置」/「实例不存在」？**
 回到脚本里准备任务：ok-ww 在界面里配置并保存「每日任务」；MAA 勾选任务队列并配置 LinkStart 热键；
-异环 MaaNTE / 终末地 MaaEnd 在 MXU 里建好实例，并在清日常页对应行内填写实例名
-（异环若游戏未运行，Hub 会自动打开启动器等游戏；请确保 NTELauncher 可正常登录）。改完再重试。
+异环 MaaNTE / 终末地 MaaEnd 在 MXU 里建好实例，并在清日常页对应行内填写实例名；
+异环还需在 MaaNTE 设置 → 热键里启用「开始任务」全局热键（默认 Ctrl+F10）。改完再重试。
 
 **Q: 清日常时脚本窗口弹在后台 / 抢鼠标？**
 脚本本身需要前台输入（尤其 MaaNTE / MaaEnd 的 Win32-Front、ok-ww），执行期间请勿操作电脑；
@@ -709,7 +733,18 @@ MAA 的 `debug\gui.log`），修好后重跑队列即可；点「停止」只会
 尚未单独保存过设置的行。配置目录不可写时会提示「配置文件无法写入」。
 
 **Q: 关闭窗口是最小化还是退出？**
-设置 → 启动器 → 关闭窗口：可选「退出程序」或「最小化到任务栏」。
+设置 → 启动器 → 关闭窗口：可选「退出程序」或「最小化（按托盘设置）」；勾选「最小化到系统托盘」
+时最小化会隐藏到托盘，否则最小化到任务栏。
+
+**Q: 最小化到托盘后找不回来 / 托盘图标不显示？**
+默认开启：点「—」或关闭行为选「最小化（按托盘设置）」会隐藏到托盘；托盘图标**左键单击 / 双击**
+恢复窗口，**右键菜单**有「打开主界面」「退出」。图标不显示时，确认 设置 → 启动器 →
+「最小化到系统托盘」已勾选；Windows 资源管理器重启 / 托盘折叠区可能把图标收进「^」；
+托盘创建失败会自动降级为传统最小化，不影响使用。不想用托盘可在设置里取消勾选。
+
+**Q: 退出后托盘图标残留？**
+正常退出（关闭选「退出程序」或托盘菜单「退出」）会删除托盘图标；如果程序被强杀 / 崩溃后残留，
+重新启动 Hub 再正常退出即可，或在托盘里右键「退出」；任务栏设置里也可以清理无效图标。
 
 **Q: 窗口太小 / 文字看起来挤？**
 v0.10 默认窗口 1180×760、最小 1000×640：拖动**自绘标题栏**可移动窗口，拖动窗口边缘 / 四角
@@ -773,6 +808,7 @@ git config --local https.proxy http://127.0.0.1:7897
   python tools/test_game_exe.py     :: 游戏启动器发现自测（不启动游戏）
   python tools/test_game_launch.py  :: 游戏启动策略 / 等待逻辑自测（mock，不启动游戏）
   python tools/test_elevation.py    :: 提权决策自测（--elevation-check，不弹 UAC）
+  python tools/test_tray.py        :: 托盘设置 / 幂等 / 降级自测（不建真实托盘）
   ```
 
   详细结果、已知缺陷与未覆盖点见 [docs/qa-report.md](docs/qa-report.md)；

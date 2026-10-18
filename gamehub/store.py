@@ -123,6 +123,7 @@ DEFAULT_SETTINGS = {
     "check_update_on_start": True,
     "refresh_interval": 1.5,
     "close_action": "exit",
+    "minimize_to_tray": True,
     "clash_exe": "",
     "daily_default_timeout": 120,
     "daily_show_preview": True,
@@ -1658,7 +1659,7 @@ def _clean_settings(value):
         out["accent"] = accent.strip().lower()
     for field in ("check_update_on_start", "daily_show_preview",
                   "adb_enabled", "daily_close_after",
-                  "auto_download_update"):
+                  "auto_download_update", "minimize_to_tray"):
         if isinstance(value.get(field), bool):
             out[field] = value[field]
     interval = value.get("refresh_interval")
