@@ -1,5 +1,7 @@
 # CHANGELOG
 
+> 最新版本在最上方。
+
 ## v0.7.0 (2026-10-18)
 
 - **鸣潮启动修复**：`ok-ww.exe` 只是 PyAppify 启动器 / 更新器，不是脚本本体。新增启动规格
@@ -64,7 +66,7 @@
   `interface.json` 版本值非字符串时回退（QA-02）；版本比较支持预发布号与短版本（QA-04）；
   进程名清洗忽略非字符串项（QA-05）；注册表 `DisplayIcon` 带图标索引时正确解析（QA-09）
 - 新增回归测试 `tools/regression_test.py`（标准库 unittest，57 个用例）与 `docs/qa-report.md` 测试报告
-- 新增 GitHub Pages 项目主页：<https://diaohesi.github.io/ALL-MY-MAA/>
+- 新增 GitHub Pages 项目主页：<https://diaohesi.github.io/AllMyMaa/>
   （`docs/index.html` + `docs/site.css`，`.github/workflows/pages.yml` 自动部署）
 - 新增 `tools/verify_exe.ps1` 本地打包验证脚本
 - 更新 README（在线主页入口、自动检测说明、目录结构、常见问题）
