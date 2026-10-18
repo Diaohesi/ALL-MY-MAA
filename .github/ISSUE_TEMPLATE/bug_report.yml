@@ -1,0 +1,50 @@
+name: Bug 反馈
+description: 报告 GameHub 使用中遇到的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请先确认使用的是最新版本（见 [Releases](https://github.com/Diaohesi/ALL-MY-MAA/releases)）。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么？期望的结果是什么？
+      placeholder: 例如：点击「启动游戏」没有反应……
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量写清楚点击了哪里、之前做了什么。
+      placeholder: |
+        1. 打开 Hub
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: GameHub 版本
+      description: 界面右上角显示的版本号，或下载的 Release 版本
+      placeholder: v0.4.0
+  - type: textarea
+    id: environment
+    attributes:
+      label: 系统环境
+      description: Windows 版本、Python 版本（如果源码运行）、涉及的脚本版本
+      placeholder: Windows 11 24H2 / Python 3.13 / MAA v6.19.0
+  - type: textarea
+    id: config
+    attributes:
+      label: 相关配置（可选）
+      description: 删除其中涉及隐私的路径后，贴上 `config.json` 中出问题的卡片配置
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图（可选）
+      description: 直接把截图拖进输入框即可

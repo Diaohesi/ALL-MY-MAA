@@ -1,5 +1,13 @@
 # 游戏脚本中心 · GameHub Lite v0.4.0
 
+<p align="center">
+  <a href="https://github.com/Diaohesi/ALL-MY-MAA/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/ALL-MY-MAA?label=release&color=4fc3ff"></a>
+  <a href="https://github.com/Diaohesi/ALL-MY-MAA/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/Diaohesi/ALL-MY-MAA?color=b98bff"></a>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D7">
+  <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
+</p>
+
 一个 Windows 桌面启动器：把 **明日方舟（MAA）**、**异环（MaaNTE）**、
 **鸣潮（ok-ww）**、**明日方舟终末地（MaaEnd）** 等游戏脚本收进同一个窗口，
 并且可以**可视化添加任意新游戏**。
@@ -12,6 +20,22 @@
 <p align="center">
   <img src="docs/add-dialog.png" width="640" alt="添加游戏对话框">
 </p>
+
+## 下载
+
+- **推荐**：到 [Releases](https://github.com/Diaohesi/ALL-MY-MAA/releases) 下载
+  打包好的 `GameHub.exe`，放到 `GameHub/` 文件夹里双击 `启动游戏中心.bat` 即可，
+  **不需要安装 Python 和 Pillow**。
+- 源码运行 / 自己打包：
+
+  ```bat
+  git clone https://github.com/Diaohesi/ALL-MY-MAA.git GameHub
+  cd GameHub
+  python -m pip install pillow
+  ```
+
+- 问题反馈：[Issues](https://github.com/Diaohesi/ALL-MY-MAA/issues)
+
 
 ## 功能
 
@@ -145,6 +169,9 @@ GameHub/
 │  ├─ create_shortcut.ps1  创建桌面快捷方式（由根目录 bat 调用）
 │  ├─ grab_hub.py          后台截取窗口（调试 / 文档截图）
 │  └─ preview.py           截图小工具（调试）
+├─ .github/                GitHub 维护配置
+│  ├─ workflows/build-exe.yml   自动打包 GameHub.exe / 发布 Release
+│  └─ ISSUE_TEMPLATE/bug_report.yml
 ├─ docs/screenshot.png     界面截图
 ├─ docs/add-dialog.png     添加游戏对话框截图
 ├─ 启动游戏中心.bat
@@ -178,6 +205,22 @@ MaaNTE 让它自行检查更新。
 
 **Q: 提示需要管理员权限？**
 `ok-ww` 自身要求管理员权限，Hub 会自动以管理员方式拉起（可能弹 UAC，点「是」）。
+
+**Q: 访问 / 推送 GitHub 很慢或失败？**
+先打开 Clash Verge，再给 git 设置一次本地代理即可：
+
+```bat
+git config --local http.proxy http://127.0.0.1:7897
+git config --local https.proxy http://127.0.0.1:7897
+```
+
+（端口按 Clash Verge 实际设置调整；取消代理用 `--unset`。）
+
+## 参与开发
+
+- 欢迎提交 [Issue](https://github.com/Diaohesi/ALL-MY-MAA/issues) 反馈问题或建议；
+- Pull Request 前请先跑一遍 Hub，确认添加/编辑卡片、启动脚本、启动游戏等功能正常；
+- 提交信息建议使用 `feat:`、`fix:`、`docs:` 等前缀。
 
 ## 致谢与声明
 
