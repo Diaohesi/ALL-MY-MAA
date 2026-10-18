@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地配置与快捷方式（每台机器不同）
+config.json
+*.lnk
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
+.DS_Store
