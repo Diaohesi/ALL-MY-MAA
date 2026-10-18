@@ -1851,8 +1851,10 @@ class DailyPlanTests(TempDirTest):
         apps = self._apps()
         p1, p2, p3 = self._patches()
         with p1, p2, p3, mock.patch.object(
-                daily, "launch_elevated",
-                side_effect=AssertionError("dry-run 不应启动进程")):
+                store, "hub_is_elevated", return_value=True), \
+                mock.patch.object(daily, "launch_elevated",
+                                  side_effect=AssertionError(
+                                      "dry-run 不应启动进程")):
             plans = daily.dry_run(apps)
         by_key = {plan["key"]: plan for plan in plans}
         self.assertEqual([plan["key"] for plan in plans],
@@ -1876,10 +1878,27 @@ class DailyPlanTests(TempDirTest):
         self.assertIn("MaaNTE.exe", nte["command_text"])
         self.assertNotIn("--autostart", nte["params"])
         self.assertEqual(nte["hotkey"]["text"], "Ctrl + F10")
+        self.assertTrue(nte["elevated"])
+        self.assertTrue(nte["use_hotkey"])
         self.assertFalse(nte["manual_start"])
         self.assertEqual(nte["errors"], [])
         maaend = by_key["maaend"]
         self.assertIn('--instance "全套日常"', maaend["params"])
+        # 非提权 + 未运行 -> --autostart 自动开始（不发热键、无 --quit-after-run）
+        nte_app = next(app for app in apps if app["key"] == "nte")
+        p1b, p2b, p3b = self._patches()
+        with p1b, p2b, p3b, \
+                mock.patch.object(store, "hub_is_elevated",
+                                  return_value=False):
+            auto_plan = daily.plan_for(nte_app)
+        self.assertFalse(auto_plan["elevated"])
+        self.assertEqual(auto_plan["args"][:1], ["--autostart"])
+        self.assertEqual(auto_plan["args"][-1], "挂机任务")
+        self.assertIn('--instance "挂机任务"', auto_plan["params"])
+        self.assertNotIn("--quit-after-run", auto_plan["params"])
+        self.assertFalse(auto_plan["use_hotkey"])
+        self.assertFalse(auto_plan["manual_start"])
+        self.assertEqual(auto_plan["errors"], [])
         text = daily.describe_plan(wuwa)
         self.assertIn("命令:", text)
         self.assertIn("超时:", text)
@@ -1912,17 +1931,32 @@ class DailyPlanTests(TempDirTest):
         nte = _make_mxu_daily(self.tmp, "nte")
         maaend = _make_mxu_daily(self.tmp, "maaend")
         p1, p2, p3 = self._patches()
-        with p1, p2, p3:
+        with p1, p2, p3, \
+                mock.patch.object(store, "hub_is_elevated",
+                                  return_value=True):
             nte_plan = daily.plan_for(nte)
             maaend_plan = daily.plan_for(maaend)
             override = dict(maaend)
             override["daily"] = store._clean_daily(
                 {"instance": "快速日常"}, "maaend")
             override_plan = daily.plan_for(override)
-        # 异环改为热键模式，不再使用 --instance/--autostart
+        # 提权：异环走热键模式，不使用 --instance/--autostart
         self.assertEqual(nte_plan["mode"], "mxu_ui")
         self.assertEqual(nte_plan["hotkey"]["text"], "Ctrl + F10")
         self.assertNotIn("--autostart", nte_plan["params"])
+        self.assertTrue(nte_plan["use_hotkey"])
+        # 非提权：异环用 autoStart 实例（--autostart，不带 -q）
+        p1b, p2b, p3b = self._patches()
+        with p1b, p2b, p3b, \
+                mock.patch.object(store, "hub_is_elevated",
+                                  return_value=False):
+            auto_plan = daily.plan_for(nte)
+        self.assertEqual(auto_plan["args"][:1], ["--autostart"])
+        self.assertEqual(auto_plan["autostart_instance"], "挂机任务")
+        self.assertIn('--instance "挂机任务"', auto_plan["params"])
+        self.assertNotIn("--quit-after-run", auto_plan["params"])
+        self.assertFalse(auto_plan["use_hotkey"])
+        # 终末地仍走 --autostart MXU 实例逻辑
         self.assertIn('--instance "全套日常"', maaend_plan["params"])
         self.assertIn('--instance "快速日常"', override_plan["params"])
         self.assertIn("--autostart", override_plan["params"])
@@ -4059,17 +4093,19 @@ class V010AutoUpdateTests(unittest.TestCase):
 class V0101MxuUiTests(TempDirTest):
     """v0.10.1 异环：打开 MaaNTE + 发送开始任务热键（mxu_ui）。"""
 
-    def _plan_patches(self, script_running=False):
+    def _plan_patches(self, script_running=False, hub_elevated=True):
         return (
             mock.patch.object(daily, "_script_running",
                               return_value=script_running),
             mock.patch.object(daily, "_game_running", return_value=False),
             mock.patch.object(store, "snapshot_processes",
                               return_value={"MAANTE.EXE"}
-                              if script_running else set()))
+                              if script_running else set()),
+            mock.patch.object(store, "hub_is_elevated",
+                              return_value=hub_elevated))
 
     def _run_ui(self, app, clock, handle=None, stop_event=None, send=None,
-                window=True, script_running=False):
+                window=True, script_running=False, hub_elevated=True):
         def launcher(exe, params, cwd):
             if handle is None:
                 raise AssertionError("attach 模式不应启动 MaaNTE")
@@ -4085,6 +4121,8 @@ class V0101MxuUiTests(TempDirTest):
             mock.patch.object(store, "snapshot_processes",
                               return_value={"MAANTE.EXE"}
                               if script_running else set()),
+            mock.patch.object(store, "hub_is_elevated",
+                              return_value=hub_elevated),
         ]
         if send is not None:
             patches.append(mock.patch.object(daily, "send_hotkey",
@@ -4142,8 +4180,8 @@ class V0101MxuUiTests(TempDirTest):
 
     def test_mxu_ui_plan_launch_attach_manual(self):
         app = _make_mxu_daily(self.tmp, "nte")
-        p1, p2, p3 = self._plan_patches()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = self._plan_patches()
+        with p1, p2, p3, p4:
             plan = daily.plan_for(app)
         self.assertEqual(plan["mode"], "mxu_ui")
         self.assertEqual(os.path.basename(plan["exe"]), "MaaNTE.exe")
@@ -4152,23 +4190,38 @@ class V0101MxuUiTests(TempDirTest):
         self.assertEqual(plan["args"], [])
         self.assertIn("MaaNTE.exe", plan["command_text"])
         self.assertEqual(plan["hotkey"]["text"], "Ctrl + F10")
+        self.assertTrue(plan["elevated"])
+        self.assertTrue(plan["use_hotkey"])
         self.assertFalse(plan["manual_start"])
         self.assertFalse(plan["attach"])
         self.assertEqual(plan["errors"], [])
         self.assertTrue(plan["log_path"])
-        # 已在运行 -> attach（不启动、不报错）
-        p1, p2, p3 = self._plan_patches(script_running=True)
-        with p1, p2, p3:
+        # 提权 + 已运行 -> attach，仍走热键（不启动、不报错）
+        p1, p2, p3, p4 = self._plan_patches(script_running=True)
+        with p1, p2, p3, p4:
             plan_attached = daily.plan_for(app)
         self.assertTrue(plan_attached["attach"])
+        self.assertTrue(plan_attached["use_hotkey"])
+        self.assertFalse(plan_attached["manual_start"])
         self.assertEqual(plan_attached["errors"], [])
-        # 热键禁用 -> manual_start + 手动提示
+        # 非提权 + 已运行 + 目标高权限 -> manual（提示管理员重启）
+        p1, p2, p3, p4 = self._plan_patches(script_running=True,
+                                            hub_elevated=False)
+        with p1, p2, p3, p4, \
+                mock.patch.object(daily, "mxu_target_elevated",
+                                  return_value=True):
+            plan_manual_admin = daily.plan_for(app)
+        self.assertTrue(plan_manual_admin["manual_start"])
+        self.assertIn("非管理员", plan_manual_admin["manual_reason"])
+        self.assertIn("管理员身份重启", plan_manual_admin["manual_reason"])
+        self.assertFalse(plan_manual_admin["use_hotkey"])
+        # 热键禁用（提权）-> manual_start + 手动提示
         manual = _make_mxu_daily(os.path.join(self.tmp, "manual"), "nte")
         _write_json(daily.mxu_paths(manual)["config"], {
             "settings": {"hotkeys": {
                 "startTasks": "Ctrl+F10", "globalEnabled": False}}})
-        p1, p2, p3 = self._plan_patches()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = self._plan_patches()
+        with p1, p2, p3, p4:
             plan_manual = daily.plan_for(manual)
         self.assertTrue(plan_manual["manual_start"])
         self.assertTrue(any("手动" in warning
@@ -4177,7 +4230,7 @@ class V0101MxuUiTests(TempDirTest):
         # 缺 MaaNTE.exe -> 明确错误
         missing = {"key": "nte", "game": "异环",
                    "script_exe": os.path.join(self.tmp, "nope", "MaaNTE.exe")}
-        with p1, p2, p3:
+        with p1, p2, p3, p4:
             plan_missing = daily.plan_for(missing)
         self.assertTrue(any("未找到" in error
                             for error in plan_missing["errors"]))
@@ -4287,6 +4340,225 @@ class V0101MxuUiTests(TempDirTest):
         self.assertEqual(result3["state"], daily.FAILED)
         self.assertIn("未检测到 MaaNTE 主窗口", result3["reason"])
         self.assertTrue(handle3.terminated)
+
+
+# ---------------------------------------------------------------- v0.10.2 UIPI 提权分流
+class V0102UipiTests(TempDirTest):
+    """v0.10.2 异环清日常 UIPI 分流：提权热键 / 非提权 autostart / attach 手动。"""
+
+    @staticmethod
+    def _autostart_config(instance_id=""):
+        return {
+            "settings": {
+                "hotkeys": {"startTasks": "Ctrl+F10", "globalEnabled": True},
+                "autoStartInstanceId": instance_id},
+            "instances": [
+                {"id": "one", "name": "空任务", "tasks": [
+                    {"taskName": "DailyTask", "enabled": False}]},
+                {"id": "two", "name": "挂机任务", "tasks": [
+                    {"taskName": "DailyTask", "enabled": True}]},
+            ],
+        }
+
+    def _make_app(self, name="nte"):
+        app = _make_mxu_daily(os.path.join(self.tmp, name), "nte")
+        _write_json(daily.mxu_paths(app)["config"], self._autostart_config())
+        return app
+
+    def _plan(self, app, hub_elevated=True, script_running=False,
+              target_elevated=True):
+        patches = [
+            mock.patch.object(store, "hub_is_elevated",
+                              return_value=hub_elevated),
+            mock.patch.object(daily, "_script_running",
+                              return_value=script_running),
+            mock.patch.object(daily, "_game_running", return_value=False),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value={"MAANTE.EXE"}
+                              if script_running else set()),
+        ]
+        if script_running:
+            patches.append(mock.patch.object(daily, "mxu_target_elevated",
+                                             return_value=target_elevated))
+        for patcher in patches:
+            patcher.start()
+        try:
+            return daily.plan_for(app)
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_elevation_helpers(self):
+        with mock.patch.object(store.ctypes, "windll") as windll:
+            windll.shell32.IsUserAnAdmin.return_value = 1
+            self.assertTrue(store.hub_is_elevated())
+            windll.shell32.IsUserAnAdmin.return_value = 0
+            self.assertFalse(store.hub_is_elevated())
+            windll.shell32.IsUserAnAdmin.side_effect = RuntimeError("x")
+            self.assertFalse(store.hub_is_elevated())
+        # 非法的 pid -> None（不崩溃）
+        self.assertIsNone(store.process_is_elevated(0))
+        self.assertIsNone(store.process_is_elevated(None))
+        # 读不到 MaaNTE pid -> 保守视为高权限
+        with mock.patch.object(store, "pids_for_procs", return_value=set()):
+            self.assertTrue(daily.mxu_target_elevated({}))
+        with mock.patch.object(store, "pids_for_procs", return_value={1}), \
+                mock.patch.object(store, "process_is_elevated",
+                                  return_value=True):
+            self.assertTrue(daily.mxu_target_elevated({}))
+        with mock.patch.object(store, "pids_for_procs", return_value={1}), \
+                mock.patch.object(store, "process_is_elevated",
+                                  return_value=False):
+            self.assertFalse(daily.mxu_target_elevated({}))
+        with mock.patch.object(store, "pids_for_procs", return_value={1}), \
+                mock.patch.object(store, "process_is_elevated",
+                                  return_value=None):
+            self.assertTrue(daily.mxu_target_elevated({}))
+        with mock.patch.object(store, "pids_for_procs",
+                               return_value={1, 2}) as pids, \
+                mock.patch.object(store, "process_is_elevated",
+                                  side_effect=[True, False]):
+            self.assertTrue(daily.mxu_target_elevated(
+                {"script_procs": ["CUSTOM.EXE"]}))
+            pids.assert_called_once_with(["CUSTOM.EXE"])
+
+    def test_autostart_instance_and_hint(self):
+        app = self._make_app()
+        # 默认无 autoStartInstanceId -> 首个有启用任务的实例
+        self.assertEqual(daily.mxu_autostart_instance(app), "挂机任务")
+        # 按 id 匹配
+        _write_json(daily.mxu_paths(app)["config"],
+                    self._autostart_config("one"))
+        self.assertEqual(daily.mxu_autostart_instance(app), "空任务")
+        # 按 name 匹配
+        _write_json(daily.mxu_paths(app)["config"],
+                    self._autostart_config("挂机任务"))
+        self.assertEqual(daily.mxu_autostart_instance(app), "挂机任务")
+        # 无实例 / 无启用任务 -> ""
+        _write_json(daily.mxu_paths(app)["config"], {"instances": []})
+        self.assertEqual(daily.mxu_autostart_instance(app), "")
+        _write_json(daily.mxu_paths(app)["config"], {
+            "instances": [{"name": "空", "tasks": [
+                {"enabled": False}]}]})
+        self.assertEqual(daily.mxu_autostart_instance(app), "")
+        # 提示文案四分支
+        self.assertIn("Ctrl+F10", daily.mxu_ui_hint(True))
+        self.assertIn("无法发送热键", daily.mxu_ui_hint(
+            False, attach=True, target_elevated=True))
+        self.assertIn("管理员身份重启", daily.mxu_ui_hint(
+            False, attach=True, target_elevated=True))
+        self.assertIn("Ctrl+F10", daily.mxu_ui_hint(
+            False, attach=True, target_elevated=False))
+        self.assertIn("自动开始任务", daily.mxu_ui_hint(False))
+
+    def test_plan_four_branches(self):
+        app = self._make_app()
+        # 1) Hub 提权 -> Ctrl+F10 热键
+        plan = self._plan(app, hub_elevated=True)
+        self.assertTrue(plan["elevated"])
+        self.assertTrue(plan["use_hotkey"])
+        self.assertFalse(plan["manual_start"])
+        self.assertEqual(plan["args"], [])
+        self.assertNotIn("--autostart", plan["params"])
+        # 2) 非提权 + 未运行 -> --autostart --instance（无 -q、无热键）
+        plan2 = self._plan(app, hub_elevated=False)
+        self.assertFalse(plan2["elevated"])
+        self.assertEqual(plan2["autostart_instance"], "挂机任务")
+        self.assertEqual(plan2["args"], ["--autostart", "--instance",
+                                         "挂机任务"])
+        self.assertIn('--instance "挂机任务"', plan2["params"])
+        self.assertNotIn("--quit-after-run", plan2["params"])
+        self.assertFalse(plan2["use_hotkey"])
+        self.assertFalse(plan2["manual_start"])
+        self.assertEqual(plan2["errors"], [])
+        # 3) 非提权 + 已运行 + MaaNTE 高权限 -> 手动（管理员重启提示）
+        plan3 = self._plan(app, hub_elevated=False, script_running=True,
+                           target_elevated=True)
+        self.assertTrue(plan3["attach"])
+        self.assertTrue(plan3["manual_start"])
+        self.assertFalse(plan3["use_hotkey"])
+        self.assertIn("非管理员", plan3["manual_reason"])
+        self.assertIn("管理员身份重启", plan3["manual_reason"])
+        # 4) 非提权 + 已运行 + MaaNTE 普通权限 -> 仍可发 Ctrl+F10
+        plan4 = self._plan(app, hub_elevated=False, script_running=True,
+                           target_elevated=False)
+        self.assertTrue(plan4["attach"])
+        self.assertTrue(plan4["use_hotkey"])
+        self.assertFalse(plan4["manual_start"])
+        # 附加：非提权未运行但无可用实例 -> 手动提示
+        no_instance = self._make_app("no_instance")
+        _write_json(daily.mxu_paths(no_instance)["config"], {"instances": []})
+        plan5 = self._plan(no_instance, hub_elevated=False)
+        self.assertTrue(plan5["manual_start"])
+        self.assertIn("未找到可用 MXU 实例", plan5["manual_reason"])
+        self.assertEqual(plan5["args"], [])
+
+    def test_run_nonadmin_autostart_and_attach_manual(self):
+        # 非提权自动开始：launcher 收到 --autostart 参数、不发送热键、日志完成
+        app = self._make_app("auto")
+        log = daily.mxu_latest_log(app)
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        calls = []
+
+        def launcher(exe, params, cwd):
+            calls.append((exe, params, cwd))
+            _append_text(log, "[Task] 停止任务 tasks-completed\n")
+            return handle
+
+        patches = [
+            mock.patch.object(store, "hub_is_elevated", return_value=False),
+            mock.patch.object(daily, "_now", clock.now),
+            mock.patch.object(daily, "_sleep", clock.sleep),
+            mock.patch.object(daily, "send_hotkey",
+                              side_effect=AssertionError("非提权不应发热键")),
+            mock.patch.object(daily, "_script_running", return_value=False),
+            mock.patch.object(store, "snapshot_processes", return_value=set()),
+        ]
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = daily.run(app, launcher=launcher)
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertTrue(calls)
+        params = calls[0][1]
+        self.assertIn("--autostart", params)
+        self.assertIn('--instance "挂机任务"', params)
+        self.assertNotIn("--quit-after-run", params)
+        self.assertTrue(handle.closed)
+        # 非提权 + 已运行高权限 -> manual：不启动、不发热键、不结束用户实例
+        attached = self._make_app("attached")
+        clock2 = FakeClock()
+        patches2 = [
+            mock.patch.object(store, "hub_is_elevated", return_value=False),
+            mock.patch.object(daily, "_now", clock2.now),
+            mock.patch.object(daily, "_sleep", clock2.sleep),
+            mock.patch.object(daily, "send_hotkey",
+                              side_effect=AssertionError("manual 不应发热键")),
+            mock.patch.object(daily, "_script_running", return_value=True),
+            mock.patch.object(daily, "mxu_target_elevated",
+                              return_value=True),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value={"MAANTE.EXE"}),
+        ]
+
+        def fail_launcher(*args, **kwargs):
+            raise AssertionError("attach 模式不应启动 MaaNTE")
+
+        for patcher in patches2:
+            patcher.start()
+        try:
+            result2 = daily.run(attached, launcher=fail_launcher)
+        finally:
+            for patcher in reversed(patches2):
+                patcher.stop()
+        self.assertEqual(result2["state"], daily.FAILED)
+        self.assertIn("非管理员", result2["reason"])
+        self.assertIn("管理员身份重启", result2["reason"])
+        self.assertIsNone(result2["pid"])
 
 
 def main():

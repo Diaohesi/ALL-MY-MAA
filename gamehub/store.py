@@ -1535,6 +1535,53 @@ def _clean_detect(value):
     return result or None
 
 
+# ------------------------------------------------------------------ 权限/进程环境
+def hub_is_elevated():
+    """当前 Hub 进程是否以管理员（高完整性）运行。"""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        try:
+            import ctypes as _ctypes
+            return bool(_ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+
+def process_is_elevated(pid):
+    """目标进程是否提权（读不到时返回 False）。"""
+    try:
+        import ctypes as _ctypes
+        from ctypes import wintypes as _wintypes
+        kernel32 = _ctypes.windll.kernel32
+        advapi32 = _ctypes.windll.advapi32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        TOKEN_QUERY = 0x0008
+        TokenElevation = 20
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                      False, int(pid))
+        if not handle:
+            return None
+        token = _wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(handle, TOKEN_QUERY,
+                                         _ctypes.byref(token)):
+            kernel32.CloseHandle(handle)
+            return None
+        elevation = _wintypes.DWORD()
+        size = _wintypes.DWORD()
+        ok = advapi32.GetTokenInformation(token, TokenElevation,
+                                          _ctypes.byref(elevation),
+                                          _ctypes.sizeof(elevation),
+                                          _ctypes.byref(size))
+        kernel32.CloseHandle(token)
+        kernel32.CloseHandle(handle)
+        if not ok:
+            return None
+        return bool(elevation.value)
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ 清日常配置（v4 可选字段）
 _GENERIC_DAILY = {"enabled": False, "task": "", "instance": "", "config": "",
                   "timeout_min": 120, "extra_args": [], "close_after": False}

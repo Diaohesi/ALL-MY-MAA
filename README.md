@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.10.1
+# All-My-Maa · 游戏脚本中心 v0.10.2
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -37,7 +37,10 @@
 打包版替换 exe 重启、源码模式 `git pull`，安装前确认、失败降级到发布页）；
 「启动游戏」按各脚本自己的方式重构：鸣潮直启 `Wuthering Waves.exe`、终末地走鹰角启动器、
 MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（登录后点开始游戏，避免直启
-`HTGame.exe` 的 UE map 报错）。异环清日常也改为打开 MaaNTE 后发送「开始任务」热键（Ctrl+F10）。
+`HTGame.exe` 的 UE map 报错）。异环清日常 v0.10.2 起按权限分流：**Hub 未提权且 MaaNTE 未运行**
+→ 用 `--autostart` 自动开始；**MaaNTE 已以高权限运行** → 普通权限 Hub 发不了热键（UIPI），
+提示手动点击或以管理员身份重启 Hub；**Hub 已提权** → 打开 MaaNTE 后发送「开始任务」热键
+（默认 `Ctrl+F10`）。
 
 **在线主页（GitHub Pages）**：<https://diaohesi.github.io/All-My-Maa/>
 — 截图、功能一览和下载入口都在这一页。
@@ -291,11 +294,16 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 - **明日方舟 MAA**：在 MAA 里勾选日常任务队列（建议单独建一个「日常」配置），并在
   MAA 设置 → 热键里配置 **LinkStart（开始任务）** 热键；Hub 会带 `--skip-startup-auto-run`
   启动 MAA，等窗口 / 日志就绪后自动发送这个热键。MAA 已经在运行时，Hub 只发热键、不接管进程。
-- **异环 MaaNTE**：在 MaaNTE 设置 → 热键里启用「开始任务」**全局热键**（默认 `Ctrl+F10`）。
-  v0.10.1 起 Hub 会打开 MaaNTE（正常界面，不带 `--autostart`），等主窗口就绪并置前后发送这个热键，
-  等价于手动点「开始任务」；热键没启用 / 读不到 / 发送失败时只打开窗口并**提示手动点击**，
-  不会静默算成功。MaaNTE 已经在运行时，Hub 只发热键、不结束你自己开的实例；
-  实例名 / 任务字段已不再是必需（可留空或保留）。
+- **异环 MaaNTE**：按 Hub / MaaNTE 的权限自动分流（v0.10.2）：
+  - **Hub 未提权 + MaaNTE 未运行** → 用 `MaaNTE.exe --autostart --instance "<实例名>"`
+    启动并自动开始任务（实例取 MaaNTE 的 `autoStartInstanceId`，否则取第一个有启用任务的实例）；
+    不发送热键，因此没有 UIPI 问题；
+  - **MaaNTE 已运行且是管理员权限**（或读不到权限，保守按高权限处理）→ 普通权限 Hub 无法向它
+    发送输入，会**提示手动点击「开始任务」**，或以管理员身份重启 Hub 后重试；不会静默算成功；
+  - **Hub 已提权**（或 MaaNTE 由普通权限启动）→ 打开 MaaNTE（正常界面）、等主窗口就绪并置前，
+    发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用）；
+  - 没有可用实例、热键没启用 / 读不到 / 发送失败 → 打开窗口并提示手动点击；
+    MaaNTE 已在运行时只提示 / 发热键，不结束你自己开的实例；实例名 / 任务字段不再是必需（可保留）。
 - **终末地 MaaEnd**：在 MXU 里准备好实例（本机示例：「挂机任务」/「全套日常」），
   并在清日常页对应行内填写**实例名**；实例带「启动游戏」前置任务时会自动拉起游戏，
   仍使用 `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`。
@@ -320,7 +328,7 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 | --- | --- | --- | --- |
 | 鸣潮 ok-ww | `pythonw.exe "<working>\main.py" -t DailyTask -e`（cwd=working，管理员） | 进程退出 + 日志出现 `Successfully Executed Task, Exiting Game and App!` | 90 分钟 |
 | 明日方舟 MAA | `MAA.exe --skip-startup-auto-run [--config "<配置名>"]` → 就绪后发送 LinkStart 热键 | `MAA\debug\gui.log` 出现「任务已全部完成！」；失败「任务出错」、停止「已停止」 | 120 分钟 |
-| 异环 MaaNTE | 打开 `MaaNTE.exe`（正常界面）→ 等待主窗口 / 置前 → 发送「开始任务」全局热键（默认 `Ctrl+F10`） | `debug` 最新日志增量出现「停止任务 / tasks-completed / 已停止」；热键缺失 / 发送失败 → 提示手动点击（不静默成功） | 120 分钟 |
+| 异环 MaaNTE | **未提权 + 未运行**：`MaaNTE.exe --autostart --instance "<实例名>"` 自动开始；**已运行高权限**：提示手动 / 管理员重启 Hub；**已提权或目标普通权限**：打开 UI → 置前 → 发送「开始任务」热键（默认 `Ctrl+F10`） | `debug` 最新日志增量出现「停止任务 / tasks-completed / 已停止」；热键缺失 / 无实例 / 发送失败 → 提示手动点击（不静默成功） | 120 分钟 |
 | 终末地 MaaEnd | `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出 | 150 分钟 |
 
 **超时、停止与失败处理**
@@ -378,7 +386,9 @@ v0.7.0 起，Hub 为鸣潮生成**启动规格**（`launch`，type=python）：�
 - **MXU（MaaNTE / MaaEnd）**：Tauri + React 的通用 GUI，读取符合 PI V2 的 `interface.json`，
   内嵌 MaaFramework，官方支持 `--autostart --instance "<实例名>" --quit-after-run` 自启动执行；
   终末地 MaaEnd 仍走这条命令行；异环 MaaNTE v0.10.1 起改为打开 UI 后发送「开始任务」热键
-  （默认 `Ctrl+F10`），因为 MaaNTE 的 UE 游戏直启会报 map 错误；
+  （默认 `Ctrl+F10`），因为 MaaNTE 的 UE 游戏直启会报 map 错误；v0.10.2 起再按权限分流：
+  普通权限且 MaaNTE 未运行时回到 `--autostart --instance` 自动开始（绕开 UIPI），
+  已运行的高权限 MaaNTE 无法接收普通权限 Hub 的热键，改为提示手动 / 以管理员重启；
 - **ok-script / ok-ww**：Python + PySide6 自动化框架，任务可被命令行 `-t <任务名> -e` 指定，
   完成后退出并关闭游戏；ok-ww 官方计划任务也是这么调用的；
 - **PyAppify**：Rust / Tauri 启动器 + 更新器，负责把 Python 与脚本装到 `data/apps/<app>/`，
@@ -548,6 +558,10 @@ GameHub/
 - 清日常页的勾选 / 独立状态由 `gamehub/daily.py` 的 `DailyManager` 维护
   （`start_single` / `stop_single` / `start_queue` / `snapshot`），可运行
   `python tools/test_ui_state.py` 验证状态隔离与勾选逻辑。
+- 异环清日常的提权分流在 `daily._plan_mxu_ui`：`store.hub_is_elevated()` 判断 Hub、
+  `daily.mxu_target_elevated()` 判断已运行 MaaNTE（`process_is_elevated`），
+  未提权 + 未运行走 `--autostart --instance`、已运行高权限给出 `manual_reason`、提权走
+  `send_hotkey`；自测在 `tools/test_daily.py`（mock，覆盖各权限分支）。
 - 游戏运行检测规则在 `gamehub/detector.py`（`BUILTIN_RULES` / `read_game_rules`）：
   MaaNTE / MaaEnd 优先读各自 `interface.json`，其余用内置规则；改完可运行
   `python tools/test_detect_game.py` 查看每行当前生效的规则与真实检测结果。
@@ -604,10 +618,17 @@ UE map 报错，所以改回启动器；出现回退提示时按提示操作即�
 若点「否」，该项会记为失败。
 
 **Q: 异环清日常没有自动开始？**
-v0.10.1 起异环改为「打开 MaaNTE + 发送开始任务热键」：确认 MaaNTE 设置 → 热键里已启用
-「开始任务」**全局热键**（默认 `Ctrl+F10`），且没有被其它软件占用；Hub 打开 MaaNTE 并置前后
-会发送该热键，等价手动点「开始任务」。如果热键关闭 / 读不到 / 发送失败，Hub 会保留窗口并在
-日志与 toast 里**提示手动点击**，该项记为失败（不会静默成功）；MaaNTE 已在运行时只发热键。
+v0.10.2 起按权限自动分流：
+1. **Hub 未提权、MaaNTE 也没在运行**：Hub 用 `--autostart --instance "<实例名>"` 启动 MaaNTE
+   并自动开始任务，不需要热键；实例取 `autoStartInstanceId` 或第一个有启用任务的实例，
+   找不到实例时提示手动点击；
+2. **MaaNTE 已经在运行且是管理员权限**：普通权限 Hub 受 Windows UIPI 限制，无法向高权限进程
+   发送 `Ctrl+F10`，会提示手动点「开始任务」，或以**管理员身份重启 Hub** 后重试；
+3. **Hub 以管理员身份运行**（或 MaaNTE 是普通权限启动）：打开 MaaNTE、等窗口就绪并置前后
+   发送「开始任务」全局热键（默认 `Ctrl+F10`，需在 MaaNTE 设置 → 热键里启用且未被占用）；
+   热键缺失 / 发送失败同样提示手动点击，不静默算成功。
+
+想看实际走哪条分支，可先用「查看命令(dry-run)」确认命令（autostart / UI+热键 / 手动提示）。
 
 **Q: 点「清日常」没反应 / 一直没开始？**
 先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA / 异环热键

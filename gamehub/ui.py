@@ -2323,7 +2323,20 @@ class GameHub:
                 if reason:
                     hint.configure(text=reason, fg="#ffce6b")
                 elif key == "nte":
-                    hint.configure(text=daily.MXU_UI_NOTE, fg=T.UI_TEXT_3)
+                    app = self._app_by_key(key)
+                    attach = False
+                    target_elevated = True
+                    elevated = store.hub_is_elevated()
+                    try:
+                        attach = daily._script_running(app) if app else False
+                        if attach and not elevated and app:
+                            target_elevated = daily.mxu_target_elevated(app)
+                    except Exception:
+                        attach = False
+                    hint.configure(
+                        text=daily.mxu_ui_hint(elevated, attach=attach,
+                                               target_elevated=target_elevated),
+                        fg=T.UI_TEXT_3)
                 else:
                     hint.configure(text="", fg=T.UI_TEXT_3)
 
@@ -2414,6 +2427,12 @@ class GameHub:
                        activebackground=T.UI_PANEL,
                        activeforeground=T.UI_TEXT,
                        font=self.f_small).pack(anchor="w", pady=2)
+        self._label(
+            launcher,
+            "提示：以管理员身份运行 Hub 才能在 MaaNTE 已运行时发送「开始任务」热键；"
+            "普通权限下异环清日常会改用 --autostart 自动开始。",
+            color=T.UI_TEXT_3, font=self.f_aux, bg=T.UI_PANEL,
+            wraplength=440, justify="left").pack(anchor="w", pady=(2, 0))
         row = tk.Frame(launcher, bg=T.UI_PANEL)
         row.pack(anchor="w", pady=2)
         self._label(row, "状态刷新间隔：", color=T.UI_TEXT_2,

@@ -815,8 +815,65 @@ def _plan_mxu(app, settings, plan):
         plan["notes"].append("（--quit-after-run 为完成判定所需，任务结束后 MXU 仍会退出）")
 
 
+def mxu_autostart_instance(app):
+    """未提权回退：从 autoStartInstanceId 或首个有启用任务的实例取名称。"""
+    data = mxu_config(app)
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) \
+        else {}
+    instances = [item for item in (data.get("instances") or [])
+                 if isinstance(item, dict)]
+    target = str(settings.get("autoStartInstanceId") or "").strip()
+    if target:
+        for inst in instances:
+            if str(inst.get("id") or "").strip() == target \
+                    or str(inst.get("uuid") or "").strip() == target \
+                    or str(inst.get("name") or "").strip() == target:
+                name = str(inst.get("name") or "").strip()
+                if name:
+                    return name
+    for inst in instances:
+        tasks = [task for task in (inst.get("tasks") or [])
+                 if isinstance(task, dict) and task.get("enabled")]
+        name = str(inst.get("name") or "").strip()
+        if tasks and name:
+            return name
+    return ""
+
+
+def mxu_target_elevated(app):
+    """判断已运行 MaaNTE 是否高完整性；读不到 pid/权限时保守视为 elevated。"""
+    procs = app.get("script_procs") or ["MAANTE.EXE"]
+    try:
+        pids = store.pids_for_procs(procs)
+    except Exception:
+        pids = set()
+    if not pids:
+        return True
+    flags = []
+    for pid in pids:
+        try:
+            flags.append(store.process_is_elevated(pid))
+        except Exception:
+            flags.append(None)
+    if any(flag is True for flag in flags):
+        return True
+    if flags and all(flag is False for flag in flags):
+        return False
+    return True
+
+
+def mxu_ui_hint(elevated, attach=False, target_elevated=True):
+    """UI 异环行提示（按 Hub 提权/目标 MaaNTE 权限切换）。"""
+    if elevated or (attach and not target_elevated):
+        return "异环：打开脚本并发送开始任务（Ctrl+F10）"
+    if attach:
+        return ("异环：Hub 非管理员，无法发送热键；请手动点击开始任务，"
+                "或以管理员身份重启 Hub")
+    return "异环：Hub 非管理员，启动 MaaNTE 时自动开始任务（不发送热键）"
+
+
 def _plan_mxu_ui(app, settings, plan):
-    """v0.10.1 异环：打开 MaaNTE UI + 发送开始任务热键。"""
+    """异环：提权走 UI+热键；未提权走 --autostart 或手动提示。"""
     paths = mxu_paths(app)
     if not paths["exe"] or not os.path.isfile(paths["exe"]):
         plan["errors"].append(
@@ -825,6 +882,41 @@ def _plan_mxu_ui(app, settings, plan):
     hotkey = mxu_ui_hotkey(app)
     log_path = mxu_latest_log(app)
     attach = _script_running(app)
+    elevated = bool(store.hub_is_elevated())
+    autostart_instance = ""
+    use_hotkey = False
+    manual = False
+    manual_reason = ""
+    target_elevated = True
+    args = []
+    if elevated:
+        use_hotkey = hotkey is not None
+        if hotkey is None:
+            manual = True
+            manual_reason = ("未读到 MaaNTE「开始任务」热键或 globalEnabled=false："
+                             "请手动点击开始任务")
+    elif attach:
+        target_elevated = mxu_target_elevated(app)
+        if target_elevated:
+            manual = True
+            manual_reason = ("Hub 非管理员，无法向高权限 MaaNTE 发送开始任务热键；"
+                             "请手动点击 MaaNTE 的「开始任务」，或以管理员身份重启 Hub")
+        elif hotkey is not None:
+            use_hotkey = True
+        else:
+            manual = True
+            manual_reason = ("MaaNTE 已运行但未读到开始任务热键："
+                             "请手动点击开始任务")
+    else:
+        autostart_instance = mxu_autostart_instance(app)
+        if autostart_instance:
+            args = ["--autostart", "--instance", autostart_instance]
+        else:
+            manual = True
+            manual_reason = ("Hub 非管理员且未找到可用 MXU 实例："
+                             "请打开 MaaNTE 后手动点击「开始任务」")
+    force_quote = {2} if len(args) >= 3 else set()
+    command = _build_command(paths["exe"], args, force_quote=force_quote)
     plan.update({
         "mode": "mxu_ui",
         "exe": paths["exe"],
@@ -835,30 +927,45 @@ def _plan_mxu_ui(app, settings, plan):
         "settle_seconds": 0,
         "hotkey": hotkey,
         "attach": attach,
-        "manual_start": hotkey is None,
-        "params": "",
-        "argv": [paths["exe"]],
-        "args": [],
-        "command_text": _build_command(paths["exe"], [])["command_text"],
+        "elevated": elevated,
+        "target_elevated": target_elevated,
+        "use_hotkey": use_hotkey,
+        "autostart_instance": autostart_instance,
+        "manual_start": manual,
+        "manual_reason": manual_reason,
+        "params": command["params"],
+        "argv": command["argv"],
+        "args": command["args"],
+        "command_text": command["command_text"],
         "_app": app,
     })
-    if hotkey:
-        plan["notes"].append(
-            f"启动 MaaNTE 后发送开始任务热键：{hotkey['text']}")
+    if elevated:
+        if hotkey:
+            plan["notes"].append(
+                f"Hub 已提权：打开 MaaNTE 后发送开始任务热键 {hotkey['text']}")
+        else:
+            plan["warnings"].append(manual_reason)
+            plan["notes"].append(MXU_UI_NOTE)
     else:
-        plan["warnings"].append(
-            "未读到 MaaNTE「开始任务」热键或 globalEnabled=false："
-            "打开后需要手动点击开始任务（不会静默成功）")
-        plan["notes"].append(MXU_UI_NOTE)
-    if attach:
-        plan["notes"].append("MaaNTE 已在运行：只发送热键，不结束用户自己打开的实例")
-    else:
-        plan["notes"].append("将以管理员权限启动 MaaNTE（正常界面，不带 --autostart）")
+        if attach:
+            if manual:
+                plan["warnings"].append(manual_reason)
+                plan["notes"].append("MaaNTE 已在运行：只提示，不结束用户实例")
+            else:
+                plan["notes"].append(
+                    "MaaNTE 由普通权限启动，Hub 未提权仍可发送热键")
+        elif autostart_instance:
+            plan["notes"].append(
+                "Hub 未提权：使用 --autostart --instance "
+                f"\"{autostart_instance}\" 自动开始任务（不发送热键、无 UIPI 问题）")
+        else:
+            plan["warnings"].append(manual_reason)
+            plan["notes"].append(MXU_UI_NOTE)
     plan["notes"].append(
         "完成判定：debug 最新日志增量出现「停止任务 / tasks-completed / 已停止」；"
         f"超时 {plan['timeout_min']} 分钟")
     if settings.get("instance") or settings.get("task"):
-        plan["notes"].append("异环已改为热键模式：实例/任务字段不再必须（可保留）")
+        plan["notes"].append("异环实例/任务字段不再必须（可保留，autostart 以脚本配置为准）")
 
 
 def plan_for(app, settings=None):
@@ -1135,7 +1242,8 @@ def _run_mxu_ui(plan, stop_event, on_event, launcher):
     attach = bool(plan.get("attach"))
     if not attach:
         try:
-            handle = launcher(plan["exe"], "", plan.get("cwd"))
+            handle = launcher(plan["exe"], plan.get("params") or "",
+                              plan.get("cwd"))
             pid = handle.pid
         except DailyError as exc:
             result = _base_result(plan, FAILED, str(exc), started=started,
@@ -1149,49 +1257,13 @@ def _run_mxu_ui(plan, stop_event, on_event, launcher):
             return result
     _emit(on_event, type="state", key=plan["key"], state=STARTING,
           pid=pid, game=plan.get("game"))
-    window = None
-    deadline = _now() + 60
-    while _now() < deadline:
-        if _stop_requested(stop_event):
-            if handle is not None:
-                handle.terminate()
-            result = _base_result(plan, STOPPED, "用户停止", pid=pid,
-                                  started=started, log_watcher=watcher)
-            if handle is not None:
-                handle.close()
-            _emit(on_event, type="done", result=result)
-            return result
-        window = _mxu_ui_window(pid)
-        if window:
-            break
-        _sleep(0.5)
-    if not window:
-        if handle is not None:
-            handle.terminate()
-            handle.close()
-        result = _base_result(plan, FAILED, "未检测到 MaaNTE 主窗口",
-                              pid=pid, started=started, log_watcher=watcher)
-        _emit(on_event, type="done", result=result)
-        return result
-    try:
-        detector.focus_window(window.get("hwnd"))
-    except Exception:
-        pass
-    _sleep(0.4)
-
-    hotkey = plan.get("hotkey")
-    manual = bool(plan.get("manual_start")) or not hotkey
-    if not manual:
-        try:
-            sent = send_hotkey(hotkey)
-        except Exception:
-            sent = False
-        if not sent:
-            manual = True
+    use_hotkey = bool(plan.get("use_hotkey")) and not plan.get("manual_start")
+    manual = bool(plan.get("manual_start"))
     if manual:
-        text = ("未找到/无法发送 MaaNTE「开始任务」热键：请手动点击 MaaNTE 中的开始任务")
+        text = plan.get("manual_reason") or (
+            "未找到/无法发送 MaaNTE「开始任务」热键："
+            "请手动点击 MaaNTE 中的开始任务")
         _emit(on_event, type="manual", text=text)
-        # 保留本次打开的 MaaNTE 窗口供用户手动操作；不静默标记成功
         if handle is not None:
             handle.close()
         result = _base_result(plan, FAILED, text, pid=pid,
@@ -1199,9 +1271,63 @@ def _run_mxu_ui(plan, stop_event, on_event, launcher):
         _emit(on_event, type="done", result=result)
         return result
 
-    _emit(on_event, type="state", key=plan["key"], state=RUNNING,
-          pid=pid, game=plan.get("game"))
-    _emit(on_event, type="log", text=f"已发送开始任务热键 {hotkey['text']}")
+    if not use_hotkey:
+        _emit(on_event, type="state", key=plan["key"], state=RUNNING,
+              pid=pid, game=plan.get("game"))
+        _emit(on_event, type="log",
+              text=("Hub 非管理员：已用 --autostart 启动 MaaNTE，"
+                    f"实例 {plan.get('autostart_instance') or '(默认)'} 自动开始任务"))
+    else:
+        window = None
+        deadline = _now() + 60
+        while _now() < deadline:
+            if _stop_requested(stop_event):
+                if handle is not None:
+                    handle.terminate()
+                result = _base_result(plan, STOPPED, "用户停止", pid=pid,
+                                      started=started, log_watcher=watcher)
+                if handle is not None:
+                    handle.close()
+                _emit(on_event, type="done", result=result)
+                return result
+            window = _mxu_ui_window(pid)
+            if window:
+                break
+            _sleep(0.5)
+        if not window:
+            if handle is not None:
+                handle.terminate()
+                handle.close()
+            result = _base_result(plan, FAILED, "未检测到 MaaNTE 主窗口",
+                                  pid=pid, started=started, log_watcher=watcher)
+            _emit(on_event, type="done", result=result)
+            return result
+        try:
+            detector.focus_window(window.get("hwnd"))
+        except Exception:
+            pass
+        _sleep(0.4)
+        hotkey = plan.get("hotkey")
+        sent = False
+        if hotkey:
+            try:
+                sent = send_hotkey(hotkey)
+            except Exception:
+                sent = False
+        if not sent:
+            text = ("无法发送 MaaNTE「开始任务」热键：请手动点击 MaaNTE 中的开始任务，"
+                    "或以管理员身份重启 Hub 后重试")
+            _emit(on_event, type="manual", text=text)
+            if handle is not None:
+                handle.close()
+            result = _base_result(plan, FAILED, text, pid=pid,
+                                  started=started, log_watcher=watcher)
+            _emit(on_event, type="done", result=result)
+            return result
+        _emit(on_event, type="state", key=plan["key"], state=RUNNING,
+              pid=pid, game=plan.get("game"))
+        _emit(on_event, type="log",
+              text=f"已发送开始任务热键 {hotkey['text']}")
     deadline = _now() + plan["timeout_min"] * 60
     missing_log_deadline = _now() + 15
     result = None
