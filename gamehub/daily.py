@@ -14,12 +14,13 @@
 - 只结束「本次由 Hub 启动的进程」（ShellExecuteEx 拿到的进程句柄），
   绝不对用户自己开的进程做 taskkill；MAA 已在运行时只发热键、不接管进程。
 - 不自动改 MAA / ok-ww / MXU 的配置；前置不满足时明确提示设置方法。
-- 只启动脚本自身，不直接启动游戏（是否拉游戏由脚本内配置决定）。
+- 只启动脚本自身；异环例外：清日常前会先按 game_launch 打开启动器并等待游戏。
 """
 import ctypes
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 from ctypes import wintypes
@@ -53,6 +54,7 @@ MAA_FAILURE_MARKERS = ("任务出错:", "任务出错：")
 MAA_STOP_MARKERS = ("已停止", "正在停止……")
 MAA_DAILY_TASK_HINTS = ("开始唤醒", "自动公招", "基建换班", "信用收支",
                         "理智作战", "剩余理智", "领取奖励")
+PRE_GAME_WAIT_SECONDS = 300
 
 # 运行时可被测试替换的钩子
 _now = time.monotonic
@@ -738,12 +740,31 @@ def _plan_mxu(app, settings, plan):
             plan["warnings"].append(
                 f"实例「{instance}」只启用了 {row['enabled_count']} 个任务，请确认这就是日常任务")
         if app.get("key") == "nte":
-            if not row["has_launch_pretask"] and not _game_running(app):
-                plan["errors"].append(
-                    "异环游戏未运行：该实例没有 LaunchGamePC 前置任务，请先点卡片「启动游戏」，"
-                    "或在 MaaNTE 实例里添加「启动游戏」前置任务")
-            elif not row["has_launch_pretask"]:
+            # 异环没有 MaaNTE LaunchGamePC：由 Hub 先打开启动器等游戏
+            if _game_running(app):
                 plan["notes"].append("已检测到异环游戏在运行")
+            else:
+                try:
+                    launch_spec = store.build_game_launch(app)
+                except Exception as exc:
+                    launch_spec = {}
+                    plan["warnings"].append(f"读取异环启动器失败：{exc}")
+                if not launch_spec.get("exe") or \
+                        not os.path.isfile(launch_spec["exe"]):
+                    plan["errors"].append(
+                        "未找到异环启动器 NTELauncher.exe：请先在卡片「启动游戏」"
+                        "里设置，或确认异环安装完整")
+                else:
+                    plan["pre_game"] = {
+                        "spec": launch_spec,
+                        "timeout_s": PRE_GAME_WAIT_SECONDS,
+                        "hint": "将先打开异环启动器，请登录并进入游戏",
+                    }
+                    plan["notes"].append(
+                        "将先打开异环启动器并等待游戏窗口（最长 "
+                        f"{PRE_GAME_WAIT_SECONDS} 秒）：请登录并点击开始游戏")
+                    plan["notes"].append(
+                        "确认游戏运行后再启动 MaaNTE --autostart")
         elif not row["has_launch_pretask"] and not _game_running(app):
             plan["warnings"].append(
                 "该实例没有 LaunchGamePC 前置任务且游戏未运行，任务可能失败")
@@ -771,6 +792,7 @@ def _plan_mxu(app, settings, plan):
         "argv": command["argv"],
         "args": command["args"],
         "command_text": command["command_text"],
+        "_app": app,
     })
     plan["notes"].append("完成判定：MXU 进程退出（--quit-after-run，退出码恒 0，不区分成败）")
     plan["notes"].append("将以管理员权限启动（UAC）；结束时只结束本次启动的 MXU 进程")
@@ -960,17 +982,83 @@ def _run_okww(plan, stop_event, on_event, launcher):
     return result
 
 
+def _launch_pre_game(spec):
+    """按 game_launch spec 普通权限启动游戏启动器（不强制提权）。"""
+    exe = str(spec.get("exe") or "").strip()
+    if not exe or not os.path.isfile(exe):
+        return None, f"启动器不存在：{exe or '(空)'}"
+    args = [str(item) for item in (spec.get("args") or []) if str(item)]
+    cwd = spec.get("cwd") or os.path.dirname(exe)
+    try:
+        proc = subprocess.Popen(
+            [exe] + args, cwd=cwd, close_fds=True,
+            creationflags=0x00000008 | 0x00000200)
+        return proc, ""
+    except Exception as exc:
+        return None, f"启动异环启动器失败：{exc}"
+
+
+def _terminate_quiet(proc):
+    try:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+    except Exception:
+        pass
+
+
 def _run_mxu(plan, stop_event, on_event, launcher):
     started = time.time()
     watcher = LogWatcher(plan.get("log_path"))
+    app = plan.get("_app") or {}
+    pre_handle = None
+    pre = plan.get("pre_game") or {}
+    if pre.get("spec") and app and not _game_running(app):
+        hint = pre.get("hint") or "将先打开异环启动器，请登录并进入游戏"
+        _emit(on_event, type="log", text=hint)
+        try:
+            pre_handle, error = _launch_pre_game(pre["spec"])
+        except Exception as exc:
+            pre_handle, error = None, str(exc)
+        if pre_handle is None:
+            result = _base_result(plan, FAILED, error or "启动器启动失败",
+                                  started=started, log_watcher=watcher)
+            _emit(on_event, type="done", result=result)
+            return result
+        deadline = _now() + int(pre.get("timeout_s")
+                                or PRE_GAME_WAIT_SECONDS)
+        wait_state = ""
+        while _now() < deadline:
+            if _stop_requested(stop_event):
+                wait_state = "stop"
+                break
+            if _game_running(app):
+                wait_state = "ok"
+                break
+            _sleep(1)
+        if wait_state != "ok":
+            _terminate_quiet(pre_handle)
+            if wait_state == "stop":
+                result = _base_result(plan, STOPPED, "用户停止（未启动 MaaNTE）",
+                                      started=started, log_watcher=watcher)
+            else:
+                result = _base_result(
+                    plan, FAILED,
+                    f"等待异环游戏启动超时（{pre.get('timeout_s') or PRE_GAME_WAIT_SECONDS} 秒）："
+                    "请在启动器中登录并进入游戏后重试",
+                    started=started, log_watcher=watcher)
+            _emit(on_event, type="done", result=result)
+            return result
+        _emit(on_event, type="log", text="已检测到异环游戏窗口，开始 MaaNTE 清日常")
     try:
         handle = launcher(plan["exe"], plan["params"], plan["cwd"])
     except DailyError as exc:
+        _terminate_quiet(pre_handle)
         result = _base_result(plan, FAILED, str(exc), started=started,
                               log_watcher=watcher)
         _emit(on_event, type="done", result=result)
         return result
     except Exception as exc:
+        _terminate_quiet(pre_handle)
         result = _base_result(plan, FAILED, f"启动失败：{exc}", started=started,
                               log_watcher=watcher)
         _emit(on_event, type="done", result=result)
@@ -985,6 +1073,7 @@ def _run_mxu(plan, stop_event, on_event, launcher):
             wait = _wait_handle(handle, stop_event, 400)
             if wait == "stop":
                 handle.terminate()
+                _terminate_quiet(pre_handle)
                 result = _base_result(plan, STOPPED, "用户停止，已结束本次启动的进程",
                                       pid=handle.pid, started=started,
                                       log_watcher=watcher)
@@ -1001,6 +1090,7 @@ def _run_mxu(plan, stop_event, on_event, launcher):
                 break
             if _now() > deadline:
                 handle.terminate()
+                _terminate_quiet(pre_handle)
                 result = _base_result(
                     plan, TIMEOUT,
                     f"超时 {plan['timeout_min']} 分钟，已结束本次启动的 MXU 进程",

@@ -118,8 +118,14 @@ def make_mxu_app(tmp, key="nte"):
     with open(touch(os.path.join(base, "config", f"mxu-{script}.json"),
                     b"{}"), "w", encoding="utf-8") as fh:
         json.dump(config, fh, ensure_ascii=False)
+    game_exe = ""
+    game_procs = []
+    if key == "nte":
+        game_exe = touch(os.path.join(base, "NTELauncher.exe"))
+        game_procs = ["ntelauncher.exe"]
     app = {"key": key, "game": "异环" if key == "nte" else "明日方舟终末地",
            "script": script, "script_exe": exe,
+           "game_exe": game_exe, "game_procs": game_procs,
            "daily": store._clean_daily({}, key)}
     return app
 
@@ -211,29 +217,39 @@ def test_preconditions(tmp):
                 mock.patch.object(daily, "_game_running", return_value=False):
             plan = daily.plan_for(nte)
         check("异环计划为 mxu", plan["mode"], "mxu")
-        check("异环无 LaunchGamePC 且游戏未运行 -> 错误",
-              any("异环游戏未运行" in error for error in plan["errors"]), True)
+        check("异环游戏未运行 -> pre_game",
+              bool(plan.get("pre_game", {}).get("spec")), True)
+        check("pre_game 使用 NTELauncher",
+              os.path.basename(plan["pre_game"]["spec"]["exe"]),
+              "NTELauncher.exe")
+        check("异环不再要求 LaunchGamePC", plan["errors"], [])
         check("异环含 --quit-after-run",
               "--quit-after-run" in plan["params"], True)
+        check("pre_game 提示登录",
+              any("登录" in note for note in plan["notes"]), True)
 
-        # 带 LaunchGamePC 前置：游戏未运行也不报错
-        launch = make_mxu_app(os.path.join(inner, "launch"), "nte")
-        cfg_path = daily.mxu_paths(launch)["config"]
-        with open(cfg_path, "w", encoding="utf-8") as fh:
-            json.dump({"instances": [{"name": "挂机任务", "tasks": [
-                {"taskName": "__MXU_PRETASK__LaunchGamePC", "enabled": True},
-                {"taskName": "DailyTask", "enabled": True}]}]},
-                fh, ensure_ascii=False)
+        # 游戏已运行 -> 不安排 pre_game
+        with mock.patch.object(store, "snapshot_processes", return_value=set()), \
+                mock.patch.object(daily, "_game_running", return_value=True):
+            plan_game = daily.plan_for(nte)
+        check("游戏已运行跳过 pre_game", plan_game.get("pre_game"), None)
+        check("游戏已运行无错误", plan_game["errors"], [])
+
+        # 启动器缺失 -> 明确报错
+        missing = make_mxu_app(os.path.join(inner, "missing_launcher"), "nte")
+        os.remove(missing["game_exe"])
+        missing["game_exe"] = missing["game_exe"] + ".gone"
         with mock.patch.object(store, "snapshot_processes", return_value=set()), \
                 mock.patch.object(daily, "_game_running", return_value=False):
-            plan_launch = daily.plan_for(launch)
-        check("LaunchGamePC 允许游戏未运行", plan_launch["errors"], [])
+            plan_missing = daily.plan_for(missing)
+        check("启动器缺失 -> 错误",
+              any("启动器" in error for error in plan_missing["errors"]), True)
 
         # 脚本已运行 -> 报错（与终末地一致）
         with mock.patch.object(store, "snapshot_processes",
                                return_value={"MAANTE.EXE"}), \
-                mock.patch.object(daily, "_game_running", return_value=True):
-            plan_running = daily.plan_for(launch)
+                mock.patch.object(daily, "_game_running", return_value=False):
+            plan_running = daily.plan_for(nte)
         check("异环脚本已运行 -> 错误",
               any("已在运行" in error for error in plan_running["errors"]), True)
 
@@ -403,6 +419,103 @@ def test_mxu_and_maa(tmp):
             check(f"{key} MXU 超时 -> timeout", result2["state"],
                   daily.TIMEOUT)
             check(f"{key} MXU 超时结束本次进程", handle2.terminated, True)
+
+        # 异环 pre_game：先启动 NTELauncher，等游戏窗口，再 MXU autostart
+        class PreProc:
+            def __init__(self):
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+        nte = make_mxu_app(os.path.join(inner, "nte_pre"), "nte")
+        game_running = [False, False, True]   # 计划/启动前/启动后
+        pre_proc = PreProc()
+        mux_calls = []
+
+        def fake_launch_pre(spec):
+            mux_calls.append(("pre", spec["exe"]))
+            return pre_proc, ""
+
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=1)
+
+        def mux_launcher(exe, params, cwd):
+            mux_calls.append(("mxu", params))
+            return handle
+
+        def game_running_fn(app=None):
+            return game_running.pop(0) if game_running else True
+
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "_game_running",
+                                  side_effect=game_running_fn), \
+                mock.patch.object(daily, "_launch_pre_game",
+                                  side_effect=fake_launch_pre), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result_pre = daily.run(nte, launcher=mux_launcher)
+        check("pre_game 先启动 NTELauncher",
+              mux_calls[0][1] if mux_calls else "", nte["game_exe"])
+        check("pre_game 后启动 MXU",
+              any(item[0] == "mxu" for item in mux_calls), True)
+        check("pre_game 成功后 finished", result_pre["state"], daily.FINISHED)
+
+        # 游戏已运行 -> 跳过 pre_game
+        nte_running = make_mxu_app(os.path.join(inner, "nte_run"), "nte")
+        pre_calls = []
+        with mock.patch.object(daily, "_now", FakeClock().now), \
+                mock.patch.object(daily, "_sleep", lambda seconds: None), \
+                mock.patch.object(daily, "_game_running",
+                                  return_value=True), \
+                mock.patch.object(daily, "_launch_pre_game",
+                                  side_effect=lambda spec: pre_calls.append(spec)
+                                  or (PreProc(), "")), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result_skip = daily.run(
+                nte_running, launcher=lambda exe, params, cwd:
+                FakeHandle(FakeClock(), exit_calls=1))
+        check("游戏已运行跳过 pre_game", pre_calls, [])
+        check("跳过 pre_game 后 finished", result_skip["state"], daily.FINISHED)
+
+        # 等待游戏超时 -> failed，只结束本次启动的 pre_game 进程
+        nte_timeout = make_mxu_app(os.path.join(inner, "nte_timeout"), "nte")
+        timeout_proc = PreProc()
+        clock_to = FakeClock()
+        with mock.patch.object(daily, "_now", clock_to.now), \
+                mock.patch.object(daily, "_sleep", clock_to.sleep), \
+                mock.patch.object(daily, "_game_running",
+                                  return_value=False), \
+                mock.patch.object(daily, "_launch_pre_game",
+                                  return_value=(timeout_proc, "")), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result_to = daily.run(
+                nte_timeout, launcher=lambda *args: None)
+        check("等待游戏超时 -> failed", result_to["state"], daily.FAILED)
+        check("超时提示登录", "等待异环游戏启动超时" in result_to["reason"], True)
+        check("超时结束本次 pre_game 进程", timeout_proc.terminated, True)
+
+        # 启动器启动失败 -> failed，不启动 MXU
+        nte_fail = make_mxu_app(os.path.join(inner, "nte_fail"), "nte")
+        mxu_started = []
+        with mock.patch.object(daily, "_now", FakeClock().now), \
+                mock.patch.object(daily, "_sleep", lambda seconds: None), \
+                mock.patch.object(daily, "_game_running",
+                                  return_value=False), \
+                mock.patch.object(daily, "_launch_pre_game",
+                                  return_value=(None, "启动器不存在")), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result_fail = daily.run(
+                nte_fail, launcher=lambda *args: mxu_started.append(1))
+        check("启动器失败 -> failed", result_fail["state"], daily.FAILED)
+        check("启动器失败不启动 MXU", mxu_started, [])
 
         # MAA：启动 -> 就绪 -> 热键 -> 日志成功
         maa, _gui, maa_log = make_maa_app(os.path.join(inner, "maa"))

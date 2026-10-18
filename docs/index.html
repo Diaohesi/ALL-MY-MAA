@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>All-My-Maa · 游戏脚本中心 — Windows 游戏脚本启动器</title>
-<meta name="description" content="All-My-Maa（游戏脚本中心）是一个 Windows 桌面启动器：圆润的淡紫渐变深色界面、自绘渐变标题栏（最小化 / 最大化 / 关闭 / 拖动 / 8 向缩放）、4 档字体大小，左侧导航分主页 / 清日常 / 设置三页；按钮式启动、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart，进程退出判定）、Hub 自动检查 / 下载 / 安装更新，以及小工具与软件更新；v0.10.3 起默认以管理员启动（取消 UAC 回退普通权限，--no-elevate / GAMEHUB_NO_ELEVATE=1 可跳过）。">
+<meta name="description" content="All-My-Maa（游戏脚本中心）是一个 Windows 桌面启动器：圆润的淡紫渐变深色界面、自绘渐变标题栏（最小化 / 最大化 / 关闭 / 拖动 / 8 向缩放）、4 档字体大小，左侧导航分主页 / 清日常 / 设置三页；按钮式启动、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart；异环先打开启动器等待游戏，300 秒未登录/未进入则失败）、Hub 自动检查 / 下载 / 安装更新，以及小工具与软件更新；v0.10.3 起默认以管理员启动（取消 UAC 回退普通权限，--no-elevate / GAMEHUB_NO_ELEVATE=1 可跳过）。">
 <meta name="theme-color" content="#0b0f16">
 <meta name="color-scheme" content="dark">
 <link rel="canonical" href="https://diaohesi.github.io/All-My-Maa/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="All-My-Maa · 游戏脚本中心">
 <meta property="og:title" content="All-My-Maa · 游戏脚本中心 — Windows 游戏脚本启动器">
-<meta property="og:description" content="一个窗口，管好所有游戏脚本：圆润淡紫渐变界面、自绘渐变标题栏与 4 档字体大小，侧栏三页（主页 / 清日常 / 设置）加小工具与自动更新；按钮式启动、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart，进程退出判定）、准确识别运行状态；v0.10.3 起默认管理员启动，可跳过提权。">
+<meta property="og:description" content="一个窗口，管好所有游戏脚本：圆润淡紫渐变界面、自绘渐变标题栏与 4 档字体大小，侧栏三页（主页 / 清日常 / 设置）加小工具与自动更新；按钮式启动、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart；异环先打开启动器等待游戏，300 秒未登录/未进入则失败）、准确识别运行状态；v0.10.3 起默认管理员启动，可跳过提权。">
 <meta property="og:url" content="https://diaohesi.github.io/All-My-Maa/">
 <meta property="og:image" content="https://diaohesi.github.io/All-My-Maa/assets/hub.png">
 <meta property="og:image:type" content="image/png">
@@ -33,11 +33,11 @@
   "alternateName": "游戏脚本中心",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "description": "把多个游戏脚本收进同一个窗口的 Windows 桌面启动器，采用圆润淡紫渐变的深色侧边栏三页界面（主页 / 清日常 / 设置）、自绘渐变标题栏、4 档字体大小与统一设计令牌，支持按钮式启动与唤出、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart，进程退出判定）、Hub 自动更新、小工具、准确的游戏运行检测（窗口 / 进程 / ADB）与路径自动识别；v0.10.3 起默认管理员启动，可跳过提权。",
+  "description": "把多个游戏脚本收进同一个窗口的 Windows 桌面启动器，采用圆润淡紫渐变的深色侧边栏三页界面（主页 / 清日常 / 设置）、自绘渐变标题栏、4 档字体大小与统一设计令牌，支持按钮式启动与唤出、按脚本方式启动游戏（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe）、勾选后一键清日常（异环 / 终末地同款 MXU autostart；异环先打开启动器等待游戏）、Hub 自动更新、小工具、准确的游戏运行检测（窗口 / 进程 / ADB）与路径自动识别；v0.10.3 起默认管理员启动，可跳过提权。",
   "url": "https://diaohesi.github.io/All-My-Maa/",
   "logo": "https://diaohesi.github.io/All-My-Maa/assets/hub.png",
   "downloadUrl": "https://github.com/Diaohesi/All-My-Maa/releases/latest",
-  "softwareVersion": "0.10.4",
+  "softwareVersion": "0.10.5",
   "license": "https://github.com/Diaohesi/All-My-Maa/blob/main/LICENSE",
   "offers": {
     "@type": "Offer",
@@ -55,7 +55,7 @@
     <a class="brand" href="#top" aria-label="All-My-Maa · 游戏脚本中心 首页">
       <img class="brand-logo" src="assets/logo-48.png" srcset="assets/logo-48.png 1x, assets/hub.png 2x" width="40" height="40" alt="All-My-Maa 图标">
       <span class="brand-name">All-My-Maa</span>
-      <span class="brand-ver">v0.10.4</span>
+      <span class="brand-ver">v0.10.5</span>
     </a>
     <nav class="nav" aria-label="主导航">
       <a href="#features">功能</a>
@@ -74,10 +74,10 @@
   <section class="hero" id="top">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Windows 桌面启动器 · v0.10.4</p>
+        <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Windows 桌面启动器 · v0.10.5</p>
         <h1>All-My-Maa ·<br><span class="grad">游戏脚本中心</span></h1>
         <p class="tagline">把明日方舟、异环、鸣潮、明日方舟终末地……所有游戏脚本，收进同一个窗口。</p>
-        <p class="desc">v0.10 全新界面：圆润的淡紫渐变风格，自绘渐变标题栏（最小化 / 最大化 / 关闭、拖动、8 向缩放），4 档字体大小立即生效。侧栏分主页 / 清日常 / 设置，还有小工具与自动更新；「启动游戏」按脚本自身方式执行（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe），异环清日常与终末地同款 MXU autostart（实例执行、进程退出判定）；v0.10.3 起默认以管理员启动（取消 UAC 回退普通权限，可跳过提权），准确识别运行状态。</p>
+        <p class="desc">v0.10 全新界面：圆润的淡紫渐变风格，自绘渐变标题栏（最小化 / 最大化 / 关闭、拖动、8 向缩放），4 档字体大小立即生效。侧栏分主页 / 清日常 / 设置，还有小工具与自动更新；「启动游戏」按脚本自身方式执行（异环启动 NTELauncher、鸣潮直启 Wuthering Waves.exe），异环清日常与终末地同款 MXU autostart（实例执行、进程退出判定），异环还会先自动打开启动器并等待游戏（300 秒，需登录）；v0.10.3 起默认以管理员启动，准确识别运行状态。</p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://github.com/Diaohesi/All-My-Maa/releases/latest" target="_blank" rel="noopener noreferrer">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M7.5 10 12 14.5 16.5 10"/><path d="M4.5 20h15"/></svg>
@@ -214,7 +214,7 @@
         </div>
         <div class="feature-wide-body">
           <h3>一键清日常 <span class="feature-tag">v0.8.0</span></h3>
-          <p>清日常页勾选要跑的游戏，按自定义顺序串行执行；每行有自己的「开始清日常 / 停止」按钮与独立状态，某一项运行时其它行不会误显示「清日常中」。任务用各脚本自己已配置好的：ok-ww <code>-t DailyTask -e</code>、MAA LinkStart 热键、终末地 MaaEnd / 异环 MaaNTE 同款 <code>--autostart --instance ... --quit-after-run</code>（完成 = 进程退出）。</p>
+          <p>清日常页勾选要跑的游戏，按自定义顺序串行执行；每行有自己的「开始清日常 / 停止」按钮与独立状态，某一项运行时其它行不会误显示「清日常中」。任务用各脚本自己已配置好的：ok-ww <code>-t DailyTask -e</code>、MAA LinkStart 热键、终末地 MaaEnd / 异环 MaaNTE 同款 <code>--autostart --instance ... --quit-after-run</code>（完成 = 进程退出）；异环游戏未运行时会先打开 NTELauncher 并等待游戏（300 秒，需登录）。</p>
           <ul class="status-chips" aria-label="一键清日常特性">
             <li class="chip-daily">勾选加入队列</li>
             <li class="chip-daily">顺序队列</li>
@@ -223,7 +223,7 @@
             <li class="chip-daily">随时停止</li>
             <li class="chip-daily">dry-run 预览</li>
           </ul>
-          <p class="feature-hint">前置：先在脚本里预设好日常任务；MAA 需勾选任务队列并配置 LinkStart 热键；异环 / 终末地需在 MXU 建好实例并填写实例名，执行前先关闭已运行的 MaaNTE / MaaEnd；异环实例没有 LaunchGamePC 前置任务时游戏需先运行。勾选状态与顺序保存在 config.json，自动化操作存在账号风险，请自行评估。</p>
+          <p class="feature-hint">前置：先在脚本里预设好日常任务；MAA 需勾选任务队列并配置 LinkStart 热键；异环 / 终末地需在 MXU 建好实例并填写实例名，执行前先关闭已运行的 MaaNTE / MaaEnd。异环：游戏未运行时会自动打开 NTELauncher 并等待游戏（最长 300 秒），请在启动器里登录并进入游戏；等待超时 / 启动器失败不会启动 MaaNTE；游戏已运行则跳过。勾选状态与顺序保存在 config.json，自动化操作存在账号风险，请自行评估。</p>
         </div>
       </article>
       <article class="feature feature-wide accent-purple reveal">

@@ -1,4 +1,4 @@
-# All-My-Maa · 游戏脚本中心 v0.10.4
+# All-My-Maa · 游戏脚本中心 v0.10.5
 
 <p align="center">
   <a href="https://github.com/Diaohesi/All-My-Maa/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Diaohesi/All-My-Maa?label=release&color=4fc3ff"></a>
@@ -38,8 +38,9 @@
 「启动游戏」按各脚本自己的方式重构：鸣潮直启 `Wuthering Waves.exe`、终末地走鹰角启动器、
 MAA 区分 PC / 模拟器；异环 v0.10.1 起改回启动 `NTELauncher.exe`（登录后点开始游戏，避免直启
 `HTGame.exe` 的 UE map 报错）。异环清日常 v0.10.4 起改为与终末地 MaaEnd 同款 MXU autostart：
-`MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`，完成判定为进程退出，
-不再使用 UI + 热键 / 权限分流。
+`MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`，完成判定为进程退出。
+v0.10.5 起异环清日常会**先打开 NTELauncher 并等待异环窗口（最长 300 秒，需登录并进入游戏）**，
+确认游戏运行后才启动 MaaNTE；游戏已运行则跳过这一步，等待超时 / 启动器失败不会启动 MaaNTE。
 从 v0.10.3 起，Hub **默认以管理员身份启动**（源码自提权 + 打包 `--uac-admin` manifest）：
 取消 UAC 会回退普通权限并提示，`--no-elevate` / `GAMEHUB_NO_ELEVATE=1` 可跳过提权；
 关于 / 设置页会显示当前权限。
@@ -317,10 +318,14 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
   （本机示例：「挂机任务」/「全套日常」），并在清日常页对应行内填写**实例名**；Hub 会执行
   `MaaNTE.exe / MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run`。
   - 执行前请**先关闭已在运行的 MaaNTE / MaaEnd**（脚本在运行会报错）；
+  - **异环额外步骤（v0.10.5）**：若异环游戏未运行，Hub 会**先自动打开 `NTELauncher.exe` 并等待
+    异环窗口（最长 300 秒）**；请在启动器里**登录并进入游戏**，检测到游戏运行后才启动 MaaNTE。
+    游戏已运行则跳过这一步；等待超时 / 启动器找不到或启动失败时**不会启动 MaaNTE**，该行记为失败并提示
+    「请在启动器中登录并进入游戏后重试」；点「停止」也不会启动 MaaNTE；结束时只结束本次打开的启动器 /
+    MaaNTE 进程，不结束你自己开的实例；
   - 实例必须存在且有启用任务；实例带「启动游戏」前置任务时会自动拉起游戏；
-  - 没有 `LaunchGamePC` 前置任务时：异环要求**游戏已运行**（否则报错，请先点卡片「启动游戏」），
-    终末地只给警告（任务可能失败）；
-  - 完成判定为 MXU 进程退出（`--quit-after-run`，退出码恒 0，不区分成败），结束时只结束本次启动的进程。
+  - 终末地 MaaEnd 没有 `LaunchGamePC` 前置任务且游戏未运行时只给警告（任务可能失败）；
+  - 完成判定为 MXU 进程退出（`--quit-after-run`，退出码恒 0，不区分成败）。
 
 **怎么用**
 
@@ -342,7 +347,7 @@ v0.9.0 起这一页做了视觉统一（圆角面板、更大按钮与间距、5
 | --- | --- | --- | --- |
 | 鸣潮 ok-ww | `pythonw.exe "<working>\main.py" -t DailyTask -e`（cwd=working，管理员） | 进程退出 + 日志出现 `Successfully Executed Task, Exiting Game and App!` | 90 分钟 |
 | 明日方舟 MAA | `MAA.exe --skip-startup-auto-run [--config "<配置名>"]` → 就绪后发送 LinkStart 热键 | `MAA\debug\gui.log` 出现「任务已全部完成！」；失败「任务出错」、停止「已停止」 | 120 分钟 |
-| 异环 MaaNTE | `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出（退出码恒 0，不区分成败） | 120 分钟 |
+| 异环 MaaNTE | 游戏未运行：先打开 `NTELauncher.exe` → 等待异环窗口（最长 300 秒，需登录）→ `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`；游戏已运行则直接启动 MaaNTE | MXU 进程退出（退出码恒 0，不区分成败）；等待超时 / 启动器失败 → 不启动 MaaNTE、该行失败 | 120 分钟 |
 | 终末地 MaaEnd | `MaaEnd.exe --autostart --instance "<实例名>" --quit-after-run` | MXU 进程退出 | 150 分钟 |
 
 **超时、停止与失败处理**
@@ -400,7 +405,8 @@ v0.7.0 起，Hub 为鸣潮生成**启动规格**（`launch`，type=python）：�
 - **MXU（MaaNTE / MaaEnd）**：Tauri + React 的通用 GUI，读取符合 PI V2 的 `interface.json`，
   内嵌 MaaFramework，官方支持 `--autostart --instance "<实例名>" --quit-after-run` 自启动执行；
   v0.10.4 起异环 MaaNTE 与终末地 MaaEnd 都走这条命令行（异环此前短暂用过 UI + 热键，已移除），
-  完成判定为 MXU 进程退出；
+  完成判定为 MXU 进程退出；v0.10.5 起异环清日常会先复用「启动游戏」的 NTELauncher 规格打开启动器、
+  等待异环窗口（最长 300 秒）后才启动 MaaNTE；
 - **ok-script / ok-ww**：Python + PySide6 自动化框架，任务可被命令行 `-t <任务名> -e` 指定，
   完成后退出并关闭游戏；ok-ww 官方计划任务也是这么调用的；
 - **PyAppify**：Rust / Tauri 启动器 + 更新器，负责把 Python 与脚本装到 `data/apps/<app>/`，
@@ -579,7 +585,8 @@ GameHub/
   `python tools/test_ui_state.py` 验证状态隔离与勾选逻辑。
 - 异环 / 终末地清日常共用 `daily._plan_mxu`（`--autostart --instance "<实例名>" --quit-after-run`，
   完成 = MXU 进程退出）；实例名可由 `_suggest_mxu_instance`（autoStartInstanceId → 首个有启用任务的
-  实例）推荐；自测在 `tools/test_daily.py`（mock，不启动脚本）。
+  实例）推荐；异环额外生成 `pre_game`（用 `store.build_game_launch` 打开 NTELauncher，等待游戏
+  300 秒；游戏已运行则跳过），`_run_mxu` 确认游戏后才启动 MXU；自测在 `tools/test_daily.py`（mock）。
 - 游戏运行检测规则在 `gamehub/detector.py`（`BUILTIN_RULES` / `read_game_rules`）：
   MaaNTE / MaaEnd 优先读各自 `interface.json`，其余用内置规则；改完可运行
   `python tools/test_detect_game.py` 查看每行当前生效的规则与真实检测结果。
@@ -648,24 +655,29 @@ manifest，参数无法跳过，需要自行用不带 `--uac-admin` 的 PyInstal
 可能仍需管理员；一键清日常的每一项会单独以管理员权限启动（UAC）。
 
 **Q: 异环清日常没有自动开始？**
-v0.10.4 起异环与终末地同款，用 `MaaNTE.exe --autostart --instance "<实例名>" --quit-after-run`：
+v0.10.5 起异环清日常流程是「打开启动器等游戏 → 启动 MaaNTE autostart」：
 1. 先在 MaaNTE 里建好实例并勾选日常任务，在一键清日常行内填写**实例名**（可点卡片「启动脚本」
    打开脚本界面查看实例）；
 2. **先关闭已经打开的 MaaNTE**（脚本运行中会报错）；
-3. 实例没有 `LaunchGamePC` 前置任务时，**异环游戏需要已经在运行**（先点卡片「启动游戏」）；
-4. 完成后 MaaNTE 进程退出即算完成（`--quit-after-run`，退出码恒 0、不区分成败），
-   可看下方日志确认任务结果；
-5. 找不到实例 / 实例不存在 / 没启用任务 / 游戏未运行 → 日志与 toast 会给出原因，按提示修正后重跑；
+3. 若异环游戏未运行，Hub 会自动打开 `NTELauncher.exe` 并等待异环窗口（**最长 300 秒**）：
+   请在启动器里**登录账号并点击开始 / 进入游戏**；检测到游戏运行后 Hub 才会启动 MaaNTE。
+   游戏已经在运行则自动跳过这一步；
+4. **等待超时 / 没有登录 / 启动器找不到或启动失败**：不会启动 MaaNTE，该项记为失败，日志提示
+   「请在启动器中登录并进入游戏后重试」；点「停止」同样不会启动 MaaNTE；
+5. 完成后 MaaNTE 进程退出即算完成（`--quit-after-run`，退出码恒 0、不区分成败），
+   可看下方日志确认任务结果；Hub 只结束本次自己打开的启动器 / MaaNTE 进程，不动你手动开的实例；
+6. 找不到实例 / 实例不存在 / 没启用任务 / 启动器缺失 → 日志与 toast 会给出原因，按提示修正后重跑；
    可先用「查看命令(dry-run)」确认实际命令。
 
 **Q: 点「清日常」没反应 / 一直没开始？**
-先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA 热键读不到、异环 / 终末地实例名为空或不存在、
-异环游戏未运行（实例没有启动前置任务时）、UAC 弹窗被点「否」。可先用「查看命令(dry-run)」确认调用参数。
+先看清日常页下方日志面板的原因。常见情况：目标脚本已经在运行（需要先关闭）、MAA 热键读不到、
+异环 / 终末地实例名为空或不存在、异环启动器等游戏超时 / 未登录、UAC 弹窗被点「否」。
+可先用「查看命令(dry-run)」确认调用参数。
 
 **Q: 提示「任务未配置」/「实例不存在」？**
 回到脚本里准备任务：ok-ww 在界面里配置并保存「每日任务」；MAA 勾选任务队列并配置 LinkStart 热键；
 异环 MaaNTE / 终末地 MaaEnd 在 MXU 里建好实例，并在清日常页对应行内填写实例名
-（异环实例没有 LaunchGamePC 前置任务时，游戏需先运行）。改完再重试。
+（异环若游戏未运行，Hub 会自动打开启动器等游戏；请确保 NTELauncher 可正常登录）。改完再重试。
 
 **Q: 清日常时脚本窗口弹在后台 / 抢鼠标？**
 脚本本身需要前台输入（尤其 MaaNTE / MaaEnd 的 Win32-Front、ok-ww），执行期间请勿操作电脑；
