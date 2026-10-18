@@ -292,8 +292,8 @@ GAME_KEYWORDS = {
 GAME_EXE_HINTS = {
     "maa": ("mumunxmain.exe", "mumuplayer.exe", "mumunxlauncher.exe", "mumu.exe",
             "arknights.exe", "mumuplayer64.exe", "mumumanager.exe", "launcher.exe"),
-    # 异环：游戏本体 HTGame.exe 优先，NTELauncher.exe 只是启动器
-    "nte": ("htgame.exe", "ntegame.exe", "nte.exe", "ntelauncher.exe"),
+    # 异环（v0.10.1）：默认回到 NTELauncher.exe（直启 HTGame 会 UE 报错）
+    "nte": ("ntelauncher.exe", "ntegame.exe", "nte.exe", "htgame.exe"),
     "wuwa": ("wuthering waves.exe", "launcher.exe", "client-win64-shipping.exe",
              "wutheringwaves.exe"),
     "maaend": ("endfield.exe", "launcher.exe", "endfield launcher.exe"),
@@ -429,8 +429,8 @@ def _score_exe_path(path, depth, keywords, hints):
         score += 8 * name_hits + 10 * path_hits
     else:
         score = 20 + 14 * name_hits + 10 * path_hits
-    if low == NTE_GAME_EXE.lower():
-        score += 45          # 异环游戏本体优先于 NTELauncher.exe
+    if low == NTE_LAUNCHER_EXE.lower():
+        score += 18          # 异环默认走启动器
     if "launcher" in low or "启动器" in low:
         score += 6
     score += (8, 5, 3)[depth] if depth < 3 else 0
@@ -711,21 +711,22 @@ def find_game_candidates(app=None, limit=12):
 
     result = sorted(found.values(), key=lambda item: (-item["score"],
                                                       item["path"].lower()))
-    # v0.10：异环必须优先游戏本体 HTGame.exe，而不是 NTELauncher.exe
+    # v0.10.1：异环默认优先 NTELauncher.exe（HTGame 仅保留为候选）
     try:
         profile_key = _game_profile(app)[0]
     except Exception:
         profile_key = ""
     if profile_key == "nte":
         for root in scanned_roots:
-            known = os.path.join(root, *NTE_GAME_RELATIVE)
-            if os.path.isfile(known):
-                merge(known, _candidate_name(known, "异环游戏本体"),
-                      "异环游戏本体", 200)
+            launcher = os.path.join(root, NTE_LAUNCHER_EXE)
+            if os.path.isfile(launcher):
+                merge(launcher, _candidate_name(launcher, "异环启动器"),
+                      "异环启动器", 200)
         result = sorted(found.values(), key=lambda item: (
             -item["score"], item["path"].lower()))
         for item in result:
-            if os.path.basename(item["path"]).lower() == NTE_GAME_EXE.lower():
+            if os.path.basename(item["path"]).lower() == \
+                    NTE_LAUNCHER_EXE.lower():
                 item["score"] += 100
         result.sort(key=lambda item: (-item["score"], item["path"].lower()))
     try:
@@ -746,12 +747,12 @@ def _apply_resolved_game_exe(app, path):
 
 
 def resolve_game_exe(app, deadline_seconds=1.9):
-    """解析「启动游戏」应使用的 exe；异环强制/优先 HTGame.exe。
+    """v0.10.1：异环默认解析 NTELauncher.exe（直启 HTGame 会 UE 报错）。
 
-    - 已是 HTGame.exe 直接返回；
-    - 从 game_exe 安装根、脚本目录先找已知相对路径，再做 ≤4 层、限时 glob；
-    - 找到写回 app["game_exe"] 并返回；找不到保留原值（调用方提示）。
-    其它游戏直接返回现有 game_exe，不改变旧行为。
+    - 已是 NTELauncher.exe 直接返回；
+    - 若当前是 HTGame.exe，向安装根/脚本目录查找 NTELauncher.exe 并写回；
+    - 找不到保留原值，由 UI/调用方提示。
+    其它游戏直接返回现有 game_exe。
     """
     if not isinstance(app, dict):
         return ""
@@ -759,79 +760,30 @@ def resolve_game_exe(app, deadline_seconds=1.9):
     if str(app.get("key") or "") != "nte":
         return current
     if current and os.path.isfile(current) \
-            and os.path.basename(current).lower() == NTE_GAME_EXE.lower():
+            and os.path.basename(current).lower() == \
+            NTE_LAUNCHER_EXE.lower():
         return _apply_resolved_game_exe(app, current)
-
-    roots, seen = [], set()
-    bases = []
-    if current:
-        bases.append(os.path.dirname(current))
-    script_exe = str(app.get("script_exe") or "").strip()
-    if script_exe:
-        bases.append(os.path.dirname(script_exe))
-    for base in bases:
-        for candidate in (base, os.path.dirname(base)):
-            if not candidate:
-                continue
-            try:
-                norm = os.path.normpath(candidate)
-            except (TypeError, ValueError):
-                continue
-            if norm.lower() in seen or not os.path.isdir(norm):
-                continue
-            seen.add(norm.lower())
-            roots.append(norm)
-
-    # 1) 已知相对路径
-    for root in roots:
-        known = os.path.join(root, *NTE_GAME_RELATIVE)
-        if os.path.isfile(known):
-            return _apply_resolved_game_exe(app, known)
-
-    # 2) 受限深度 glob（≤4 层，限时 <2s，限制目录数量）
-    deadline = time.monotonic() + max(0.2, float(deadline_seconds))
-    scanned = 0
-    for root in roots:
-        stack = [(root, 0)]
-        while stack:
-            if time.monotonic() > deadline or scanned >= 1200:
-                break
-            folder, depth = stack.pop()
-            scanned += 1
-            try:
-                with os.scandir(folder) as iterator:
-                    entries = list(iterator)
-            except OSError:
-                continue
-            for entry in entries:
-                if time.monotonic() > deadline:
-                    break
-                try:
-                    low = entry.name.lower()
-                    if entry.is_file(follow_symlinks=False):
-                        if low == NTE_GAME_EXE.lower():
-                            return _apply_resolved_game_exe(app, entry.path)
-                    elif entry.is_dir(follow_symlinks=False):
-                        if depth < 4 and low not in GAME_SCAN_SKIP \
-                                and not low.startswith("."):
-                            stack.append((entry.path, depth + 1))
-                except OSError:
-                    continue
+    roots = _normalize_roots(app)
+    launcher = _find_relative(roots, (NTE_LAUNCHER_EXE,))
+    if launcher:
+        return _apply_resolved_game_exe(app, launcher)
+    if current and os.path.isfile(current):
+        return current
     return current
 
 
 def _migrate_nte_game_exe(apps):
-    """仅纠正内置异环明确的 NTELauncher.exe 错误配置。"""
+    """v0.10.1：HTGame.exe 错误配置改回同安装根 NTELauncher.exe 并保存。"""
     for app in apps or []:
         if app.get("key") != "nte":
             continue
         current = str(app.get("game_exe") or "").strip()
         if not current or os.path.basename(current).lower() != \
-                NTE_LAUNCHER_EXE.lower():
+                NTE_GAME_EXE.lower():
             continue
         resolved = resolve_game_exe(app)
         if resolved and os.path.basename(resolved).lower() == \
-                NTE_GAME_EXE.lower():
+                NTE_LAUNCHER_EXE.lower():
             return True
     return False
 
@@ -1121,32 +1073,27 @@ def build_game_launch(app):
                           "reason": "未找到 Wuthering Waves.exe"}],
         }
     if key == "nte":
-        resolved = resolve_game_exe(app)
-        exe = ""
-        if resolved and os.path.basename(resolved).lower() == "htgame.exe":
-            exe = resolved
-        if not exe:
-            exe = _find_relative(roots, (
-                r"Client\WindowsNoEditor\HT\Binaries\Win64\HTGame.exe",))
         launcher = current if current and os.path.isfile(current) \
-            and os.path.basename(current).lower() != "htgame.exe" else ""
+            and os.path.basename(current).lower() == "ntelauncher.exe" else ""
         if not launcher:
             launcher = _find_relative(roots, (r"NTELauncher.exe",))
-        exe = exe or launcher
+        if not launcher:
+            resolved = resolve_game_exe(app)
+            launcher = resolved if resolved and os.path.basename(
+                resolved).lower() == "ntelauncher.exe" else ""
         return {
-            "strategy": "exe", "exe": exe, "args": [],
-            "cwd": os.path.dirname(exe) if exe else "", "elevated": False,
+            "strategy": "launcher", "exe": launcher, "args": [],
+            "cwd": os.path.dirname(launcher) if launcher else "",
+            "elevated": False,
             "wait": {"timeout_s": timeout, "poll_ms": 500,
                      "any_of": [
                          {"type": "win", "class_re": "^UnrealWindow$",
                           "title_re": r"^\s*(异环|NTE)\s*$"},
                          {"type": "proc", "names": ["HTGame.exe"]},
                      ]},
-            "fallback": ([{"type": "exe", "exe": launcher,
-                           "hint": "已打开异环启动器，请登录后点击开始游戏"}]
-                         if launcher else []) +
-                        [{"type": "user_pick",
-                          "reason": "未找到 HTGame.exe"}],
+            "hint": "请在异环启动器中登录并点击开始游戏",
+            "fallback": [{"type": "user_pick",
+                          "reason": "未找到 NTELauncher.exe（直启 HTGame 可能 UE 报错）"}],
         }
     if key == "maaend":
         endfield = _find_relative(roots, (

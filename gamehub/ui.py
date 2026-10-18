@@ -2261,6 +2261,16 @@ class GameHub:
                     self._append_daily_log("── " + summary)
                     self._toast(summary)
                     changed = True
+            elif kind == "manual":
+                text = str(event.get("text") or "需要手动操作")
+                self._append_daily_log("⚠ " + text)
+                self._toast(text)
+                changed = True
+            elif kind == "log":
+                text = str(event.get("text") or "")
+                if text:
+                    self._append_daily_log(text)
+                    changed = True
         if changed:
             self._refresh_daily_states()
             self._refresh_home_states()
@@ -2310,7 +2320,12 @@ class GameHub:
                 stop_btn.configure(state="normal" if active == key
                                    else "disabled")
             if hint is not None:
-                hint.configure(text=reason, fg="#ffce6b" if reason else T.UI_TEXT_3)
+                if reason:
+                    hint.configure(text=reason, fg="#ffce6b")
+                elif key == "nte":
+                    hint.configure(text=daily.MXU_UI_NOTE, fg=T.UI_TEXT_3)
+                else:
+                    hint.configure(text="", fg=T.UI_TEXT_3)
 
     # ---------------------------------------------------------- 设置页
     def _build_settings_page(self):

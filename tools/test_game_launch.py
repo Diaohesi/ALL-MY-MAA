@@ -70,18 +70,20 @@ def test_wuwa():
 
 
 def test_nte():
-    print("\n=== 异环：HTGame 优先 ===")
+    print("\n=== 异环：默认启动器（不再直启 HTGame） ===")
     tmp = tempfile.mkdtemp(prefix="gl_nte_")
     launcher = os.path.join(tmp, "NTELauncher.exe")
     body = os.path.join(tmp, *store.NTE_GAME_RELATIVE)
     make_file(launcher)
     make_file(body)
-    spec = store.build_game_launch(app("nte", tmp, game_exe=launcher))
-    check("HTGame 优先", spec["exe"], os.path.normpath(body))
+    spec = store.build_game_launch(app("nte", tmp, game_exe=body))
+    check("strategy launcher", spec["strategy"], "launcher")
+    check("exe 启动器", spec["exe"], os.path.normpath(launcher))
+    check("cwd 安装根", spec["cwd"], os.path.normpath(tmp))
     check("timeout 180", spec["wait"]["timeout_s"], 180)
-    check("回退启动器", spec["fallback"][0]["exe"],
-          os.path.normpath(launcher))
+    check("hint 手动开始", "开始游戏" in spec.get("hint", ""), True)
     check("无 args", spec["args"], [])
+    check("回退 user_pick", spec["fallback"][0]["type"], "user_pick")
 
 
 def test_maaend():

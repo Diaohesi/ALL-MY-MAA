@@ -1742,21 +1742,26 @@ def _make_okww_daily(tmp_dir, settings=None):
 def _make_mxu_daily(tmp_dir, key="nte", instances=None):
     script = "MaaNTE" if key == "nte" else "MaaEnd"
     exe = _touch(os.path.join(tmp_dir, script, f"{script}.exe"))
-    if instances is None:
-        if key == "nte":
-            instances = [{"name": "挂机任务", "tasks": [
-                {"taskName": "FishNew", "enabled": True},
-                {"taskName": "DailyTask", "enabled": False}]}]
-        else:
-            instances = [
-                {"name": "全套日常", "tasks": [
-                    {"taskName": "__MXU_PRETASK__LaunchGamePC",
-                     "enabled": True},
-                    {"taskName": "DailyTask", "enabled": True}]},
-                {"name": "快速日常", "tasks": [
-                    {"taskName": "DailyTask", "enabled": True}]}]
+    if key == "nte" and instances is None:
+        # v0.10.1：异环改为打开 MaaNTE + 发送开始任务热键（Ctrl+F10）
+        instances = [{"name": "挂机任务", "tasks": [
+            {"taskName": "FishNew", "enabled": True},
+            {"taskName": "DailyTask", "enabled": False}]}]
+        config = {"settings": {"hotkeys": {
+            "startTasks": "Ctrl+F10", "globalEnabled": True}},
+            "instances": instances}
+    elif instances is None:
+        config = {"instances": [
+            {"name": "全套日常", "tasks": [
+                {"taskName": "__MXU_PRETASK__LaunchGamePC",
+                 "enabled": True},
+                {"taskName": "DailyTask", "enabled": True}]},
+            {"name": "快速日常", "tasks": [
+                {"taskName": "DailyTask", "enabled": True}]}]}
+    else:
+        config = {"instances": instances}
     _write_json(os.path.join(tmp_dir, script, "config",
-                             f"mxu-{script}.json"), {"instances": instances})
+                             f"mxu-{script}.json"), config)
     _touch(os.path.join(tmp_dir, script, "debug", "mxu-tauri.log"), b"")
     return {"key": key,
             "game": "异环" if key == "nte" else "明日方舟终末地",
@@ -1867,10 +1872,12 @@ class DailyPlanTests(TempDirTest):
         self.assertEqual(maa["hotkey"]["text"], "Alt, Control, Shift + L")
         self.assertEqual(maa["enabled_tasks"], ["开始唤醒", "自动公招"])
         nte = by_key["nte"]
-        self.assertEqual(nte["mode"], "mxu")
-        self.assertIn("--autostart", nte["params"])
-        self.assertIn('--instance "挂机任务"', nte["params"])
-        self.assertIn("--quit-after-run", nte["params"])
+        self.assertEqual(nte["mode"], "mxu_ui")
+        self.assertIn("MaaNTE.exe", nte["command_text"])
+        self.assertNotIn("--autostart", nte["params"])
+        self.assertEqual(nte["hotkey"]["text"], "Ctrl + F10")
+        self.assertFalse(nte["manual_start"])
+        self.assertEqual(nte["errors"], [])
         maaend = by_key["maaend"]
         self.assertIn('--instance "全套日常"', maaend["params"])
         text = daily.describe_plan(wuwa)
@@ -1912,7 +1919,10 @@ class DailyPlanTests(TempDirTest):
             override["daily"] = store._clean_daily(
                 {"instance": "快速日常"}, "maaend")
             override_plan = daily.plan_for(override)
-        self.assertIn('--instance "挂机任务"', nte_plan["params"])
+        # 异环改为热键模式，不再使用 --instance/--autostart
+        self.assertEqual(nte_plan["mode"], "mxu_ui")
+        self.assertEqual(nte_plan["hotkey"]["text"], "Ctrl + F10")
+        self.assertNotIn("--autostart", nte_plan["params"])
         self.assertIn('--instance "全套日常"', maaend_plan["params"])
         self.assertIn('--instance "快速日常"', override_plan["params"])
         self.assertIn("--autostart", override_plan["params"])
@@ -1975,10 +1985,13 @@ class DailyPreconditionTests(TempDirTest):
         with p1, p2, p3:
             plan = daily.plan_for(app)
         self.assertTrue(any("已在运行" in error for error in plan["errors"]))
+        # 异环 v0.10.1：已运行改为 attach（只发热键，不再报错）
         nte = _make_mxu_daily(self.tmp, "nte")
         with p1, p2, p3:
             plan2 = daily.plan_for(nte)
-        self.assertTrue(any("已在运行" in error for error in plan2["errors"]))
+        self.assertTrue(plan2.get("attach"))
+        self.assertEqual(plan2["errors"], [])
+        self.assertTrue(any("已在运行" in note for note in plan2["notes"]))
 
     def test_maa_missing_hotkey_and_empty_tasks(self):
         app, _log, _gui = _make_maa_daily(self.tmp, hotkey=False, tasks=())
@@ -1999,12 +2012,22 @@ class DailyPreconditionTests(TempDirTest):
         self.assertTrue(any("已在运行" in note for note in plan["notes"]))
 
     def test_mxu_missing_config_bad_instance_and_zero_tasks(self):
-        missing = _make_mxu_daily(self.tmp, "nte")
-        os.remove(daily.mxu_paths(missing)["config"])
+        # 异环 v0.10.1 走 mxu_ui，不再依赖实例配置
+        nte = _make_mxu_daily(self.tmp, "nte")
+        os.remove(daily.mxu_paths(nte)["config"])
         p1, p2, p3 = self._patch()
         with p1, p2, p3:
-            plan = daily.plan_for(missing)
-        self.assertTrue(any("MXU 实例配置" in error for error in plan["errors"]))
+            plan = daily.plan_for(nte)
+        self.assertEqual(plan["mode"], "mxu_ui")
+        self.assertEqual(plan["errors"], [])
+
+        # 终末地仍走 --autostart MXU：缺实例配置/实例不存在/0 启用任务
+        missing = _make_mxu_daily(self.tmp, "maaend")
+        os.remove(daily.mxu_paths(missing)["config"])
+        with p1, p2, p3:
+            plan_missing = daily.plan_for(missing)
+        self.assertTrue(any("MXU 实例配置" in error
+                            for error in plan_missing["errors"]))
 
         app = _make_mxu_daily(self.tmp, "maaend")
         app["daily"] = store._clean_daily({"instance": "不存在"}, "maaend")
@@ -2022,20 +2045,31 @@ class DailyPreconditionTests(TempDirTest):
         self.assertTrue(any("没有启用任何任务" in error
                             for error in plan3["errors"]))
 
-    def test_nte_requires_game_or_launch_pretask(self):
+    def test_nte_mxu_ui_no_game_or_instance_required(self):
         nte = _make_mxu_daily(self.tmp, "nte")
         p1, p2, p3 = self._patch(game_running=False)
         with p1, p2, p3:
             plan = daily.plan_for(nte)
-        self.assertTrue(any("游戏未运行" in error for error in plan["errors"]))
-        nte_launch = _make_mxu_daily(self.tmp, "nte", instances=[
-            {"name": "挂机任务", "tasks": [
-                {"taskName": "__MXU_PRETASK__LaunchGamePC", "enabled": True},
-                {"taskName": "DailyTask", "enabled": True}]}])
+        self.assertEqual(plan["mode"], "mxu_ui")
+        self.assertEqual(plan["errors"], [])
+        # 实例/任务字段可保留但不再必须，也不要求游戏运行/LaunchGamePC
+        override = _make_mxu_daily(os.path.join(self.tmp, "override"), "nte")
+        override["daily"] = store._clean_daily(
+            {"instance": "不存在", "task": "x"}, "nte")
         with p1, p2, p3:
-            plan2 = daily.plan_for(nte_launch)
-        self.assertFalse(any("游戏未运行" in error for error in plan2["errors"]))
-        self.assertEqual(plan2["warnings"], [])
+            plan2 = daily.plan_for(override)
+        self.assertEqual(plan2["errors"], [])
+        # 热键缺失/globalEnabled=false -> 手动开始提示（不静默成功）
+        no_hot = _make_mxu_daily(os.path.join(self.tmp, "no_hot"), "nte")
+        _write_json(daily.mxu_paths(no_hot)["config"], {
+            "settings": {"hotkeys": {
+                "startTasks": "Ctrl+F10", "globalEnabled": False}}})
+        with p1, p2, p3:
+            plan3 = daily.plan_for(no_hot)
+        self.assertTrue(plan3["manual_start"])
+        self.assertTrue(any("手动" in warning
+                            for warning in plan3["warnings"]))
+        self.assertEqual(plan3["errors"], [])
 
 
 class DailyStateMachineTests(TempDirTest):
@@ -2099,18 +2133,19 @@ class DailyStateMachineTests(TempDirTest):
         self.assertTrue(handle2.terminated)
 
     def test_mxu_finished_and_timeout(self):
-        nte = _make_mxu_daily(self.tmp, "nte")
+        # 终末地仍走 --autostart MXU：进程退出 finished / 超时 timeout
+        maaend = _make_mxu_daily(self.tmp, "maaend")
         clock = FakeClock()
-        result = self._run(nte, clock, FakeHandle(clock, exit_calls=1),
+        result = self._run(maaend, clock, FakeHandle(clock, exit_calls=1),
                            os.path.join(self.tmp, "mxu.log"))
         self.assertEqual(result["state"], daily.FINISHED)
         self.assertIn("MXU 进程已退出", result["reason"])
 
-        nte2 = _make_mxu_daily(os.path.join(self.tmp, "mxu2"), "nte")
-        nte2["daily"] = store._clean_daily({"timeout_min": 1}, "nte")
+        maaend2 = _make_mxu_daily(os.path.join(self.tmp, "mxu2"), "maaend")
+        maaend2["daily"] = store._clean_daily({"timeout_min": 1}, "maaend")
         clock2 = FakeClock()
         handle2 = FakeHandle(clock2, exit_calls=None)
-        result2 = self._run(nte2, clock2, handle2,
+        result2 = self._run(maaend2, clock2, handle2,
                             os.path.join(self.tmp, "mxu2.log"))
         self.assertEqual(result2["state"], daily.TIMEOUT)
         self.assertTrue(handle2.terminated)
@@ -2571,12 +2606,13 @@ class DailyQuotingTests(TempDirTest):
         self.assertEqual(plan["argv"][2:4], ["--config", config])
 
     def test_mxu_instance_with_space_and_quote(self):
+        # 终末地仍用 --instance；异环已改热键模式（另见 V0101MxuUiTests）
         name = 'Full "Daily" Run'
-        app = _make_mxu_daily(self.tmp, "nte", instances=[{
+        app = _make_mxu_daily(self.tmp, "maaend", instances=[{
             "name": name,
             "tasks": [{"taskName": "DailyTask", "enabled": True}]}])
         app["daily"] = store._clean_daily({
-            "instance": name, "extra_args": ["--opt=a b"]}, "nte")
+            "instance": name, "extra_args": ["--opt=a b"]}, "maaend")
         p1, p2, p3 = self._patch()
         with p1, p2, p3:
             plan = daily.plan_for(app)
@@ -3526,57 +3562,50 @@ class V010GameExeTests(TempDirTest):
             fh.write(b"MZ" + b"0" * max(0, size - 2))
         return path
 
-    def test_nte_htgame_priority(self):
+    def test_nte_launcher_priority(self):
         launcher = self._file(os.path.join(self.tmp, "NTELauncher.exe"))
         body = self._file(os.path.join(self.tmp, *store.NTE_GAME_RELATIVE))
-        app = {"key": "nte", "game": "异环", "game_exe": launcher,
+        app = {"key": "nte", "game": "异环", "game_exe": body,
                "script_exe": os.path.join(self.tmp, "script", "MaaNTE.exe"),
-               "game_procs": ["ntelauncher.exe"]}
+               "game_procs": ["htgame.exe"]}
         resolved = store.resolve_game_exe(app)
-        self.assertEqual(os.path.normpath(resolved), os.path.normpath(body))
+        self.assertEqual(os.path.normpath(resolved),
+                         os.path.normpath(launcher))
         self.assertEqual(os.path.normpath(app["game_exe"]),
-                         os.path.normpath(body))
+                         os.path.normpath(launcher))
         self.assertEqual([name.upper() for name in app["game_procs"]],
-                         ["HTGAME.EXE"])
-        # 已是 HTGame.exe -> 原样；其它游戏不改写
+                         ["NTELAUNCHER.EXE"])
+        # 已是启动器 -> 原样；其它游戏不改写
         self.assertEqual(store.resolve_game_exe(
-            {"key": "nte", "game_exe": body}), body)
+            {"key": "nte", "game_exe": launcher}), launcher)
         self.assertEqual(store.resolve_game_exe(
-            {"key": "wuwa", "game_exe": launcher}), launcher)
+            {"key": "wuwa", "game_exe": body}), body)
 
-    def test_nte_glob_and_missing(self):
-        self._file(os.path.join(self.tmp, "NTELauncher.exe"))
-        globbed = self._file(os.path.join(self.tmp, "Game", "Bin",
-                                          "HTGame.exe"))
-        app = {"key": "nte", "game": "异环",
-               "game_exe": os.path.join(self.tmp, "NTELauncher.exe")}
-        self.assertEqual(os.path.normpath(store.resolve_game_exe(app)),
-                         os.path.normpath(globbed))
-        # 找不到：保留原值，不写回（用独立临时目录避免扫描到上面的 HTGame）
-        with tempfile.TemporaryDirectory(prefix="gh_nte_missing_") as other:
-            launcher = self._file(os.path.join(other, "NTELauncher.exe"))
-            app2 = {"key": "nte", "game_exe": launcher}
-            self.assertEqual(store.resolve_game_exe(app2), launcher)
-            self.assertEqual(app2["game_exe"], launcher)
+    def test_nte_missing_launcher_keeps_current(self):
+        with tempfile.TemporaryDirectory(prefix="gh_nte_nol_") as root:
+            body = self._file(os.path.join(root, *store.NTE_GAME_RELATIVE))
+            app = {"key": "nte", "game": "异环", "game_exe": body}
+            self.assertEqual(store.resolve_game_exe(app), body)
+            self.assertEqual(app["game_exe"], body)
+        self.assertEqual(store.resolve_game_exe({"key": "nte"}), "")
 
     def test_nte_candidate_scoring(self):
         hints = store.GAME_EXE_HINTS["nte"]
-        self.assertEqual(hints[0].lower(), "htgame.exe")
+        self.assertEqual(hints[0].lower(), "ntelauncher.exe")
         base = os.path.join(self.tmp, "异环")
         launcher = self._file(os.path.join(base, "NTELauncher.exe"))
         body = self._file(os.path.join(base, *store.NTE_GAME_RELATIVE))
         keywords = store.GAME_KEYWORDS["nte"]
-        hit_body = store._score_exe_path(body, 0, keywords, hints)
         hit_launcher = store._score_exe_path(launcher, 0, keywords, hints)
-        self.assertTrue(hit_body)
+        hit_body = store._score_exe_path(body, 0, keywords, hints)
         self.assertTrue(hit_launcher)
-        self.assertGreater(hit_body["score"], hit_launcher["score"])
+        self.assertTrue(hit_body)
+        self.assertGreater(hit_launcher["score"], hit_body["score"])
 
-    def test_nte_candidate_discovery_htgame_first(self):
-        # 按 ok-ww/MXU 实际布局：<安装根>/Client/WindowsNoEditor/.../HTGame.exe
+    def test_nte_candidate_discovery_launcher_first(self):
         with tempfile.TemporaryDirectory(prefix="gh_nte_cands_") as root:
-            self._file(os.path.join(root, "NTELauncher.exe"))
-            body = self._file(os.path.join(root, *store.NTE_GAME_RELATIVE))
+            launcher = self._file(os.path.join(root, "NTELauncher.exe"))
+            self._file(os.path.join(root, *store.NTE_GAME_RELATIVE))
             with mock.patch.object(store, "_iter_registry_entries",
                                    return_value=[]), \
                     mock.patch.object(store, "_fs_scan_roots",
@@ -3585,9 +3614,9 @@ class V010GameExeTests(TempDirTest):
                     {"key": "nte", "game": "异环"})
             self.assertTrue(candidates)
             self.assertEqual(os.path.basename(candidates[0]["path"]),
-                             "HTGame.exe")
+                             "NTELauncher.exe")
             self.assertEqual(os.path.normpath(candidates[0]["path"]),
-                             os.path.normpath(body))
+                             os.path.normpath(launcher))
 
     def test_load_migration_nte(self):
         root = os.path.join(self.tmp, "cfgroot")
@@ -3598,31 +3627,31 @@ class V010GameExeTests(TempDirTest):
         os.makedirs(search, exist_ok=True)
         cfg = os.path.join(self.tmp, "config.json")
         _write_json(cfg, {"version": 4, "root": root,
-                          "apps": {"nte": {"game_exe": launcher,
+                          "apps": {"nte": {"game_exe": body,
                                            "daily": {}}}})
         with mock.patch.object(store, "CONFIG", cfg), \
                 mock.patch.object(store, "SEARCH_ROOT", search):
             apps, _clash, _root, _meta = store.load_state_full()
         nte = next(app for app in apps if app["key"] == "nte")
         self.assertEqual(os.path.normpath(nte["game_exe"]),
-                         os.path.normpath(body))
+                         os.path.normpath(launcher))
         raw = json.load(open(cfg, "r", encoding="utf-8"))
         self.assertEqual(os.path.basename(raw["apps"]["nte"]["game_exe"]),
-                         "HTGame.exe")
-        # 找不到 HTGame 时保留启动器
+                         "NTELauncher.exe")
+        # 找不到启动器时保留 HTGame
         root2 = os.path.join(self.tmp, "cfgroot2")
         os.makedirs(root2, exist_ok=True)
-        launcher2 = self._file(os.path.join(root2, "NTELauncher.exe"))
+        body2 = self._file(os.path.join(root2, *store.NTE_GAME_RELATIVE))
         cfg2 = os.path.join(self.tmp, "config2.json")
         _write_json(cfg2, {"version": 4, "root": root2,
-                           "apps": {"nte": {"game_exe": launcher2,
+                           "apps": {"nte": {"game_exe": body2,
                                             "daily": {}}}})
         with mock.patch.object(store, "CONFIG", cfg2), \
                 mock.patch.object(store, "SEARCH_ROOT", search):
             apps2, _c, _r, _m = store.load_state_full()
         nte2 = next(app for app in apps2 if app["key"] == "nte")
         self.assertEqual(os.path.basename(nte2["game_exe"]),
-                         "NTELauncher.exe")
+                         "HTGame.exe")
 
 
 class V010GameLaunchTests(TempDirTest):
@@ -3670,19 +3699,26 @@ class V010GameLaunchTests(TempDirTest):
         self.assertEqual(os.path.normpath(spec2["exe"]),
                          os.path.normpath(pc_exe))
 
-    def test_nte_htgame_and_fallback(self):
+    def test_nte_launcher_and_fallback(self):
         launcher = self._file(os.path.join(self.tmp, "NTELauncher.exe"))
         body = self._file(os.path.join(self.tmp, *store.NTE_GAME_RELATIVE))
         spec = store.build_game_launch(
-            {"key": "nte", "game": "异环", "game_exe": launcher})
-        self.assertEqual(spec["strategy"], "exe")
+            {"key": "nte", "game": "异环", "game_exe": body})
+        self.assertEqual(spec["strategy"], "launcher")
         self.assertEqual(os.path.normpath(spec["exe"]),
-                         os.path.normpath(body))
+                         os.path.normpath(launcher))
+        self.assertEqual(os.path.normpath(spec["cwd"]),
+                         os.path.normpath(self.tmp))
         self.assertEqual(spec["args"], [])
         self.assertEqual(spec["wait"]["timeout_s"], 180)
         self.assertIn("异环", spec["wait"]["any_of"][0]["title_re"])
-        self.assertEqual(os.path.normpath(spec["fallback"][0]["exe"]),
-                         os.path.normpath(launcher))
+        self.assertIn("开始游戏", spec.get("hint", ""))
+        self.assertEqual(spec["fallback"][0]["type"], "user_pick")
+        # 找不到启动器：exe 为空 + user_pick 回退
+        no_launcher = store.build_game_launch({"key": "nte", "game": "异环"})
+        self.assertEqual(no_launcher["strategy"], "launcher")
+        self.assertEqual(no_launcher["exe"], "")
+        self.assertEqual(no_launcher["fallback"][0]["type"], "user_pick")
 
     def test_maaend_launcher_first(self):
         launcher = self._file(os.path.join(self.tmp, "Launcher.exe"))
@@ -4017,6 +4053,240 @@ class V010AutoUpdateTests(unittest.TestCase):
         self.assertFalse(ui.update_available("0.10.0", "v0.10.0"))
         self.assertFalse(ui.update_available("0.10.1", "v0.10.0"))
         self.assertFalse(ui.update_available("", "v0.10.0"))
+
+
+# ---------------------------------------------------------------- v0.10.1 异环 hotfix
+class V0101MxuUiTests(TempDirTest):
+    """v0.10.1 异环：打开 MaaNTE + 发送开始任务热键（mxu_ui）。"""
+
+    def _plan_patches(self, script_running=False):
+        return (
+            mock.patch.object(daily, "_script_running",
+                              return_value=script_running),
+            mock.patch.object(daily, "_game_running", return_value=False),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value={"MAANTE.EXE"}
+                              if script_running else set()))
+
+    def _run_ui(self, app, clock, handle=None, stop_event=None, send=None,
+                window=True, script_running=False):
+        def launcher(exe, params, cwd):
+            if handle is None:
+                raise AssertionError("attach 模式不应启动 MaaNTE")
+            return handle
+
+        patches = [
+            mock.patch.object(daily, "_now", clock.now),
+            mock.patch.object(daily, "_sleep", clock.sleep),
+            mock.patch.object(daily, "_mxu_ui_window",
+                              return_value={"hwnd": 1} if window else None),
+            mock.patch.object(daily, "_script_running",
+                              return_value=script_running),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value={"MAANTE.EXE"}
+                              if script_running else set()),
+        ]
+        if send is not None:
+            patches.append(mock.patch.object(daily, "send_hotkey",
+                                             side_effect=send))
+        for patcher in patches:
+            patcher.start()
+        try:
+            return daily.run(app, stop_event=stop_event, launcher=launcher)
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+    def test_mxu_ui_hotkey_variants(self):
+        app = _make_mxu_daily(os.path.join(self.tmp, "a"), "nte")
+        hotkey = daily.mxu_ui_hotkey(app)
+        self.assertEqual(hotkey["key"], "F10")
+        self.assertEqual(hotkey["modifiers"], ["Ctrl"])
+        self.assertEqual(hotkey["text"], "Ctrl + F10")
+        cfg = daily.mxu_paths(app)["config"]
+        # dict 形式 modifiers 字符串
+        _write_json(cfg, {"settings": {"hotkeys": {"startTasks": {
+            "key": "F10", "modifiers": "Ctrl, Shift"},
+            "globalEnabled": True}}})
+        self.assertEqual(daily.mxu_ui_hotkey(app)["text"],
+                         "Ctrl + Shift + F10")
+        # globalEnabled=false / 缺失 / 无效键 -> None
+        _write_json(cfg, {"settings": {"hotkeys": {
+            "startTasks": "Ctrl+F10", "globalEnabled": False}}})
+        self.assertIsNone(daily.mxu_ui_hotkey(app))
+        _write_json(cfg, {"settings": {}})
+        self.assertIsNone(daily.mxu_ui_hotkey(app))
+        _write_json(cfg, {"settings": {"hotkeys": {
+            "startTasks": "Ctrl+NotAKey"}}})
+        self.assertIsNone(daily.mxu_ui_hotkey(app))
+        _write_json(cfg, {})
+        self.assertIsNone(daily.mxu_ui_hotkey(app))
+
+    def test_mxu_latest_log_tracking(self):
+        app = _make_mxu_daily(self.tmp, "nte")
+        debug = os.path.join(self.tmp, "MaaNTE", "debug")
+        os.remove(os.path.join(debug, "mxu-tauri.log"))
+        old = _touch(os.path.join(debug, "2026-01.log"), b"old")
+        new = _touch(os.path.join(debug, "2026-02.log"), b"new")
+        _touch(os.path.join(debug, "maafw.log"), b"skip")
+        os.utime(old, (1_600_000_000, 1_600_000_000))
+        os.utime(new, (1_700_000_000, 1_700_000_000))
+        self.assertEqual(os.path.normpath(daily.mxu_latest_log(app)),
+                         os.path.normpath(new))
+        # 无 debug 日志 -> 空（不会误用 maafw 日志）
+        empty_app = _make_mxu_daily(os.path.join(self.tmp, "empty"), "nte")
+        empty_debug = os.path.join(self.tmp, "empty", "MaaNTE", "debug")
+        for name in os.listdir(empty_debug):
+            os.remove(os.path.join(empty_debug, name))
+        self.assertEqual(daily.mxu_latest_log(empty_app), "")
+
+    def test_mxu_ui_plan_launch_attach_manual(self):
+        app = _make_mxu_daily(self.tmp, "nte")
+        p1, p2, p3 = self._plan_patches()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertEqual(plan["mode"], "mxu_ui")
+        self.assertEqual(os.path.basename(plan["exe"]), "MaaNTE.exe")
+        self.assertEqual(plan["params"], "")
+        self.assertEqual(plan["argv"], [plan["exe"]])
+        self.assertEqual(plan["args"], [])
+        self.assertIn("MaaNTE.exe", plan["command_text"])
+        self.assertEqual(plan["hotkey"]["text"], "Ctrl + F10")
+        self.assertFalse(plan["manual_start"])
+        self.assertFalse(plan["attach"])
+        self.assertEqual(plan["errors"], [])
+        self.assertTrue(plan["log_path"])
+        # 已在运行 -> attach（不启动、不报错）
+        p1, p2, p3 = self._plan_patches(script_running=True)
+        with p1, p2, p3:
+            plan_attached = daily.plan_for(app)
+        self.assertTrue(plan_attached["attach"])
+        self.assertEqual(plan_attached["errors"], [])
+        # 热键禁用 -> manual_start + 手动提示
+        manual = _make_mxu_daily(os.path.join(self.tmp, "manual"), "nte")
+        _write_json(daily.mxu_paths(manual)["config"], {
+            "settings": {"hotkeys": {
+                "startTasks": "Ctrl+F10", "globalEnabled": False}}})
+        p1, p2, p3 = self._plan_patches()
+        with p1, p2, p3:
+            plan_manual = daily.plan_for(manual)
+        self.assertTrue(plan_manual["manual_start"])
+        self.assertTrue(any("手动" in warning
+                            for warning in plan_manual["warnings"]))
+        self.assertEqual(plan_manual["errors"], [])
+        # 缺 MaaNTE.exe -> 明确错误
+        missing = {"key": "nte", "game": "异环",
+                   "script_exe": os.path.join(self.tmp, "nope", "MaaNTE.exe")}
+        with p1, p2, p3:
+            plan_missing = daily.plan_for(missing)
+        self.assertTrue(any("未找到" in error
+                            for error in plan_missing["errors"]))
+
+    def test_run_mxu_ui_finished(self):
+        app = _make_mxu_daily(self.tmp, "nte")
+        log = daily.mxu_latest_log(app)
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        sent = []
+
+        def send(hotkey):
+            sent.append(hotkey)
+            _append_text(log, "[Task] 停止任务 tasks-completed\n")
+            return True
+        result = self._run_ui(app, clock, handle, send=send)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["text"], "Ctrl + F10")
+        self.assertEqual(result["pid"], 4321)
+        self.assertTrue(handle.closed)
+        self.assertIn("tasks-completed", result["log_tail"])
+
+    def test_run_mxu_ui_manual_and_stop(self):
+        # 热键不可用：提示手动，不发送热键、不静默成功，保留窗口供手动操作
+        manual = _make_mxu_daily(os.path.join(self.tmp, "manual"), "nte")
+        _write_json(daily.mxu_paths(manual)["config"], {
+            "settings": {"hotkeys": {
+                "startTasks": "Ctrl+F10", "globalEnabled": False}}})
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        result = self._run_ui(
+            manual, clock, handle,
+            send=lambda hotkey: (_ for _ in ()).throw(
+                AssertionError("manual 不应发送热键")))
+        self.assertEqual(result["state"], daily.FAILED)
+        self.assertIn("手动", result["reason"])
+        self.assertTrue(handle.closed)
+        self.assertFalse(handle.terminated, "手动模式应保留 MaaNTE 窗口")
+        # 非 attach 用户停止：只结束本次启动的 MaaNTE
+        app = _make_mxu_daily(os.path.join(self.tmp, "stop"), "nte")
+        log = daily.mxu_latest_log(app)
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+        stop_event = threading.Event()
+
+        def send_stop(hotkey):
+            _append_text(log, "开始执行任务\n")
+            stop_event.set()
+            return True
+        result2 = self._run_ui(app, clock2, handle2,
+                               stop_event=stop_event, send=send_stop)
+        self.assertEqual(result2["state"], daily.STOPPED)
+        self.assertTrue(handle2.terminated)
+        self.assertIn("已结束本次启动的 MaaNTE", result2["reason"])
+        # attach 用户停止：不结束用户自己打开的 MaaNTE
+        attached = _make_mxu_daily(os.path.join(self.tmp, "attached"), "nte")
+        log3 = daily.mxu_latest_log(attached)
+        clock3 = FakeClock()
+        stop3 = threading.Event()
+
+        def send_stop3(hotkey):
+            _append_text(log3, "开始执行任务\n")
+            stop3.set()
+            return True
+        result3 = self._run_ui(attached, clock3, handle=None,
+                               stop_event=stop3, send=send_stop3,
+                               script_running=True)
+        self.assertEqual(result3["state"], daily.STOPPED)
+        self.assertIn("未结束用户自己打开的 MaaNTE", result3["reason"])
+        self.assertIsNone(result3["pid"])
+
+    def test_run_mxu_ui_timeout_missing_log_window(self):
+        # 超时：已发送热键但日志一直没有完成标记
+        app = _make_mxu_daily(os.path.join(self.tmp, "timeout"), "nte")
+        app["daily"] = store._clean_daily({"timeout_min": 1}, "nte")
+        log = daily.mxu_latest_log(app)
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        result = self._run_ui(
+            app, clock, handle,
+            send=lambda hotkey: (_append_text(log, "开始执行任务\n")
+                                 or True))
+        self.assertEqual(result["state"], daily.TIMEOUT)
+        self.assertTrue(handle.terminated)
+        self.assertIn("超时", result["reason"])
+        # 无日志：无法确认完成 -> failed 并结束本次进程
+        app2 = _make_mxu_daily(os.path.join(self.tmp, "nolog"), "nte")
+        debug = os.path.join(self.tmp, "nolog", "MaaNTE", "debug")
+        for name in os.listdir(debug):
+            os.remove(os.path.join(debug, name))
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+        result2 = self._run_ui(app2, clock2, handle2,
+                               send=lambda hotkey: True)
+        self.assertEqual(result2["state"], daily.FAILED)
+        self.assertIn("日志", result2["reason"])
+        self.assertTrue(handle2.terminated)
+        # 窗口未出现 -> failed
+        app3 = _make_mxu_daily(os.path.join(self.tmp, "nowin"), "nte")
+        clock3 = FakeClock()
+        handle3 = FakeHandle(clock3, exit_calls=None)
+        result3 = self._run_ui(
+            app3, clock3, handle3, window=False,
+            send=lambda hotkey: (_ for _ in ()).throw(
+                AssertionError("窗口不存在时不应发送热键")))
+        self.assertEqual(result3["state"], daily.FAILED)
+        self.assertIn("未检测到 MaaNTE 主窗口", result3["reason"])
+        self.assertTrue(handle3.terminated)
 
 
 def main():
