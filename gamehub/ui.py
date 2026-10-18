@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import ImageTk
 
-from . import VERSION, detector, render, store
+from . import VERSION, daily, detector, render, store
 from . import theme as T
 
 TITLE = "游戏脚本中心"
@@ -417,8 +417,11 @@ class GameCandidateDialog(tk.Toplevel):
 class GameHub:
     def __init__(self, root):
         self.root = root
-        self.apps, self.clash_exe, self.search_root = store.load_state()
-        self.config_saved = store.save_state(self.apps, self.clash_exe, self.search_root)
+        self.apps, self.clash_exe, self.search_root, meta = store.load_state_full()
+        self.daily_order = list(meta.get("daily_order")
+                                or store.DEFAULT_DAILY_ORDER)
+        self.config_saved = store.save_state(self.apps, self.clash_exe,
+                                             self.search_root, self.daily_order)
         self.page = 0
         self.versions = {}
         self.latest = {}
@@ -426,6 +429,10 @@ class GameHub:
         self.running = {}
         self.game_states = {}
         self.adb_enabled = detector.ADB_ENABLED
+        self.daily_queue = None
+        self.daily_events = queue.Queue()
+        self.daily_log = []
+        self.daily_dialog = None
         self.hover = ("none",)
         self.toast_msg = "就绪 · 等待启动"
         self.toast_after = None
@@ -449,7 +456,8 @@ class GameHub:
     # ---------------------------------------------------------- 基础
     def _save_config(self):
         """保存配置；失败时用 toast 提示，返回是否成功。"""
-        saved = store.save_state(self.apps, self.clash_exe, self.search_root)
+        saved = store.save_state(self.apps, self.clash_exe, self.search_root,
+                                 self.daily_order)
         if not saved:
             self._toast("配置文件无法写入，本次修改无法保存")
         return saved
@@ -554,6 +562,7 @@ class GameHub:
             ("add", "添加游戏", T.ADD_RECT, "#4fc3ff"),
             ("check", "检查更新", T.CHECK_RECT, "#b98bff"),
             ("rescan", "重新识别路径", T.RESCAN_RECT, "#5ee7c7"),
+            ("daily", "一键清日常", T.DAILY_RECT, "#ffce6b"),
             ("clash", "打开 Clash Verge", T.CLASH_RECT, "#ffce6b"),
         ]
         self.toolbar_items = {}
@@ -616,9 +625,12 @@ class GameHub:
                 text="启动游戏", font=self.f_btn, fill=T.HEX_TXT)
 
             card["links"] = []
-            link_labels = [("更新", "update"), ("下载", "download"), ("官网", "site"),
+            link_labels = [("清日常", "daily"), ("更新", "update"),
+                           ("下载", "download"), ("官网", "site"),
                            ("GitHub", "github"), ("更多", "more")]
             widths = [self.f_link.measure(t) for t, _ in link_labels]
+            # 运行中会显示「清日常中」，预留宽度避免与下一项重叠
+            widths[0] = max(widths[0], self.f_link.measure("清日常中"))
             gap = 14
             total = sum(widths) + gap * (len(link_labels) - 1)
             lx = cx - total / 2
@@ -642,8 +654,10 @@ class GameHub:
     def _app_state(self, app):
         exe = app.get("script_exe", "")
         key = app["key"]
+        launch = app.get("launch") if isinstance(app.get("launch"), dict) else {}
         if not exe or not os.path.isfile(exe):
-            return "missing"
+            if not launch.get("exe") or not os.path.isfile(launch.get("exe")):
+                return "missing"
         if key in self.starting:
             if time.time() - self.starting[key] < 12:
                 return "starting"
@@ -681,6 +695,14 @@ class GameHub:
             prev_game = self.game_states.get(key) or {}
             script_on = bool(app.get("script_procs")) and bool(
                 names & set(app["script_procs"]))
+            launch = app.get("launch")
+            if isinstance(launch, dict) and launch.get("exe"):
+                # 正式脚本是 bundled pythonw：按 exe 路径判定；
+                # 启动器 ok-ww.exe 不算脚本运行中，也不误判用户其它 python。
+                try:
+                    script_on = store.launch_spec_running(app)
+                except Exception:
+                    script_on = False
             try:
                 game_state = detector.detect_game_state(
                     app, windows=windows, processes=names,
@@ -825,7 +847,20 @@ class GameHub:
                                   text=game_text, fill=game_color)
 
         # 底部链接
+        daily_running = self._daily_state_for(key) in (daily.STARTING,
+                                                       daily.RUNNING)
         for item, zone, _rect in card["links"]:
+            if zone == "daily":
+                self.canvas.itemconfigure(
+                    item, text="清日常中" if daily_running else "清日常")
+                if hover[0] == "link" and hover[1] == i and hover[2] == zone:
+                    fill = T.HEX_TXT
+                elif daily_running:
+                    fill = T.HEX_WAIT
+                else:
+                    fill = app["accent"]
+                self.canvas.itemconfigure(item, fill=fill)
+                continue
             if hover[0] == "link" and hover[1] == i and hover[2] == zone:
                 fill = app["accent"]
             elif zone == "update" and has_update:
@@ -938,6 +973,8 @@ class GameHub:
             self._on_refresh()
         elif name == "rescan":
             self.rescan_paths()
+        elif name == "daily":
+            self.open_daily_dialog()
         elif name == "clash":
             self.open_clash()
 
@@ -951,7 +988,9 @@ class GameHub:
     # ---------------------------------------------------------- 链接 / 菜单
     def _link_action(self, i, zone):
         app = self._page_apps[i]
-        if zone == "update":
+        if zone == "daily":
+            self.run_daily_single(i)
+        elif zone == "update":
             self.update_app(i)
         elif zone == "download":
             self.download_game(i)
@@ -968,6 +1007,8 @@ class GameHub:
                        activebackground="#2a3547", activeforeground="#ffffff",
                        bd=0, font=("Microsoft YaHei", -10))
         menu.add_command(label="启动游戏", command=lambda: self.launch_game(i))
+        menu.add_command(label="清日常（当前游戏）",
+                         command=lambda: self.run_daily_single(i))
         menu.add_command(label="下载游戏（打开下载页）", command=lambda: self.download_game(i))
         menu.add_separator()
         menu.add_command(label="打开脚本文件夹", command=lambda: self.open_folder(i))
@@ -990,18 +1031,41 @@ class GameHub:
             self._choose_script_path(i)
             return
         if self.running.get(app["key"], {}).get("script"):
-            if store.bring_to_front(app.get("script_procs", [])):
+            focused = False
+            if isinstance(app.get("launch"), dict):
+                focused = store.focus_launch_spec(app)
+            if not focused:
+                focused = store.bring_to_front(app.get("script_procs", []))
+            if focused:
                 self._toast(f"已切换到 {app['game']}")
             else:
                 self._toast(f"{app['game']} 正在运行中（窗口未找到）")
             return
-        ok, error = store.launch_exe(app["script_exe"])
+        try:
+            ok, error, mode = store.launch_app(app)
+        except Exception as exc:
+            ok, error, mode = False, str(exc), "none"
         if not ok:
             self._toast(f"启动 {app['game']} 失败：{error}")
+            return
+        if mode == "launcher":
+            self._toast(f"未找到正式脚本，已回退启动 {app['script']} 启动器（可在启动器里更新）")
             return
         self.starting[app["key"]] = time.time()
         self._repaint_card(i)
         self._toast(f"正在启动 {app['game']} · {app['script']}")
+
+    def _launch_updater(self, app):
+        """有独立启动器（ok-ww.exe）时，「更新」走启动器以保留更新能力。"""
+        spec = app.get("launch") if isinstance(app.get("launch"), dict) else {}
+        if not spec.get("launcher_exe"):
+            return False
+        ok, error = store.launch_updater(app)
+        if ok:
+            self._toast(f"正在打开 {app['script']} 更新器…")
+        else:
+            self._toast(f"打开更新器失败：{error}")
+        return True
 
     def launch_game(self, i):
         app = self._page_apps[i]
@@ -1076,12 +1140,14 @@ class GameHub:
             self._toast("正在检查最新版本，请稍候再点一次")
             return
         if self._has_update(app):
-            self.launch_script(i)
+            if not self._launch_updater(app):
+                self.launch_script(i)
         elif app["key"] in self.latest and not self._has_update(app):
             self._toast(f"{app['script']} 已是最新版本 {self.versions.get(app['key'], '')}")
         else:
             self._toast(f"无法获取最新版本，打开 {app['game']} 自行检查更新")
-            self.launch_script(i)
+            if not self._launch_updater(app):
+                self.launch_script(i)
 
     def open_folder(self, i):
         app = self._page_apps[i]
@@ -1116,6 +1182,7 @@ class GameHub:
             return
         app["script_exe"] = os.path.normpath(path)
         app["script_procs"] = store.proc_names_for_exe(path)
+        store.refresh_launch_spec(app)
         saved = self._save_config()
         self._rebuild()
         if saved:
@@ -1255,6 +1322,7 @@ class GameHub:
             if best and best != app.get("script_exe"):
                 app["script_exe"] = best
                 app["script_procs"] = store.proc_names_for_exe(best)
+                store.refresh_launch_spec(app)
                 found += 1
         saved = self._save_config()
         self._update_versions()
@@ -1284,6 +1352,235 @@ class GameHub:
             saved = self._save_config()
             if saved:
                 self._toast("已记录 Clash Verge 路径，再点一次即可打开")
+
+    # ---------------------------------------------------------- 一键清日常
+    def _app_by_key(self, key):
+        for app in self.apps:
+            if app.get("key") == key:
+                return app
+        return None
+
+    def _daily_snapshot(self):
+        if self.daily_queue is None:
+            return {"state": daily.IDLE, "state_label": "空闲", "current": None,
+                    "index": -1, "total": 0, "results": [],
+                    "order": list(self.daily_order)}
+        return self.daily_queue.snapshot()
+
+    def _daily_state_for(self, key):
+        snapshot = self._daily_snapshot()
+        if snapshot.get("current") == key:
+            return daily.RUNNING
+        return snapshot.get("state") or daily.IDLE
+
+    def _daily_busy(self):
+        return bool(self.daily_queue and self.daily_queue.is_running())
+
+    def _queue_event(self, event):
+        """DailyQueue 在工作线程里回调：只入队，由主线程 _poll 消费。"""
+        self.daily_events.put(event)
+
+    def _append_daily_log(self, text):
+        self.daily_log.append(time.strftime("%H:%M:%S ") + text)
+        self.daily_log = self.daily_log[-200:]
+
+    def _daily_summary(self, snapshot):
+        results = snapshot.get("results") or []
+        if not results:
+            return "清日常结束"
+        finished = [r for r in results if r.get("state") == daily.FINISHED]
+        failed = [r for r in results
+                  if r.get("state") in (daily.FAILED, daily.TIMEOUT)]
+        stopped = [r for r in results
+                   if r.get("state") in (daily.STOPPED, daily.SKIPPED)]
+        parts = [f"完成 {len(finished)}/{len(results)}"]
+        if failed:
+            parts.append("失败：" + "、".join(str(r.get("game")) for r in failed))
+        if stopped:
+            parts.append("停止/跳过：" + "、".join(str(r.get("game"))
+                                                 for r in stopped))
+        return "清日常结束（" + "，".join(parts) + "）"
+
+    def _drain_daily_events(self):
+        changed = False
+        while True:
+            try:
+                event = self.daily_events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event.get("type")
+            if kind == "item_start":
+                self._append_daily_log(f"▶ 开始：{event.get('game')}")
+                self._toast(f"开始清日常：{event.get('game')}")
+                changed = True
+            elif kind == "runner":
+                sub = event.get("event") or {}
+                if sub.get("type") == "state" and sub.get("state") == daily.RUNNING:
+                    app = self._app_by_key(sub.get("key"))
+                    if app:
+                        self._append_daily_log(f"… {app.get('game')} 运行中")
+            elif kind == "item":
+                result = event.get("result") or {}
+                state = result.get("state")
+                label = result.get("state_label") or state or ""
+                if state == daily.DRY_RUN:
+                    self._append_daily_log(f"预演：{result.get('game')}")
+                else:
+                    reason = result.get("reason") or ""
+                    pid = result.get("pid")
+                    pid_text = f"，PID {pid}" if pid else ""
+                    self._append_daily_log(
+                        f"■ {result.get('game') or event.get('key')}：{label}"
+                        + pid_text + (f"（{reason}）" if reason else ""))
+                    is_single = bool(self.daily_queue and
+                                     len(self.daily_queue.order) == 1)
+                    if is_single and state in (daily.FAILED, daily.TIMEOUT,
+                                               daily.STOPPED):
+                        short = reason if len(reason) <= 80 else reason[:80] + "…"
+                        self._toast(f"{result.get('game') or '清日常'}：{label}"
+                                    + (f"（{short}）" if short else ""))
+                changed = True
+            elif kind == "queue":
+                if event.get("state") in (daily.FINISHED, daily.STOPPED,
+                                          daily.FAILED):
+                    snapshot = event.get("snapshot") or self._daily_snapshot()
+                    summary = self._daily_summary(snapshot)
+                    self._append_daily_log("── " + summary)
+                    self._toast(summary)
+                    changed = True
+        if changed:
+            for i in range(len(self._page_apps)):
+                self._repaint_card(i)
+            dialog = self.daily_dialog
+            if dialog is not None:
+                try:
+                    dialog.refresh()
+                except Exception:
+                    pass
+
+    def run_daily_single(self, i):
+        """点击卡片底部「清日常」：单游戏执行；运行中再点则停止。"""
+        if i >= len(self._page_apps):
+            return
+        app = self._page_apps[i]
+        key = app["key"]
+        if self._daily_state_for(key) in (daily.STARTING, daily.RUNNING):
+            self.stop_daily()
+            return
+        if self._daily_busy():
+            self._toast("已有清日常任务在运行，请先等待或点「停止」")
+            return
+        self._start_daily([key], single=True)
+
+    def start_daily_queue(self, keys=None):
+        """开始顺序队列（由队列对话框调用）；默认按 daily_order 的启用项。"""
+        if self._daily_busy():
+            self._toast("清日常队列已在运行")
+            return False
+        if keys is None:
+            keys = []
+            for key in self.daily_order:
+                app = self._app_by_key(key)
+                if app and (app.get("daily") or {}).get("enabled", True):
+                    keys.append(key)
+        return self._start_daily(keys, single=False)
+
+    def _start_daily(self, keys, single=False):
+        by_key = {app["key"]: app for app in self.apps}
+        order = []
+        for key in keys:
+            if key in by_key and key not in order:
+                order.append(key)
+        if not order:
+            self._toast("没有可执行的清日常项（请勾选启用）")
+            return False
+        self.daily_log = []
+        self.daily_queue = daily.DailyQueue(
+            self.apps, order, on_event=self._queue_event)
+        started = self.daily_queue.start()
+        if not started:
+            self._toast("清日常队列启动失败")
+            return False
+        names = "、".join(str(by_key[key].get("game")) for key in order)
+        self._append_daily_log("准备执行：" + names)
+        self._toast(("正在清日常：" if single else "一键清日常：") + names)
+        for i in range(len(self._page_apps)):
+            self._repaint_card(i)
+        dialog = self.daily_dialog
+        if dialog is not None:
+            try:
+                dialog.refresh()
+            except Exception:
+                pass
+        return True
+
+    def stop_daily(self):
+        if not self._daily_busy():
+            self._toast("当前没有正在运行的清日常任务")
+            return
+        if not messagebox.askyesno(
+                "停止清日常",
+                "确定停止当前清日常吗？\n"
+                "会结束由 Hub 启动的脚本进程（不会动你自己打开的程序）。",
+                parent=self.root):
+            return
+        self.daily_queue.stop()
+        self._append_daily_log("用户请求停止…")
+        self._toast("正在停止清日常…")
+
+    def open_daily_dialog(self):
+        if self.daily_dialog is not None:
+            try:
+                self.daily_dialog.deiconify()
+                self.daily_dialog.lift()
+                self.daily_dialog.focus_force()
+                self.daily_dialog.refresh()
+                return
+            except Exception:
+                self.daily_dialog = None
+        self.daily_dialog = DailyQueueDialog(self.root, self)
+
+    def move_daily(self, key, delta):
+        order = [item for item in self.daily_order
+                 if self._app_by_key(item) is not None]
+        if key not in order:
+            order.append(key)
+        index = order.index(key)
+        target = index + delta
+        if 0 <= target < len(order):
+            order[index], order[target] = order[target], order[index]
+            self.daily_order = order
+            self._save_config()
+            return True
+        return False
+
+    def set_daily_enabled(self, key, enabled):
+        app = self._app_by_key(key)
+        if app is None:
+            return
+        settings = store._clean_daily(app.get("daily"), key)
+        settings["enabled"] = bool(enabled)
+        app["daily"] = settings
+        self._save_config()
+
+    def apply_daily_settings(self, key, values):
+        app = self._app_by_key(key)
+        if app is None:
+            return False
+        current = store._clean_daily(app.get("daily"), key)
+        current.update(values or {})
+        app["daily"] = store._clean_daily(current, key)
+        saved = self._save_config()
+        if saved:
+            self._toast(f"已保存「{app.get('game')}」的清日常设置")
+        return saved
+
+    def daily_dry_run_text(self, key=None):
+        """UI 预览：单个或全部启用项的命令（不启动进程）。"""
+        apps = self.apps
+        order = [key] if key else list(self.daily_order)
+        plans = daily.dry_run(apps, order)
+        return "\n\n".join(daily.describe_plan(plan) for plan in plans)
 
     # ---------------------------------------------------------- 更新检查
     def _start_update_check(self, manual=False):
@@ -1370,10 +1667,372 @@ class GameHub:
     def _poll(self):
         try:
             self._drain_queue()
+            self._drain_daily_events()
             self._refresh()
         except Exception:
             pass
         self.root.after(1500, self._poll)
+
+
+class DailyQueueDialog(tk.Toplevel):
+    """「一键清日常」顺序队列对话框：排序、启用、设置、开始/停止、实时进度。"""
+
+    def __init__(self, master, hub):
+        super().__init__(master)
+        self.hub = hub
+        self.title("一键清日常（顺序队列）")
+        self.configure(bg="#0f141d")
+        self.resizable(False, False)
+        self.transient(master)
+        self._rows = {}
+        self._check_vars = {}
+        self._summary_labels = {}
+        self._status_labels = {}
+        self._entries = {}
+        self._settings_title = None
+        self._progress = None
+        self._poll_after = None
+        self._last_progress = ""
+        order = [key for key in hub.daily_order if hub._app_by_key(key)]
+        self._selected = order[0] if order else None
+        self._build()
+        self._center(master)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._poll()
+
+    # ---------------------------------------------------------- 界面
+    def _build(self):
+        pad = 14
+        tk.Label(self, text="按顺序串行执行各游戏的清日常（使用脚本自身已配置的任务）",
+                 bg="#0f141d", fg="#9aa8bc",
+                 font=("Microsoft YaHei", -11)).pack(anchor="w", padx=pad,
+                                                     pady=(12, 2))
+        tk.Label(self, text="⚠ 自动化操作可能违反游戏条款、存在账号风险；执行期间脚本会抢占鼠标键盘，请确认后使用。",
+                 bg="#0f141d", fg="#ffce6b", justify="left", wraplength=680,
+                 font=("Microsoft YaHei", -9)).pack(anchor="w", padx=pad,
+                                                    pady=(0, 8))
+
+        self.rows_frame = tk.Frame(self, bg="#101620",
+                                   highlightthickness=1,
+                                   highlightbackground="#2a3547")
+        self.rows_frame.pack(fill="x", padx=pad)
+        self._build_rows()
+
+        # 选中项设置
+        settings = tk.Frame(self, bg="#0f141d")
+        settings.pack(fill="x", padx=pad, pady=(10, 0))
+        settings.columnconfigure(1, weight=1)
+        self._settings_title = tk.Label(
+            settings, text="选中项设置", bg="#0f141d", fg="#68788e",
+            font=("Microsoft YaHei", -10), anchor="w")
+        self._settings_title.grid(row=0, column=0, columnspan=4, sticky="w",
+                                  pady=(0, 4))
+        labels = [("instance", "MXU 实例名"), ("task", "ok-ww 任务名"),
+                  ("config", "MAA 配置"), ("timeout_min", "超时(分钟)"),
+                  ("extra_args", "额外参数")]
+        for index, (field, label) in enumerate(labels):
+            row = 1 + index // 2
+            col = 0 if index % 2 == 0 else 2
+            tk.Label(settings, text=label, bg="#0f141d", fg="#9aa8bc",
+                     font=("Microsoft YaHei", -10), anchor="e",
+                     width=11).grid(row=row, column=col, sticky="e", pady=3)
+            entry = tk.Entry(settings, bg="#101620", fg="#eaf0f8",
+                             insertbackground="#eaf0f8", relief="flat",
+                             highlightthickness=1,
+                             highlightbackground="#2a3547",
+                             highlightcolor="#4fc3ff",
+                             font=("Microsoft YaHei", -10), width=26)
+            entry.grid(row=row, column=col + 1, sticky="we", padx=(4, 12),
+                       pady=3)
+            self._entries[field] = entry
+        self._close_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(settings, text="完成后结束脚本（ok-ww/MXU 完成判定需要）",
+                       variable=self._close_var, bg="#0f141d", fg="#9aa8bc",
+                       selectcolor="#101620", activebackground="#0f141d",
+                       activeforeground="#eaf0f8",
+                       font=("Microsoft YaHei", -9)).grid(
+            row=1 + 3, column=0, columnspan=3, sticky="w", pady=3)
+        _flat_button(settings, "应用设置", self._apply_settings).grid(
+            row=1 + 3, column=3, sticky="e", padx=(4, 12), pady=3)
+
+        # 进度
+        tk.Label(self, text="执行进度", bg="#0f141d", fg="#68788e",
+                 font=("Microsoft YaHei", -10)).pack(anchor="w", padx=pad,
+                                                     pady=(8, 2))
+        self._progress = tk.Text(
+            self, height=9, width=84, bg="#101620", fg="#cdd8e6",
+            insertbackground="#cdd8e6", relief="flat", bd=0,
+            highlightthickness=1, highlightbackground="#2a3547",
+            font=("Microsoft YaHei", -9), wrap="word")
+        self._progress.pack(fill="both", padx=pad)
+        self._progress.configure(state="disabled")
+
+        footer = tk.Frame(self, bg="#0f141d")
+        footer.pack(fill="x", padx=pad, pady=(10, 12))
+        _flat_button(footer, "开始队列", self._start, accent=True).pack(side="left")
+        self._stop_button = _flat_button(footer, "停止", self._stop)
+        self._stop_button.pack(side="left", padx=(8, 0))
+        _flat_button(footer, "关闭", self._close).pack(side="right")
+        _flat_button(footer, "查看命令（dry-run）", self._preview).pack(
+            side="right", padx=(0, 8))
+        self._load_settings(self._selected)
+
+    def _build_rows(self):
+        for child in self.rows_frame.winfo_children():
+            child.destroy()
+        self._toggle_buttons = {}
+        self._summary_labels = {}
+        self._status_labels = {}
+        for index, key in enumerate(self.hub.daily_order):
+            app = self.hub._app_by_key(key)
+            if app is None:
+                continue
+            settings = store._clean_daily(app.get("daily"), key)
+            row = tk.Frame(self.rows_frame, bg="#101620")
+            row.pack(fill="x", padx=6, pady=3)
+            enabled = bool(settings.get("enabled", True))
+            toggle = tk.Button(
+                row, text="启用" if enabled else "停用",
+                command=lambda k=key: self._toggle(k),
+                bg="#25445f" if enabled else "#1b2432",
+                fg="#eaf0f8" if enabled else "#68788e",
+                activebackground="#2d5577", activeforeground="#ffffff",
+                relief="flat", bd=0, padx=6, pady=1, width=4,
+                font=("Microsoft YaHei", -9), cursor="hand2")
+            toggle.pack(side="left")
+            self._toggle_buttons[key] = toggle
+            name = tk.Label(row, text=f"{index + 1}. {app.get('game')}",
+                            bg="#101620", fg="#eaf0f8",
+                            font=("Microsoft YaHei", -10), cursor="hand2")
+            name.pack(side="left", padx=(2, 8))
+            summary = tk.Label(row, text=self._summary_text(app, key),
+                               bg="#101620", fg="#68788e",
+                               font=("Microsoft YaHei", -9), cursor="hand2")
+            summary.pack(side="left")
+            self._summary_labels[key] = summary
+            status = tk.Label(row, text="", bg="#101620", fg="#9aa8bc",
+                              font=("Microsoft YaHei", -9), width=14,
+                              anchor="e")
+            status.pack(side="right", padx=(4, 6))
+            self._status_labels[key] = status
+            for widget in (row, name, summary):
+                widget.bind("<Button-1>", lambda event, k=key: self._select(k))
+            buttons = tk.Frame(row, bg="#101620")
+            buttons.pack(side="right")
+            tk.Button(buttons, text="↑", command=lambda k=key: self._move(k, -1),
+                      bg="#1b2432", fg="#9aa8bc", relief="flat", bd=0,
+                      width=2, font=("Microsoft YaHei", -9),
+                      cursor="hand2").pack(side="left")
+            tk.Button(buttons, text="↓", command=lambda k=key: self._move(k, 1),
+                      bg="#1b2432", fg="#9aa8bc", relief="flat", bd=0,
+                      width=2, font=("Microsoft YaHei", -9),
+                      cursor="hand2").pack(side="left", padx=(2, 0))
+
+    @staticmethod
+    def _summary_text(app, key):
+        settings = store._clean_daily(app.get("daily"), key)
+        if key in ("nte", "maaend"):
+            instance = settings.get("instance") or "（自动）"
+            detail = f"实例：{instance}"
+        elif key == "wuwa":
+            detail = f"任务：{settings.get('task') or 'DailyTask'}"
+        else:
+            detail = f"MAA 配置：{settings.get('config') or '当前配置'}"
+        return f"{detail} · 超时 {settings.get('timeout_min')}min"
+
+    def _select(self, key):
+        self._selected = key
+        self._load_settings(key)
+        for item_key, label in self._summary_labels.items():
+            label.configure(fg="#4fc3ff" if item_key == key else "#68788e")
+
+    def _load_settings(self, key):
+        app = self.hub._app_by_key(key) if key else None
+        if app is None:
+            return
+        settings = daily.effective_settings(app)
+        self._settings_title.configure(
+            text=f"选中项设置：{app.get('game')}（{app.get('script')}）")
+        for field in ("instance", "task", "config"):
+            entry = self._entries[field]
+            entry.delete(0, "end")
+            entry.insert(0, str(settings.get(field) or ""))
+        entry = self._entries["timeout_min"]
+        entry.delete(0, "end")
+        entry.insert(0, str(settings.get("timeout_min") or 120))
+        entry = self._entries["extra_args"]
+        entry.delete(0, "end")
+        entry.insert(0, " ".join(str(item) for item in
+                                 (settings.get("extra_args") or [])))
+        self._close_var.set(bool(settings.get("close_after")))
+
+    def _apply_settings(self):
+        key = self._selected
+        if not key:
+            return
+        try:
+            timeout = max(1, min(600, int(self._entries["timeout_min"].get()
+                                          .strip() or "120")))
+        except ValueError:
+            messagebox.showwarning("超时无效", "超时必须是 1–600 的整数分钟。",
+                                   parent=self)
+            return
+        raw_extra = self._entries["extra_args"].get().strip()
+        try:
+            import shlex
+            extra = shlex.split(raw_extra, posix=False) if raw_extra else []
+        except Exception:
+            extra = raw_extra.split()
+        values = {
+            "instance": self._entries["instance"].get().strip(),
+            "task": self._entries["task"].get().strip(),
+            "config": self._entries["config"].get().strip(),
+            "timeout_min": timeout,
+            "extra_args": extra,
+            "close_after": bool(self._close_var.get()),
+        }
+        self.hub.apply_daily_settings(key, values)
+        self._refresh_rows()
+        self._load_settings(key)
+
+    def _toggle(self, key):
+        app = self.hub._app_by_key(key)
+        if app is None:
+            return
+        settings = store._clean_daily(app.get("daily"), key)
+        self.hub.set_daily_enabled(key, not settings.get("enabled", True))
+        self._refresh_rows()
+
+    def _move(self, key, delta):
+        if self.hub.move_daily(key, delta):
+            self._build_rows()
+            self._select(key)
+            self._refresh_rows()
+
+    def _preview(self):
+        text = self.hub.daily_dry_run_text(self._selected)
+        top = tk.Toplevel(self)
+        top.title("清日常命令预览（dry-run，不启动）")
+        top.configure(bg="#0f141d")
+        top.transient(self)
+        box = tk.Text(top, width=96, height=22, bg="#101620", fg="#cdd8e6",
+                      relief="flat", font=("Microsoft YaHei", -9), wrap="word")
+        box.pack(padx=12, pady=12)
+        box.insert("1.0", text or "（没有可预览的命令）")
+        box.configure(state="disabled")
+
+    def _start(self):
+        if self.hub._daily_busy():
+            messagebox.showinfo("正在执行", "清日常队列已在运行。", parent=self)
+            return
+        keys = []
+        for key in self.hub.daily_order:
+            app = self.hub._app_by_key(key)
+            if app and (app.get("daily") or {}).get("enabled", True):
+                keys.append(key)
+        if not keys:
+            messagebox.showwarning("没有启用的游戏",
+                                   "请先在列表里勾选要执行清日常的游戏。",
+                                   parent=self)
+            return
+        if not messagebox.askyesno(
+                "开始一键清日常",
+                "将按列表顺序自动执行这些游戏的清日常。\n\n"
+                "⚠ 自动化存在账号风险；执行期间脚本可能抢占鼠标键盘，请不要操作电脑。\n\n"
+                "确定开始吗？", parent=self):
+            return
+        self.hub.start_daily_queue(keys)
+        self._refresh_rows()
+
+    def _stop(self):
+        self.hub.stop_daily()
+
+    # ---------------------------------------------------------- 刷新
+    def _refresh_rows(self):
+        snapshot = self.hub._daily_snapshot()
+        results = {item.get("key"): item for item in (snapshot.get("results") or [])}
+        current = snapshot.get("current")
+        for key, label in self._status_labels.items():
+            result = results.get(key)
+            if current == key:
+                text, color = "清日常中…", "#ffce6b"
+            elif result:
+                state = result.get("state")
+                text = result.get("state_label") or state or ""
+                color = {"finished": T.HEX_OK, "failed": "#ff7f7f",
+                         "timeout": "#ffce6b", "stopped": "#ff7f7f"}.get(
+                             state, T.HEX_TXT3)
+            else:
+                text, color = "待执行", T.HEX_TXT3
+            label.configure(text=text, fg=color)
+        for key, button in getattr(self, "_toggle_buttons", {}).items():
+            app = self.hub._app_by_key(key)
+            if app is None:
+                continue
+            settings = store._clean_daily(app.get("daily"), key)
+            enabled = bool(settings.get("enabled", True))
+            try:
+                button.configure(
+                    text="启用" if enabled else "停用",
+                    bg="#25445f" if enabled else "#1b2432",
+                    fg="#eaf0f8" if enabled else "#68788e")
+            except Exception:
+                pass
+        busy = self.hub._daily_busy()
+        try:
+            self._stop_button.configure(state="normal" if busy else "disabled")
+        except Exception:
+            pass
+
+    def _update_progress(self):
+        text = "\n".join(self.hub.daily_log[-120:])
+        if text == self._last_progress:
+            return
+        self._last_progress = text
+        try:
+            self._progress.configure(state="normal")
+            self._progress.delete("1.0", "end")
+            self._progress.insert("1.0", text or "（尚未开始）")
+            self._progress.see("end")
+            self._progress.configure(state="disabled")
+        except Exception:
+            pass
+
+    def refresh(self):
+        self._refresh_rows()
+        self._update_progress()
+
+    def _poll(self):
+        try:
+            self.refresh()
+        except Exception:
+            pass
+        try:
+            self._poll_after = self.after(700, self._poll)
+        except Exception:
+            self._poll_after = None
+
+    def _close(self):
+        if self._poll_after:
+            try:
+                self.after_cancel(self._poll_after)
+            except Exception:
+                pass
+            self._poll_after = None
+        self.hub.daily_dialog = None
+        self.destroy()
+
+    def _center(self, master):
+        self.update_idletasks()
+        width, height = self.winfo_width(), self.winfo_height()
+        try:
+            x = master.winfo_rootx() + (master.winfo_width() - width) // 2
+            y = master.winfo_rooty() + (master.winfo_height() - height) // 2
+        except Exception:
+            x = y = 100
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - width))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - height))
+        self.geometry(f"+{x}+{y}")
 
 
 def run():

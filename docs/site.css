@@ -774,6 +774,32 @@ section[id] {
   color: #bfe7ff;
 }
 
+.chip-daily {
+  border-color: rgba(255, 224, 102, 0.34);
+  background: rgba(255, 224, 102, 0.08);
+  color: #ffeaa8;
+}
+
+.feature-wide code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(79, 195, 255, 0.1);
+  color: #b7e5ff;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.feature-wide .feature-hint {
+  max-width: 80ch;
+  margin-top: 12px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(255, 224, 102, 0.45);
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
 /* Screenshots + details -------------------------------------------------- */
 .shot-grid {
   display: grid;

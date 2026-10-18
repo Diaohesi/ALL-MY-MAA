@@ -98,6 +98,23 @@ BUILTIN_GAME_PROCS = {
 # v4 迁移只替换这些值，用户手动配置的其它进程名（如 MUMUPLAYER.EXE）保留。
 LEGACY_GAME_PROCS = {"NTELAUNCHER.EXE", "LAUNCHER.EXE"}
 
+# 内置「一键清日常」默认设置（可被 config.json 的 app.daily 覆盖）：
+#   task       ok-ww 的 -t 任务名（类名最稳，默认 DailyTask）
+#   instance   MXU 实例名（MaaNTE/MaaEnd）
+#   config     MAA 可选 --config 配置名
+#   close_after 完成后是否结束脚本（ok-ww -e / 由 Hub 关闭启动的 MAA）
+BUILTIN_DAILY = {
+    "maa": {"enabled": True, "task": "", "instance": "", "config": "",
+            "timeout_min": 120, "extra_args": [], "close_after": False},
+    "nte": {"enabled": True, "task": "", "instance": "", "config": "",
+            "timeout_min": 120, "extra_args": [], "close_after": True},
+    "wuwa": {"enabled": True, "task": "DailyTask", "instance": "", "config": "",
+             "timeout_min": 90, "extra_args": [], "close_after": True},
+    "maaend": {"enabled": True, "task": "", "instance": "", "config": "",
+               "timeout_min": 150, "extra_args": [], "close_after": True},
+}
+DEFAULT_DAILY_ORDER = ["maa", "nte", "wuwa", "maaend"]
+
 # ------------------------------------------------------------------ 通用小工具
 def version_key(text):
     """取版本号里的数字段；忽略 -rc / +build 等后缀，避免预发布号被当正式版。"""
@@ -931,8 +948,71 @@ def _clean_detect(value):
     return result or None
 
 
-def load_state():
-    """读取 config.json，返回 (apps, clash_exe, root)。"""
+# ------------------------------------------------------------------ 清日常配置（v4 可选字段）
+_GENERIC_DAILY = {"enabled": False, "task": "", "instance": "", "config": "",
+                  "timeout_min": 120, "extra_args": [], "close_after": False}
+
+
+def _clean_daily(value, key=""):
+    """规整某个 app 的清日常设置（缺省补内置默认值）。"""
+    base = dict(_GENERIC_DAILY)
+    if key in BUILTIN_DAILY:
+        base.update(BUILTIN_DAILY[key])
+        base["extra_args"] = []
+    if not isinstance(value, dict):
+        return base
+    out = dict(base)
+    if isinstance(value.get("enabled"), bool):
+        out["enabled"] = value["enabled"]
+    for field in ("task", "instance", "config"):
+        if isinstance(value.get(field), str):
+            out[field] = value[field].strip()
+    timeout = value.get("timeout_min")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        out["timeout_min"] = max(1, min(600, int(timeout)))
+    args = value.get("extra_args")
+    if isinstance(args, str):
+        try:
+            import shlex
+            args = shlex.split(args, posix=True)
+        except Exception:
+            args = []
+    if isinstance(args, (list, tuple)):
+        # QA-13：只接受字符串，strip 后丢弃 None/数字/空串，绝不转成 "None"/"3"
+        cleaned = []
+        for item in args:
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if item:
+                cleaned.append(item)
+        out["extra_args"] = cleaned
+    if isinstance(value.get("close_after"), bool):
+        out["close_after"] = value["close_after"]
+    return out
+
+
+def _clean_daily_order(value, keys):
+    """规整队列顺序：只保留存在的 app key，去重并补齐缺失项。"""
+    keys = [str(key) for key in (keys or [])]
+    order = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            key = str(item).strip()
+            if key in keys and key not in order:
+                order.append(key)
+    for key in keys:
+        if key not in order:
+            order.append(key)
+    return order
+
+
+def load_state_full():
+    """读取 config.json，返回 (apps, clash_exe, root, meta)。
+
+    meta 目前包含：daily_order（一键清日常顺序）。保留 load_state() 三元组
+    包装以兼容既有调用方（QA 回归/test 工具）。
+    """
     data = {}
     if os.path.exists(CONFIG):
         try:
@@ -948,12 +1028,14 @@ def load_state():
 
     apps = []
     saved_apps = data.get("apps") if isinstance(data.get("apps"), dict) else {}
+    saved_launch_specs = {}
     for base in DEFAULT_APPS:
         app = make_builtin(base["key"], root)
         saved = saved_apps.get(base["key"], {}) if isinstance(saved_apps, dict) else {}
         if isinstance(saved, str):     # 兼容 v1/v2 的纯路径格式
             saved = {"script_exe": saved}
         if isinstance(saved, dict):
+            saved_launch_specs[base["key"]] = saved.get("launch")
             exe = _absolute(saved.get("script_exe"), root)
             if exe:
                 app["script_exe"] = exe
@@ -968,6 +1050,7 @@ def load_state():
             if detect:
                 app["detect"] = detect          # 用户自定义检测规则优先
                 app["detect_custom"] = True
+            app["daily"] = _clean_daily(saved.get("daily"), base["key"])
             for field in ("site", "github", "release", "download", "accent"):
                 if saved.get(field):
                     app[field] = saved[field]
@@ -977,6 +1060,8 @@ def load_state():
                     icon = os.path.join(APP_DIR, icon)
                 if os.path.exists(icon):
                     app["icon_path"] = icon
+        if "daily" not in app:
+            app["daily"] = _clean_daily(None, base["key"])
         apps.append(app)
 
     # 内置应用：路径没找到时自动扫描
@@ -998,6 +1083,16 @@ def load_state():
                    if str(name).strip()]
         if not current or all(_is_legacy_game_proc(name) for name in current):
             app["game_procs"] = list(defaults)
+
+    # v0.7 启动规格：内置鸣潮改为「bundled pythonw + working\main.py」直接跑正式脚本
+    # （ok-ww.exe 只是 PyAppify 启动器/更新器）；旧配置没有 launch 时自动补齐，
+    # 保存后持久化到 config.json，便于其它应用复用同一结构。
+    for app in apps:
+        saved_launch = _clean_launch(saved_launch_specs.get(app.get("key", "")), root)
+        if app.get("key") == "wuwa":
+            app["launch"] = _merge_launch_spec(saved_launch, build_okww_launch(app))
+        elif saved_launch:
+            app["launch"] = saved_launch
 
     custom = data.get("custom_apps") or []
     if isinstance(custom, list):
@@ -1034,27 +1129,45 @@ def load_state():
             if detect:
                 app["detect"] = detect          # 自定义游戏的检测规则
                 app["detect_custom"] = True
+            launch = _clean_launch(item.get("launch"), root)
+            if launch:
+                app["launch"] = launch          # 自定义游戏也可复用启动规格
+            app["daily"] = _clean_daily(item.get("daily"), app["key"])
             apps.append(app)
 
     clash = data.get("clash") or ""
     if not clash or not os.path.exists(clash):
         clash = next((p for p in CLASH_CANDIDATES if p and os.path.exists(p)), "")
+    builtin_keys = [app["key"] for app in apps if app.get("builtin")]
+    meta = {"daily_order": _clean_daily_order(data.get("daily_order"),
+                                             builtin_keys)}
+    return apps, clash, root, meta
+
+
+def load_state():
+    """兼容包装：返回 (apps, clash_exe, root)。"""
+    apps, clash, root, _meta = load_state_full()
     return apps, clash, root
 
 
-def save_state(apps, clash, root):
+def save_state(apps, clash, root, daily_order=None):
     """写入 config.json（v4），返回是否成功（失败由调用方负责提示用户）。"""
     data = {"version": 4, "apps": {}, "custom_apps": []}
     if os.path.normpath(root) != os.path.normpath(SEARCH_ROOT):
         data["root"] = root
     if clash:
         data["clash"] = clash
+    builtin_keys = [app["key"] for app in apps if app.get("builtin")]
+    if daily_order is None:
+        daily_order = DEFAULT_DAILY_ORDER
+    data["daily_order"] = _clean_daily_order(daily_order, builtin_keys)
     for app in apps:
         entry = {
             "script_exe": _portable(app.get("script_exe", ""), root),
             "game_exe": _portable(app.get("game_exe", ""), root) if app.get("game_exe") else "",
             "script_procs": list(app.get("script_procs") or []),
             "game_procs": list(app.get("game_procs") or []),
+            "daily": _clean_daily(app.get("daily"), app.get("key", "")),
         }
         icon = app.get("icon_path", "")
         if icon:
@@ -1064,6 +1177,9 @@ def save_state(apps, clash, root):
             if cleaned:
                 entry["detect"] = cleaned
                 entry["detect_custom"] = True
+        launch = _portable_launch(app.get("launch"), root)
+        if launch:
+            entry["launch"] = launch
         if app.get("builtin"):
             for field in ("site", "github", "release", "download", "accent"):
                 if app.get(field):
@@ -1112,12 +1228,44 @@ kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                wintypes.LPWSTR,
+                                                ctypes.POINTER(wintypes.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 kernel32.CreateMutexW.restype = wintypes.HANDLE
 kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
 user32.GetAncestor.restype = wintypes.HWND
 
 TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE = ctypes.c_void_p(-1).value
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def process_path(pid):
+    """取进程完整 exe 路径（QueryFullProcessImageNameW）；失败返回空串。"""
+    if not pid:
+        return ""
+    handle = None
+    try:
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False,
+                                      int(pid))
+        if not handle:
+            return ""
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value or ""
+    except Exception:
+        pass
+    finally:
+        if handle:
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+    return ""
 
 
 def snapshot_processes():
@@ -1158,10 +1306,11 @@ def pids_for_procs(procs):
     return pids
 
 
-def bring_to_front(procs):
-    if not (snapshot_processes() & set(procs)):
+def bring_pids_to_front(pids):
+    """把指定进程集合的可见窗口切到前台（用于正式脚本/多窗口场景）。"""
+    pids = set(pids or ())
+    if not pids:
         return False
-    pids = pids_for_procs(set(procs))
     found = []
     pid_of = user32.GetWindowThreadProcessId
     pid_of.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -1187,6 +1336,12 @@ def bring_to_front(procs):
         except Exception:
             continue
     return False
+
+
+def bring_to_front(procs):
+    if not (snapshot_processes() & set(procs)):
+        return False
+    return bring_pids_to_front(pids_for_procs(set(procs)))
 
 
 def shell_launch(exe, verb="runas"):
@@ -1252,3 +1407,306 @@ def focus_window(title):
         return True
     except Exception:
         return False
+
+
+# ------------------------------------------------------------------ 启动规格（launch spec）
+# 有些脚本的「启动器 exe」其实只是 PyAppify 更新器，真正脚本是 bundled python 进程。
+# 这里用可复用的 launch spec 描述启动方式，并持久化到 config.json：
+#   {"type":"python","exe":...pythonw.exe,"script":...main.py,"cwd":working,
+#    "env":{...},"clear_env":[...],"launcher_exe":ok-ww.exe,
+#    "process_exe_names":[...],"process_exe_dirs":[...],"fallback":"launcher"}
+LAUNCH_ENV_CLEAR = ("PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV", "PYTHONPATH",
+                    "PYTHONUSERBASE", "PYTHONCASEOK", "PYTHONHASHSEED",
+                    "PYTHONOPTIMIZE", "PYTHONVERBOSE", "PYTHONDEBUG",
+                    "PYTHONWARNINGS", "PYTHONIOENCODING", "PYTHONINSPECT",
+                    "PYAPPIFY_PID")
+LAUNCH_ENV_SET = {"PYTHONNOUSERSITE": "1", "PYTHONIOENCODING": "utf-8",
+                  "PYTHONUNBUFFERED": "1"}
+OKWW_APP_SUBDIR = ("data", "apps", "ok-ww")
+_LAUNCH_PATH_FIELDS = ("exe", "script", "cwd", "launcher_exe")
+
+
+def _wrapper_path():
+    """PyAppify 包装器使用的系统默认 PATH。"""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.pathsep.join((
+        os.path.join(system_root, "system32"),
+        system_root,
+        os.path.join(system_root, "System32", "Wbem"),
+        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0"),
+        os.path.join(system_root, "System32", "OpenSSH"),
+    ))
+
+
+def _launch_text(value):
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _launch_list(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _resolve_launch_path(value, root):
+    text = _launch_text(value)
+    if not text:
+        return ""
+    if os.path.isabs(text):
+        return os.path.normpath(text)
+    return os.path.normpath(os.path.join(root, text))
+
+
+def _clean_launch(value, root=None):
+    """规整持久化的启动规格；非法/无内容返回 None。"""
+    if not isinstance(value, dict):
+        return None
+    root = root or SEARCH_ROOT
+    kind = (_launch_text(value.get("type")) or "python").lower()
+    spec = {"type": kind}
+    for field in _LAUNCH_PATH_FIELDS:
+        path = _resolve_launch_path(value.get(field), root)
+        if path:
+            spec[field] = path
+    dirs = [_resolve_launch_path(item, root)
+            for item in _launch_list(value.get("process_exe_dirs"))]
+    dirs = [item for item in dirs if item]
+    if dirs:
+        spec["process_exe_dirs"] = dirs
+    names = _launch_list(value.get("process_exe_names"))
+    if names:
+        spec["process_exe_names"] = names
+    args = _launch_list(value.get("args"))
+    if args:
+        spec["args"] = args
+    clear = _launch_list(value.get("clear_env"))
+    if clear:
+        spec["clear_env"] = clear
+    env = value.get("env")
+    if isinstance(env, dict):
+        cleaned = {}
+        for key, item in env.items():
+            key = str(key).strip()
+            if key and isinstance(item, (str, int, float)) \
+                    and not isinstance(item, bool):
+                cleaned[key] = str(item)
+        if cleaned:
+            spec["env"] = cleaned
+    fallback = _launch_text(value.get("fallback")).lower()
+    if fallback:
+        spec["fallback"] = fallback
+    if not spec.get("exe") and not spec.get("launcher_exe"):
+        return None
+    if spec.get("exe") and kind == "python" and not spec.get("script"):
+        return None
+    return spec
+
+
+def _portable_launch(value, root):
+    """把启动规格里的路径转成相对 root 的便携格式（写 config 用）。"""
+    spec = _clean_launch(value, root)
+    if not spec:
+        return None
+    out = dict(spec)
+    for field in _LAUNCH_PATH_FIELDS:
+        if out.get(field):
+            out[field] = _portable(out[field], root)
+    if out.get("process_exe_dirs"):
+        out["process_exe_dirs"] = [_portable(item, root)
+                                   for item in out["process_exe_dirs"]]
+    return out
+
+
+def build_okww_launch(app):
+    """从内置鸣潮卡片的 ok-ww 安装目录推导「直接运行正式脚本」的启动规格。
+
+    目录布局：<ok-ww>\\data\\apps\\ok-ww\\python\\pythonw.exe + working\\main.py。
+    布局缺失时仍返回规格（launch_app 会回退启动器）。
+    """
+    app = app or {}
+    launcher = _launch_text(app.get("script_exe"))
+    install_dir = os.path.dirname(launcher)
+    if not install_dir:
+        return None
+    app_dir = os.path.join(install_dir, *OKWW_APP_SUBDIR)
+    python_dir = os.path.join(app_dir, "python")
+    working = os.path.join(app_dir, "working")
+    spec = {
+        "type": "python",
+        "exe": os.path.join(python_dir, "pythonw.exe"),
+        "script": os.path.join(working, "main.py"),
+        "cwd": working,
+        "launcher_exe": launcher,
+        "clear_env": list(LAUNCH_ENV_CLEAR),
+        "env": dict(LAUNCH_ENV_SET),
+        "process_exe_names": ["pythonw.exe", "python.exe"],
+        "process_exe_dirs": [python_dir],
+        "fallback": "launcher",
+    }
+    app_json = os.path.join(app_dir, "app.json")
+    metadata = {}
+    try:
+        with open(app_json, "r", encoding="utf-8-sig") as fh:
+            metadata = json.load(fh) or {}
+    except Exception:
+        metadata = {}
+    if isinstance(metadata, dict):
+        version = metadata.get("current_version")
+        if isinstance(version, str) and version.strip():
+            spec["env"]["PYAPPIFY_APP_VERSION"] = version.strip()
+        profile = metadata.get("current_profile")
+        if isinstance(profile, str) and profile.strip():
+            spec["env"]["PYAPPIFY_APP_PROFILE"] = profile.strip()
+    if os.path.isfile(app_json):
+        spec["env"]["PYAPPIFY_APP_JSON_PATH"] = app_json
+    if os.path.isfile(launcher):
+        spec["env"]["PYAPPIFY_EXECUTABLE"] = launcher
+    return spec
+
+
+def _merge_launch_spec(saved, auto):
+    """已持久化的规格可用时优先，否则回退到自动推导；补全启动器/目录字段。"""
+    if not saved:
+        return auto
+    spec = dict(auto or {})
+    spec.update(saved)
+    if auto:
+        # 环境变量：保留用户自定义项，但 PYAPPIFY_* 等元数据以本次自动读取的
+        # app.json 为准（ok-ww 更新后版本号会变，避免持久化旧版本号）。
+        env = dict(saved.get("env") or {})
+        env.update(auto.get("env") or {})
+        if env:
+            spec["env"] = env
+        for field in ("clear_env", "process_exe_names", "process_exe_dirs",
+                      "fallback"):
+            if not spec.get(field) and auto.get(field):
+                spec[field] = auto[field]
+        launcher = auto.get("launcher_exe") or ""
+        if launcher and not os.path.isfile(spec.get("launcher_exe") or ""):
+            spec["launcher_exe"] = launcher
+        for field in ("exe", "script", "cwd"):
+            expected = auto.get(field) or ""
+            current = spec.get(field) or ""
+            exists = os.path.isdir(current) if field == "cwd" \
+                else os.path.isfile(current)
+            if expected and not exists:
+                spec[field] = expected
+    return spec
+
+
+def refresh_launch_spec(app):
+    """脚本路径变化后重新推导启动规格（内置鸣潮）；返回是否有规格。"""
+    if not isinstance(app, dict):
+        return False
+    if str(app.get("key") or "") == "wuwa":
+        spec = build_okww_launch(app)
+        if spec:
+            app["launch"] = spec
+        return bool(spec)
+    return isinstance(app.get("launch"), dict)
+
+
+def _launch_env(spec):
+    env = dict(os.environ)
+    for name in spec.get("clear_env") or LAUNCH_ENV_CLEAR:
+        env.pop(str(name), None)
+    env["PATH"] = _wrapper_path()
+    for key, value in (spec.get("env") or {}).items():
+        env[str(key)] = str(value)
+    return env
+
+
+def launch_app(app):
+    """按启动规格启动卡片脚本，返回 (ok, error, mode)。
+
+    mode: "script"=正式脚本（bundled python）、"launcher"=回退启动器、
+    "exe"=普通 exe（MAA/MaaNTE/MaaEnd 等）。
+    """
+    app = app or {}
+    spec = app.get("launch") if isinstance(app.get("launch"), dict) else None
+    if spec and spec.get("exe"):
+        exe = spec.get("exe") or ""
+        script = spec.get("script") or ""
+        command = [exe]
+        if script:
+            command.append(script)
+        command.extend(str(arg) for arg in (spec.get("args") or []))
+        cwd = spec.get("cwd") or os.path.dirname(exe)
+        error = ""
+        if os.path.isfile(exe) and (not script or os.path.isfile(script)):
+            try:
+                subprocess.Popen(
+                    command, cwd=cwd if os.path.isdir(cwd) else None,
+                    env=_launch_env(spec), close_fds=True,
+                    creationflags=0x00000008 | 0x00000200)
+                return True, "", "script"
+            except OSError as exc:
+                code = getattr(exc, "winerror", None) or exc.errno
+                error = "需要管理员权限" if code == 740 else str(exc)
+        else:
+            error = "正式脚本目录不完整"
+        launcher = spec.get("launcher_exe") or app.get("script_exe", "")
+        if spec.get("fallback") != "none" and launcher and os.path.isfile(launcher):
+            ok, fallback_error = launch_exe(launcher)
+            if ok:
+                return True, "", "launcher"
+            return False, fallback_error or error, "launcher"
+        return False, error or "正式脚本与启动器都不存在", "none"
+    ok, error = launch_exe(app.get("script_exe", ""))
+    return ok, error, "exe"
+
+
+def launch_updater(app):
+    """「更新」仍走启动器 exe（ok-ww.exe），保留其更新能力。"""
+    app = app or {}
+    spec = app.get("launch") if isinstance(app.get("launch"), dict) else {}
+    launcher = spec.get("launcher_exe") or app.get("script_exe", "")
+    if launcher and os.path.isfile(launcher):
+        return launch_exe(launcher)
+    return False, "更新器不存在"
+
+
+def launch_running_pids(app):
+    """返回启动规格对应的正式脚本进程 PID（按 exe 完整路径判定）。
+
+    不能用进程名判断：ok-ww 正式脚本是 bundled pythonw，和用户其它 python 同名；
+    启动器 ok-ww.exe 不算脚本运行中。
+    """
+    app = app or {}
+    spec = app.get("launch")
+    if not isinstance(spec, dict):
+        return set()
+    names = _launch_list(spec.get("process_exe_names"))
+    if not names and spec.get("exe"):
+        names = [os.path.basename(spec["exe"])]
+    if not names:
+        return set()
+    dirs = [os.path.normpath(str(item)).lower()
+            for item in (spec.get("process_exe_dirs") or []) if str(item).strip()]
+    if not dirs and spec.get("exe"):
+        dirs = [os.path.normpath(os.path.dirname(spec["exe"])).lower()]
+    if not dirs:
+        return set()
+    matched = set()
+    for pid in pids_for_procs({name.upper() for name in names}):
+        path = process_path(pid)
+        if not path:
+            continue
+        lower = os.path.normpath(path).lower()
+        if any(lower == item or lower.startswith(item + os.sep) for item in dirs):
+            matched.add(pid)
+    return matched
+
+
+def launch_spec_running(app):
+    return bool(launch_running_pids(app))
+
+
+def focus_launch_spec(app):
+    """把正式脚本进程的窗口切到前台（ok-ww 的窗口属于 bundled pythonw）。"""
+    pids = launch_running_pids(app)
+    if not pids:
+        return False
+    return bring_pids_to_front(pids)

@@ -19,11 +19,12 @@ BTN_Y = 236
 BTN_GAP = 12
 LINK_Y = 308
 
-# 顶部工具栏（x, y, w, h）
-ADD_RECT = (536, 32, 104, 30)
-CHECK_RECT = (650, 32, 104, 30)
-RESCAN_RECT = (764, 32, 112, 30)
-CLASH_RECT = (886, 32, 136, 30)
+# 顶部工具栏（x, y, w, h）；v0.7 增加「一键清日常」并压缩原有按钮
+ADD_RECT = (452, 32, 94, 30)
+CHECK_RECT = (554, 32, 98, 30)
+RESCAN_RECT = (660, 32, 116, 30)
+DAILY_RECT = (784, 32, 116, 30)
+CLASH_RECT = (908, 32, 114, 30)
 
 # 翻页箭头
 PAGE_LEFT_RECT = (8, 278, 32, 32)

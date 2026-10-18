@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## v0.7.0 (2026-10-18)
+
+- **鸣潮启动修复**：`ok-ww.exe` 只是 PyAppify 启动器 / 更新器，不是脚本本体。新增启动规格
+  （`launch`，type=python）：「启动脚本」直接运行
+  `data\apps\ok-ww\python\pythonw.exe` + `working\main.py`（cwd=working、清理 `PYTHON*` 环境、
+  注入 `PYAPPIFY_*`），目录不完整时回退启动器；「更新」仍走 `ok-ww.exe`；脚本运行状态改为按
+  `pythonw.exe` 完整路径判定，不再把启动器当脚本
+- **一键清日常**：卡片底部「清日常」单游戏执行，工具栏「一键清日常」按顺序串行执行多款游戏；
+  使用各脚本自身已配置的任务——ok-ww `-t DailyTask -e`、MAA `--skip-startup-auto-run` + LinkStart 热键、
+  MaaNTE / MaaEnd `--autostart --instance "<实例名>" --quit-after-run`
+- **清日常顺序队列**：启用 / 停用、↑↓ 排序并保存 `daily_order`、单项超时（1–600 分钟）、额外参数、
+  完成后结束脚本、实时进度与结果汇总、随时停止、开始前 dry-run 命令预览
+- 完成判定与异常处理：ok-ww 日志成功标记、MAA `gui.log` 完成 / 失败 / 停止关键字、MXU 进程退出；
+  超时结束本次启动的进程并继续下一项；UAC 逐项确认；失败原因写入进度面板
+- 配置扩展（仍为 v4）：新增 `daily`（清日常设置）、`daily_order`（队列顺序）、`launch`（启动规格）；
+  旧配置自动补默认值，鸣潮启动规格自动生成
+- 新增 `gamehub/daily.py`（计划 / 执行 / 顺序队列）、`tools/test_daily.py`（mock 自测）、
+  `tools/test_launch_spec.py`（启动规格自测，`--live` 只读核对本机 ok-ww）
+- 新增调研报告 `docs/daily-automation-research.md`：四款脚本的启动链、CLI 参数、完成信号、
+  前置条件与风险（688 行）
+- UI：顶部新增「一键清日常」按钮、卡片底部「清日常」链接（运行中显示「清日常中」）、
+  右键菜单「清日常（当前游戏）」、顺序队列对话框（排序 / 启用 / 设置 / 预览 / 停止）
+- 自测：`tools/test_daily.py`、`tools/test_launch_spec.py` 全绿；回归测试 156 用例保持全绿
+- 更新 README / 主页（一键清日常说明、鸣潮启动修复、四脚本原理、配置字段、常见问题）
+
 ## v0.6.0 (2026-10-18)
 
 - **准确游戏运行检测**：游戏状态不再只看进程名，改为复用各脚本自身的判断方法——

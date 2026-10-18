@@ -45,6 +45,18 @@ def _fields_text(rules):
     return lines
 
 
+def _launch_text(app):
+    spec = app.get("launch")
+    if not isinstance(spec, dict):
+        return ""
+    running = store.launch_spec_running(app)
+    command = os.path.basename(spec.get("exe") or "")
+    script = spec.get("script") or ""
+    if script:
+        command += " " + os.path.basename(script)
+    return f"{command}（{'运行中' if running else '未运行'}）"
+
+
 def collect():
     apps, _clash, _root = store.load_state()
     by_key = {app["key"]: app for app in apps}
@@ -68,6 +80,9 @@ def collect():
             "fields": _fields_text(rules),
             "launcher_on": state.get("reason") == "launcher",
             "cloud_on": state.get("reason") == "cloud",
+            "launch": _launch_text(app),
+            "script_running": bool(store.launch_spec_running(app))
+            if isinstance(app.get("launch"), dict) else None,
         })
     return rows, windows, processes
 
@@ -89,6 +104,8 @@ def main(argv):
         hwnd = f"，hwnd={row['hwnd']}" if row["hwnd"] else ""
         print(f"== {row['label']}（{row['key']}）==")
         print(f"  规则来源: {row['source']}；当前状态: {row['state']}{hwnd}")
+        if row["launch"]:
+            print(f"  启动规格: {row['launch']}")
         for line in row["fields"]:
             print(f"  {line}")
         if row["launcher_on"]:

@@ -59,7 +59,6 @@ _ADB_CACHE = {"time": 0.0, "devices": []}
 
 # ------------------------------------------------------------------ Win32 原型
 user32 = store.user32
-kernel32 = store.kernel32
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -94,15 +93,6 @@ user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
 
-kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.OpenProcess.restype = wintypes.HANDLE
-kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
-                                                wintypes.LPWSTR,
-                                                ctypes.POINTER(wintypes.DWORD)]
-kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
 
@@ -307,27 +297,8 @@ def snapshot_windows(force=False):
 
 
 def process_path(pid):
-    """取进程完整 exe 路径；权限不足/失败返回空串。"""
-    if not pid:
-        return ""
-    handle = None
-    try:
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-        if not handle:
-            return ""
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return buf.value or ""
-    except Exception:
-        pass
-    finally:
-        if handle:
-            try:
-                kernel32.CloseHandle(handle)
-            except Exception:
-                pass
-    return ""
+    """取进程完整 exe 路径；权限不足/失败返回空串（实现与 store 共用）。"""
+    return store.process_path(pid)
 
 
 def _pid_path(pid):

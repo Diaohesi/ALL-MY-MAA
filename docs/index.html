@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>游戏脚本中心 · GameHub — Windows 游戏脚本启动器</title>
-<meta name="description" content="游戏脚本中心（GameHub Lite）是一个 Windows 桌面启动器：在同一个窗口里启动、管理明日方舟 MAA、异环 MaaNTE、鸣潮 ok-ww、明日方舟终末地 MaaEnd 等游戏脚本，支持可视化添加游戏、自动检测游戏启动程序、准确识别游戏运行状态（窗口 / 进程 / ADB）、版本检查、下载页直达与路径自动识别。">
+<meta name="description" content="游戏脚本中心（GameHub Lite）是一个 Windows 桌面启动器：在同一个窗口里启动、管理明日方舟 MAA、异环 MaaNTE、鸣潮 ok-ww、明日方舟终末地 MaaEnd 等游戏脚本，支持一键清日常（顺序队列）、可视化添加游戏、自动检测游戏启动程序、准确识别游戏运行状态（窗口 / 进程 / ADB）、版本检查、下载页直达与路径自动识别。">
 <meta name="theme-color" content="#0a0d13">
 <meta name="color-scheme" content="dark">
 <link rel="canonical" href="https://diaohesi.github.io/ALL-MY-MAA/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="游戏脚本中心 · GameHub">
 <meta property="og:title" content="游戏脚本中心 · GameHub — Windows 游戏脚本启动器">
-<meta property="og:description" content="一个窗口，管好所有游戏脚本：一键启动脚本与游戏、自动检测游戏启动程序、准确识别游戏运行状态（窗口 / 进程 / ADB）、下载页直达、版本检查，还能可视化添加任意新游戏。">
+<meta property="og:description" content="一个窗口，管好所有游戏脚本：一键启动脚本与游戏、按顺序一键清日常、自动检测游戏启动程序、准确识别游戏运行状态（窗口 / 进程 / ADB）、下载页直达、版本检查，还能可视化添加任意新游戏。">
 <meta property="og:url" content="https://diaohesi.github.io/ALL-MY-MAA/">
 <meta property="og:image" content="https://diaohesi.github.io/ALL-MY-MAA/assets/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -27,10 +27,10 @@
   "alternateName": "GameHub Lite",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "description": "把多个游戏脚本收进同一个窗口的 Windows 桌面启动器，支持可视化添加游戏、自动检测游戏启动程序、准确的游戏运行检测（窗口 / 进程 / ADB）、版本检查与路径自动识别。",
+  "description": "把多个游戏脚本收进同一个窗口的 Windows 桌面启动器，支持一键清日常与顺序队列、可视化添加游戏、自动检测游戏启动程序、准确的游戏运行检测（窗口 / 进程 / ADB）、版本检查与路径自动识别。",
   "url": "https://diaohesi.github.io/ALL-MY-MAA/",
   "downloadUrl": "https://github.com/Diaohesi/ALL-MY-MAA/releases/latest",
-  "softwareVersion": "0.6.0",
+  "softwareVersion": "0.7.0",
   "license": "https://github.com/Diaohesi/ALL-MY-MAA/blob/main/LICENSE",
   "offers": {
     "@type": "Offer",
@@ -48,7 +48,7 @@
     <a class="brand" href="#top" aria-label="游戏脚本中心 GameHub 首页">
       <img class="brand-logo" src="assets/hub.png" width="32" height="32" alt="">
       <span class="brand-name">游戏脚本中心</span>
-      <span class="brand-ver">v0.6.0</span>
+      <span class="brand-ver">v0.7.0</span>
     </a>
     <nav class="nav" aria-label="主导航">
       <a href="#features">功能</a>
@@ -67,10 +67,10 @@
   <section class="hero" id="top">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Windows 桌面启动器 · v0.6.0</p>
+        <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Windows 桌面启动器 · v0.7.0</p>
         <h1>游戏脚本中心 · <span class="grad">GameHub</span></h1>
         <p class="tagline">把明日方舟、异环、鸣潮、明日方舟终末地……所有游戏脚本，收进同一个窗口。</p>
-        <p class="desc">一键启动脚本、启动游戏、打开游戏下载页与官网；准确识别游戏运行状态（窗口 / 进程 / ADB），后台检查版本。还能可视化添加任意新游戏、自动检测游戏启动程序，脚本路径也会自动识别，换电脑、换盘符照样能用。</p>
+        <p class="desc">一键启动脚本、启动游戏、打开游戏下载页与官网；准确识别游戏运行状态（窗口 / 进程 / ADB），还能按顺序一键清日常，后台检查版本。可视化添加任意新游戏、自动检测游戏启动程序，脚本路径自动识别，换电脑、换盘符照样能用。</p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://github.com/Diaohesi/ALL-MY-MAA/releases/latest" target="_blank" rel="noopener noreferrer">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M7.5 10 12 14.5 16.5 10"/><path d="M4.5 20h15"/></svg>
@@ -117,7 +117,7 @@
       <header class="section-head reveal">
         <p class="kicker">Features</p>
         <h2>一个窗口，管好所有脚本</h2>
-        <p class="section-lead">启动、下载、运行检测与路径识别，日常操作都在卡片上完成。</p>
+        <p class="section-lead">启动、下载、运行检测、一键清日常与路径识别，日常操作都在卡片上完成。</p>
       </header>
       <div class="feature-grid reveal">
         <article class="feature accent-blue">
@@ -125,7 +125,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.5 15.5 12 10 15.5z" fill="currentColor" stroke="none"/></svg>
           </div>
           <h3>启动脚本</h3>
-          <p>点卡片或「启动脚本」拉起脚本；已在运行时自动把它的窗口切到最前，不会重复启动。</p>
+          <p>点卡片或「启动脚本」拉起脚本；已在运行时自动切到最前。鸣潮改为直接启动正式脚本（不再只开启动器）。</p>
         </article>
         <article class="feature accent-teal">
           <div class="feature-icon" aria-hidden="true">
@@ -199,6 +199,23 @@
             <li class="chip-cloud">云游戏运行中</li>
             <li>未运行 / 未配置</li>
           </ul>
+        </div>
+      </article>
+      <article class="feature feature-wide accent-yellow reveal">
+        <div class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="4.5" width="15" height="16" rx="2.5"/><path d="M9 3.5h6v3H9z"/><path d="M8.5 12l2 2 4-4.5"/></svg>
+        </div>
+        <div class="feature-wide-body">
+          <h3>一键清日常 <span class="feature-tag">v0.7.0</span></h3>
+          <p>使用各脚本自己已配置好的任务，按自定义顺序串行跑完多款游戏的日常：ok-ww 用 <code>-t DailyTask -e</code>、MAA 用 LinkStart 热键、MaaNTE / MaaEnd 用 <code>--autostart</code> 自启动。支持单项超时、随时停止、完成 / 失败判定，开始前还能 dry-run 预览命令。</p>
+          <ul class="status-chips" aria-label="一键清日常特性">
+            <li class="chip-daily">顺序队列</li>
+            <li class="chip-daily">单项超时</li>
+            <li class="chip-daily">随时停止</li>
+            <li class="chip-daily">UAC 逐项确认</li>
+            <li class="chip-daily">dry-run 预览</li>
+          </ul>
+          <p class="feature-hint">前置：先在脚本里预设好日常任务；MAA 需勾选任务队列并配置 LinkStart 热键；MaaNTE / MaaEnd 需选择实例；异环实例没有「启动游戏」前置任务时，请先点卡片「启动游戏」。自动化操作存在账号风险，请自行评估。</p>
         </div>
       </article>
     </div>

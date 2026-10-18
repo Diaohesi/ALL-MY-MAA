@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -25,7 +26,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gamehub import detector, render, store, theme  # noqa: E402
+from gamehub import daily, detector, render, store, theme  # noqa: E402
 
 ASSETS = os.path.join(REPO_ROOT, "assets")
 
@@ -1478,6 +1479,1115 @@ class DetectorSnapshotSmokeTests(unittest.TestCase):
         running, reason = detector.detect_game({"key": "maa", "game": "明日方舟"})
         self.assertIsInstance(running, bool)
         self.assertIsInstance(reason, str)
+
+
+# ---------------------------------------------------------------- v0.7 启动规格
+def _touch(path, content=b"stub"):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(content)
+    return path
+
+
+def _write_json(path, data, encoding="utf-8"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding=encoding) as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    return path
+
+
+def _append_text(path, text):
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _make_okww_install(tmp_dir, with_script=True, with_app_json=True):
+    """临时目录拼 ok-ww 安装布局；返回 (app, paths)。"""
+    root = os.path.join(tmp_dir, "WuwaMAA", "ok-ww")
+    launcher = _touch(os.path.join(root, "ok-ww.exe"))
+    app_dir = os.path.join(root, "data", "apps", "ok-ww")
+    pythonw = _touch(os.path.join(app_dir, "python", "pythonw.exe"))
+    working = os.path.join(app_dir, "working")
+    os.makedirs(working, exist_ok=True)
+    script = os.path.join(working, "main.py")
+    if with_script:
+        _touch(script, b"print('stub')\n")
+    if with_app_json:
+        _write_json(os.path.join(app_dir, "app.json"),
+                    {"current_version": "v9.9.9", "current_profile": "China"})
+    app = {"key": "wuwa", "game": "鸣潮", "script_exe": launcher,
+           "script_procs": ["OK-WW.EXE"]}
+    return app, {"launcher": launcher, "pythonw": pythonw,
+                 "working": working, "script": script, "app_dir": app_dir}
+
+
+class LaunchSpecTests(TempDirTest):
+    """v0.7 启动规格：birded pythonw + working\\main.py / 环境清理 / 回退 / 进程判定。"""
+
+    def test_build_okww_launch_full(self):
+        app, paths = _make_okww_install(self.tmp)
+        spec = store.build_okww_launch(app)
+        self.assertEqual(spec["type"], "python")
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(paths["pythonw"]))
+        self.assertEqual(os.path.normpath(spec["script"]),
+                         os.path.normpath(paths["script"]))
+        self.assertEqual(os.path.normpath(spec["cwd"]),
+                         os.path.normpath(paths["working"]))
+        self.assertEqual(os.path.normpath(spec["launcher_exe"]),
+                         os.path.normpath(paths["launcher"]))
+        self.assertEqual(spec["fallback"], "launcher")
+        self.assertEqual(spec["process_exe_names"],
+                         ["pythonw.exe", "python.exe"])
+        self.assertEqual(spec["process_exe_dirs"],
+                         [os.path.dirname(paths["pythonw"])])
+        for key, value in store.LAUNCH_ENV_SET.items():
+            self.assertEqual(spec["env"].get(key), value)
+        self.assertEqual(spec["env"].get("PYAPPIFY_APP_VERSION"), "v9.9.9")
+        self.assertEqual(spec["env"].get("PYAPPIFY_APP_PROFILE"), "China")
+        self.assertEqual(spec["env"].get("PYAPPIFY_EXECUTABLE"),
+                         paths["launcher"])
+        self.assertIn("PYAPPIFY_APP_JSON_PATH", spec["env"])
+        for name in ("PYTHONHOME", "PYTHONPATH", "PYAPPIFY_PID"):
+            self.assertIn(name, spec["clear_env"])
+
+    def test_build_okww_launch_missing_layout(self):
+        app, paths = _make_okww_install(self.tmp, with_script=False,
+                                        with_app_json=False)
+        spec = store.build_okww_launch(app)
+        self.assertIsNotNone(spec)
+        self.assertEqual(os.path.normpath(spec["exe"]),
+                         os.path.normpath(paths["pythonw"]))
+        self.assertNotIn("PYAPPIFY_APP_VERSION", spec["env"])
+        self.assertNotIn("PYAPPIFY_APP_JSON_PATH", spec["env"])
+        self.assertFalse(store.build_okww_launch({"script_exe": ""}))
+
+    def test_launch_env_cleans_and_injects(self):
+        app, _paths = _make_okww_install(self.tmp)
+        spec = store.build_okww_launch(app)
+        with mock.patch.dict(os.environ, {
+                "PYTHONHOME": r"C:\bad\python", "PYTHONPATH": r"C:\bad\path",
+                "PYAPPIFY_PID": "123", "QA_KEEP_ME": "yes"}, clear=False):
+            env = store._launch_env(spec)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYAPPIFY_PID", env)
+        self.assertEqual(env.get("QA_KEEP_ME"), "yes")
+        self.assertEqual(env.get("PATH"), store._wrapper_path())
+        for key, value in store.LAUNCH_ENV_SET.items():
+            self.assertEqual(env.get(key), value)
+
+    def test_launch_app_runs_bundled_python(self):
+        app, paths = _make_okww_install(self.tmp)
+        spec = dict(store.build_okww_launch(app))
+        spec["args"] = ["--extra"]
+        app["launch"] = spec
+        with mock.patch.object(store.subprocess, "Popen") as popen:
+            ok, error, mode = store.launch_app(app)
+        self.assertEqual((ok, mode), (True, "script"))
+        self.assertEqual(error, "")
+        command = popen.call_args.args[0]
+        self.assertEqual([os.path.normpath(item) for item in command], [
+            os.path.normpath(paths["pythonw"]),
+            os.path.normpath(paths["script"]), "--extra"])
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(os.path.normpath(kwargs["cwd"]),
+                         os.path.normpath(paths["working"]))
+        env = kwargs.get("env") or {}
+        self.assertEqual(env.get("PYTHONNOUSERSITE"), "1")
+        self.assertNotIn("PYTHONHOME", env)
+
+    def test_launch_app_falls_back_to_launcher(self):
+        app, paths = _make_okww_install(self.tmp, with_script=False)
+        app["launch"] = store.build_okww_launch(app)
+        launched = []
+        with mock.patch.object(store, "launch_exe",
+                               side_effect=lambda exe: (launched.append(exe),
+                                                        (True, ""))[1]) as fake:
+            ok, error, mode = store.launch_app(app)
+        self.assertEqual((ok, error, mode), (True, "", "launcher"))
+        self.assertEqual([os.path.normpath(item) for item in launched],
+                         [os.path.normpath(paths["launcher"])])
+        # 回退也失败时返回回退错误
+        with mock.patch.object(store, "launch_exe",
+                               return_value=(False, "回退失败")):
+            ok2, error2, mode2 = store.launch_app(app)
+        self.assertEqual((ok2, error2, mode2), (False, "回退失败", "launcher"))
+
+    def test_launch_app_no_fallback(self):
+        app, _paths = _make_okww_install(self.tmp, with_script=False)
+        spec = dict(store.build_okww_launch(app))
+        spec["fallback"] = "none"
+        app["launch"] = spec
+        with mock.patch.object(store, "launch_exe") as fake:
+            ok, error, mode = store.launch_app(app)
+        self.assertFalse(ok)
+        self.assertEqual(mode, "none")
+        self.assertTrue(error)
+        fake.assert_not_called()
+
+    def test_launch_app_plain_exe(self):
+        app = {"key": "maa", "script_exe": _touch(os.path.join(self.tmp, "MAA",
+                                                               "MAA.exe"))}
+        with mock.patch.object(store, "launch_exe",
+                               return_value=(True, "")) as fake:
+            ok, error, mode = store.launch_app(app)
+        self.assertEqual((ok, error, mode), (True, "", "exe"))
+        fake.assert_called_once_with(app["script_exe"])
+
+    def test_launch_running_pids_path_based(self):
+        app, paths = _make_okww_install(self.tmp)
+        app["launch"] = store.build_okww_launch(app)
+        pythonw = paths["pythonw"]
+        user_python = os.path.join(self.tmp, "Python313", "pythonw.exe")
+        _touch(user_python)
+        launcher = paths["launcher"]
+        with mock.patch.object(store, "pids_for_procs",
+                               return_value={111, 222, 333}) as fake, \
+                mock.patch.object(store, "process_path",
+                                  side_effect={111: pythonw, 222: user_python,
+                                               333: launcher}.get):
+            pids = store.launch_running_pids(app)
+            running = store.launch_spec_running(app)
+        self.assertEqual(pids, {111}, "只认 ok-ww pythonw 目录内的进程")
+        self.assertTrue(running)
+        self.assertIn("PYTHONW.EXE", fake.call_args.args[0])
+        # 路径读不到 -> 不判定运行（避免误判用户其它 python）
+        with mock.patch.object(store, "pids_for_procs", return_value={333}), \
+                mock.patch.object(store, "process_path", return_value=""):
+            self.assertEqual(store.launch_running_pids(app), set())
+            self.assertFalse(store.launch_spec_running(app))
+        self.assertEqual(store.launch_running_pids({}), set())
+
+    def test_launch_updater_uses_launcher(self):
+        app, paths = _make_okww_install(self.tmp)
+        app["launch"] = store.build_okww_launch(app)
+        with mock.patch.object(store, "launch_exe",
+                               return_value=(True, "")) as fake:
+            ok, error = store.launch_updater(app)
+        self.assertEqual((ok, error), (True, ""))
+        fake.assert_called_once_with(paths["launcher"])
+
+    def test_launch_spec_persistence_and_legacy_fill(self):
+        app, paths = _make_okww_install(self.tmp)
+        app["launch"] = store.build_okww_launch(app)
+        app["builtin"] = True
+        cfg = os.path.join(self.tmp, "config.json")
+        search_root = os.path.join(self.tmp, "search_root")
+        os.makedirs(search_root, exist_ok=True)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            self.assertTrue(store.save_state([app], clash="", root=self.tmp,
+                                             daily_order=["wuwa"]))
+            raw = json.load(open(cfg, "r", encoding="utf-8"))
+            self.assertEqual(raw.get("version"), 4)
+            saved = raw["apps"]["wuwa"]["launch"]
+            self.assertFalse(os.path.isabs(saved["exe"]))
+            self.assertIn("/", saved["exe"])
+            apps, _clash, _root, meta = store.load_state_full()
+            got = next(item for item in apps
+                       if item["key"] == "wuwa")["launch"]
+            self.assertEqual(os.path.normpath(got["exe"]),
+                             os.path.normpath(paths["pythonw"]))
+            self.assertEqual(os.path.normpath(got["script"]),
+                             os.path.normpath(paths["script"]))
+            self.assertEqual(os.path.normpath(got["cwd"]),
+                             os.path.normpath(paths["working"]))
+            self.assertEqual(meta["daily_order"][0], "wuwa")
+            self.assertEqual(sorted(meta["daily_order"]),
+                             sorted(store.DEFAULT_DAILY_ORDER))
+            # 旧配置没有 launch 字段 -> 内置鸣潮自动补齐
+            for item in raw["apps"].values():
+                item.pop("launch", None)
+            raw["version"] = 3
+            _write_json(cfg, raw)
+            apps2, _c, _r, _m = store.load_state_full()
+            got2 = next(item for item in apps2
+                        if item["key"] == "wuwa")["launch"]
+            self.assertEqual(os.path.normpath(got2["exe"]),
+                             os.path.normpath(paths["pythonw"]))
+
+    def test_clean_launch_and_refresh(self):
+        app, paths = _make_okww_install(self.tmp)
+        spec = store._clean_launch({
+            "type": "python", "exe": "a/pythonw.exe", "script": "b/main.py",
+            "cwd": "b", "process_exe_dirs": ["a"],
+            "env": {"QA": 1, "BOOL": True}, "clear_env": "PYTHONHOME",
+            "fallback": "launcher"}, root=self.tmp)
+        self.assertTrue(spec["exe"].startswith(self.tmp))
+        self.assertEqual(spec["env"], {"QA": "1"})
+        self.assertEqual(spec["clear_env"], ["PYTHONHOME"])
+        self.assertIsNone(store._clean_launch({}, root=self.tmp))
+        self.assertIsNone(store._clean_launch(
+            {"type": "python", "exe": "x.exe"}, root=self.tmp))
+        self.assertTrue(store.refresh_launch_spec(app))
+        self.assertEqual(os.path.normpath(app["launch"]["exe"]),
+                         os.path.normpath(paths["pythonw"]))
+        self.assertFalse(store.refresh_launch_spec({"key": "custom"}))
+
+
+# ---------------------------------------------------------------- v0.7 清日常夹具
+def _make_okww_daily(tmp_dir, settings=None):
+    app, paths = _make_okww_install(tmp_dir)
+    _touch(os.path.join(paths["working"], "configs", "DailyTask.json"), b"{}")
+    log = _touch(os.path.join(paths["working"], "logs", "ok-script.log"), b"")
+    app["launch"] = store.build_okww_launch(app)
+    app["daily"] = store._clean_daily(settings or {}, "wuwa")
+    return app, log
+
+
+def _make_mxu_daily(tmp_dir, key="nte", instances=None):
+    script = "MaaNTE" if key == "nte" else "MaaEnd"
+    exe = _touch(os.path.join(tmp_dir, script, f"{script}.exe"))
+    if instances is None:
+        if key == "nte":
+            instances = [{"name": "挂机任务", "tasks": [
+                {"taskName": "FishNew", "enabled": True},
+                {"taskName": "DailyTask", "enabled": False}]}]
+        else:
+            instances = [
+                {"name": "全套日常", "tasks": [
+                    {"taskName": "__MXU_PRETASK__LaunchGamePC",
+                     "enabled": True},
+                    {"taskName": "DailyTask", "enabled": True}]},
+                {"name": "快速日常", "tasks": [
+                    {"taskName": "DailyTask", "enabled": True}]}]
+    _write_json(os.path.join(tmp_dir, script, "config",
+                             f"mxu-{script}.json"), {"instances": instances})
+    _touch(os.path.join(tmp_dir, script, "debug", "mxu-tauri.log"), b"")
+    return {"key": key,
+            "game": "异环" if key == "nte" else "明日方舟终末地",
+            "script": script, "script_exe": exe,
+            "daily": store._clean_daily({}, key)}
+
+
+def _make_maa_daily(tmp_dir, hotkey=True, tasks=("开始唤醒", "自动公招"),
+                    config_name="Default"):
+    exe = _touch(os.path.join(tmp_dir, "MAA", "MAA.exe"))
+    gui = {"Current": config_name, "Gui": {"HotKeys": {}},
+           "Configurations": {config_name: {"TaskQueue": [
+               {"Name": name, "TaskType": name, "IsEnable": True}
+               for name in tasks]}}}
+    if hotkey:
+        gui["Gui"]["HotKeys"]["LinkStart"] = {
+            "Key": "L", "Modifiers": "Alt, Control, Shift"}
+    _write_json(os.path.join(tmp_dir, "MAA", "config", "gui.new.json"), gui)
+    log = _touch(os.path.join(tmp_dir, "MAA", "debug", "gui.log"), b"")
+    app = {"key": "maa", "game": "明日方舟", "script": "MAA",
+           "script_exe": exe, "daily": store._clean_daily({}, "maa")}
+    return app, log, gui
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def now(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += max(0.0, float(seconds))
+
+
+class FakeHandle:
+    def __init__(self, clock, exit_calls=None):
+        self.pid = 4321
+        self.clock = clock
+        self.calls = 0
+        self.exit_calls = exit_calls
+        self.on_wait = None
+        self.terminated = False
+        self.closed = False
+
+    def alive(self):
+        return not self.terminated and not self._exited()
+
+    def _exited(self):
+        return bool(self.exit_calls and self.calls >= self.exit_calls)
+
+    def wait(self, timeout_ms=500):
+        self.calls += 1
+        if self.on_wait:
+            self.on_wait(self)
+        self.clock.sleep(0.4)
+        return self.terminated or self._exited()
+
+    def terminate(self):
+        self.terminated = True
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+class DailyPlanTests(TempDirTest):
+    """dry-run 命令拼装：ok-ww / MAA / MXU(MaaNTE/MaaEnd)。"""
+
+    def _apps(self):
+        wuwa, _log = _make_okww_daily(self.tmp)
+        maa, _mlog, _gui = _make_maa_daily(self.tmp)
+        nte = _make_mxu_daily(self.tmp, "nte")
+        maaend = _make_mxu_daily(self.tmp, "maaend")
+        return [wuwa, maa, nte, maaend]
+
+    def _patches(self, game_running=True, script_running=False):
+        return (
+            mock.patch.object(daily, "_script_running",
+                              return_value=script_running),
+            mock.patch.object(daily, "_game_running",
+                              return_value=game_running),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value=set()))
+
+    def test_dry_run_four_commands(self):
+        apps = self._apps()
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3, mock.patch.object(
+                daily, "launch_elevated",
+                side_effect=AssertionError("dry-run 不应启动进程")):
+            plans = daily.dry_run(apps)
+        by_key = {plan["key"]: plan for plan in plans}
+        self.assertEqual([plan["key"] for plan in plans],
+                         store.DEFAULT_DAILY_ORDER)
+        self.assertTrue(all(plan["ok"] for plan in plans),
+                        [(p["key"], p["errors"]) for p in plans])
+        wuwa = by_key["wuwa"]
+        self.assertEqual(wuwa["mode"], "okww")
+        self.assertIn("main.py", wuwa["params"])
+        self.assertIn("-t DailyTask", wuwa["params"])
+        self.assertTrue(wuwa["params"].rstrip().endswith("-e"))
+        self.assertEqual(os.path.basename(wuwa["cwd"]), "working")
+        self.assertEqual(wuwa["timeout_min"], 90)
+        maa = by_key["maa"]
+        self.assertEqual(maa["mode"], "maa")
+        self.assertIn("--skip-startup-auto-run", maa["params"])
+        self.assertEqual(maa["hotkey"]["text"], "Alt, Control, Shift + L")
+        self.assertEqual(maa["enabled_tasks"], ["开始唤醒", "自动公招"])
+        nte = by_key["nte"]
+        self.assertEqual(nte["mode"], "mxu")
+        self.assertIn("--autostart", nte["params"])
+        self.assertIn('--instance "挂机任务"', nte["params"])
+        self.assertIn("--quit-after-run", nte["params"])
+        maaend = by_key["maaend"]
+        self.assertIn('--instance "全套日常"', maaend["params"])
+        text = daily.describe_plan(wuwa)
+        self.assertIn("命令:", text)
+        self.assertIn("超时:", text)
+
+    def test_okww_plan_task_extra_args_timeout(self):
+        app, _log = _make_okww_daily(self.tmp, {
+            "task": "DailyTask", "extra_args": ["--debug"], "timeout_min": 30})
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(plan["params"].endswith("-e --debug"))
+        self.assertEqual(plan["timeout_min"], 30)
+        self.assertTrue(plan["close_after"])
+
+    def test_maa_plan_config_args_and_hotkey(self):
+        app, _log, _gui = _make_maa_daily(self.tmp)
+        app["daily"] = store._clean_daily(
+            {"config": "Default", "extra_args": ["--foo"], "timeout_min": 45},
+            "maa")
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertEqual(plan["params"],
+                         '--skip-startup-auto-run --config "Default" --foo')
+        self.assertEqual(plan["hotkey"]["text"], "Alt, Control, Shift + L")
+        self.assertEqual(plan["timeout_min"], 45)
+        self.assertFalse(plan["close_after"])
+
+    def test_mxu_plan_instance_auto_and_override(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        maaend = _make_mxu_daily(self.tmp, "maaend")
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            nte_plan = daily.plan_for(nte)
+            maaend_plan = daily.plan_for(maaend)
+            override = dict(maaend)
+            override["daily"] = store._clean_daily(
+                {"instance": "快速日常"}, "maaend")
+            override_plan = daily.plan_for(override)
+        self.assertIn('--instance "挂机任务"', nte_plan["params"])
+        self.assertIn('--instance "全套日常"', maaend_plan["params"])
+        self.assertIn('--instance "快速日常"', override_plan["params"])
+        self.assertIn("--autostart", override_plan["params"])
+        self.assertTrue(override_plan["params"].endswith("--quit-after-run"))
+
+    def test_plan_settings_override(self):
+        app, _log, _gui = _make_maa_daily(self.tmp)
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            plan = daily.plan_for(app, {"timeout_min": 5, "enabled": False})
+        self.assertEqual(plan["timeout_min"], 5)
+        self.assertFalse(plan["settings"]["enabled"])
+
+    def test_plan_unsupported_and_describe_errors(self):
+        plan = daily.plan_for({"key": "custom_qa", "game": "自定义"})
+        self.assertFalse(plan["ok"])
+        self.assertTrue(any("不支持" in error for error in plan["errors"]))
+        app, _log, _gui = _make_maa_daily(self.tmp, hotkey=False)
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            bad = daily.plan_for(app)
+        self.assertFalse(bad["ok"])
+        text = daily.describe_plan(bad)
+        self.assertIn("✗", text)
+        self.assertIn("热键", text)
+
+
+class DailyPreconditionTests(TempDirTest):
+    """前置检查：缺布局/缺热键/无任务/实例问题/游戏未运行/脚本已运行。"""
+
+    def _patch(self, game_running=True, script_running=False):
+        return (
+            mock.patch.object(daily, "_script_running",
+                              return_value=script_running),
+            mock.patch.object(daily, "_game_running",
+                              return_value=game_running),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value=set()))
+
+    def test_okww_missing_layout_and_daily_config(self):
+        app = {"key": "wuwa", "game": "鸣潮",
+               "script_exe": os.path.join(self.tmp, "nope", "ok-ww.exe")}
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        joined = " ".join(plan["errors"])
+        self.assertIn("pythonw.exe", joined)
+        self.assertIn("main.py", joined)
+        # DailyTask.json 缺失只是警告
+        app2, _log = _make_okww_daily(self.tmp)
+        os.remove(os.path.join(daily.okww_paths(app2)["daily_config"]))
+        with p1, p2, p3:
+            plan2 = daily.plan_for(app2)
+        self.assertTrue(any("DailyTask.json" in w for w in plan2["warnings"]))
+        self.assertTrue(plan2["ok"])
+
+    def test_script_already_running(self):
+        app, _log = _make_okww_daily(self.tmp)
+        p1, p2, p3 = self._patch(script_running=True)
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(any("已在运行" in error for error in plan["errors"]))
+        nte = _make_mxu_daily(self.tmp, "nte")
+        with p1, p2, p3:
+            plan2 = daily.plan_for(nte)
+        self.assertTrue(any("已在运行" in error for error in plan2["errors"]))
+
+    def test_maa_missing_hotkey_and_empty_tasks(self):
+        app, _log, _gui = _make_maa_daily(self.tmp, hotkey=False, tasks=())
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        joined = " ".join(plan["errors"])
+        self.assertIn("热键", joined)
+        self.assertIn("任务队列", joined)
+
+    def test_maa_attach_when_running(self):
+        app, _log, _gui = _make_maa_daily(self.tmp)
+        p1, p2, p3 = self._patch(script_running=True)
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(plan["ok"])
+        self.assertTrue(plan.get("attach"))
+        self.assertTrue(any("已在运行" in note for note in plan["notes"]))
+
+    def test_mxu_missing_config_bad_instance_and_zero_tasks(self):
+        missing = _make_mxu_daily(self.tmp, "nte")
+        os.remove(daily.mxu_paths(missing)["config"])
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(missing)
+        self.assertTrue(any("MXU 实例配置" in error for error in plan["errors"]))
+
+        app = _make_mxu_daily(self.tmp, "maaend")
+        app["daily"] = store._clean_daily({"instance": "不存在"}, "maaend")
+        with p1, p2, p3:
+            plan2 = daily.plan_for(app)
+        joined = " ".join(plan2["errors"])
+        self.assertIn("不存在", joined)
+        self.assertIn("全套日常", joined)
+
+        zero = _make_mxu_daily(self.tmp, "maaend", instances=[
+            {"name": "全套日常", "tasks": [
+                {"taskName": "DailyTask", "enabled": False}]}])
+        with p1, p2, p3:
+            plan3 = daily.plan_for(zero)
+        self.assertTrue(any("没有启用任何任务" in error
+                            for error in plan3["errors"]))
+
+    def test_nte_requires_game_or_launch_pretask(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        p1, p2, p3 = self._patch(game_running=False)
+        with p1, p2, p3:
+            plan = daily.plan_for(nte)
+        self.assertTrue(any("游戏未运行" in error for error in plan["errors"]))
+        nte_launch = _make_mxu_daily(self.tmp, "nte", instances=[
+            {"name": "挂机任务", "tasks": [
+                {"taskName": "__MXU_PRETASK__LaunchGamePC", "enabled": True},
+                {"taskName": "DailyTask", "enabled": True}]}])
+        with p1, p2, p3:
+            plan2 = daily.plan_for(nte_launch)
+        self.assertFalse(any("游戏未运行" in error for error in plan2["errors"]))
+        self.assertEqual(plan2["warnings"], [])
+
+
+class DailyStateMachineTests(TempDirTest):
+    """单游戏状态机：finished / failed / timeout / stopped / attach。"""
+
+    def _run(self, app, clock, handle, log_path, stop_event=None, marker=None):
+        def launcher(exe, params, cwd):
+            _touch(log_path)
+            return handle
+        handle.on_wait = marker
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(daily, "_game_running",
+                                  return_value=True):
+            return daily.run(app, stop_event=stop_event, launcher=launcher)
+
+    def test_okww_finished_and_failed(self):
+        app, log = _make_okww_daily(self.tmp)
+        clock, handle = FakeClock(), FakeHandle(FakeClock(), exit_calls=2)
+        handle.clock = clock
+
+        def marker(h):
+            if h.calls == 1:
+                _append_text(log, daily.OKWW_SUCCESS_MARKER + "\n")
+        result = self._run(app, clock, handle, log, marker=marker)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertEqual(result["state_label"], "已完成")
+        self.assertEqual(result["pid"], 4321)
+        self.assertIn("Successfully Executed", result["log_tail"])
+
+        app2, log2 = _make_okww_daily(os.path.join(self.tmp, "fail"))
+        clock2 = FakeClock()
+        result2 = self._run(app2, clock2, FakeHandle(clock2, exit_calls=1), log2)
+        self.assertEqual(result2["state"], daily.FAILED)
+        self.assertIn("未出现成功标记", result2["reason"])
+
+    def test_okww_timeout_and_stopped(self):
+        app, log = _make_okww_daily(self.tmp, {"timeout_min": 1})
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        result = self._run(app, clock, handle, log)
+        self.assertEqual(result["state"], daily.TIMEOUT)
+        self.assertTrue(handle.terminated)
+        self.assertTrue(handle.closed)
+
+        app2, log2 = _make_okww_daily(os.path.join(self.tmp, "stop"))
+        stop_event = threading.Event()
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+
+        def marker2(h):
+            if h.calls == 1:
+                stop_event.set()
+        result2 = self._run(app2, clock2, handle2, log2,
+                            stop_event=stop_event, marker=marker2)
+        self.assertEqual(result2["state"], daily.STOPPED)
+        self.assertTrue(handle2.terminated)
+
+    def test_mxu_finished_and_timeout(self):
+        nte = _make_mxu_daily(self.tmp, "nte")
+        clock = FakeClock()
+        result = self._run(nte, clock, FakeHandle(clock, exit_calls=1),
+                           os.path.join(self.tmp, "mxu.log"))
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertIn("MXU 进程已退出", result["reason"])
+
+        nte2 = _make_mxu_daily(os.path.join(self.tmp, "mxu2"), "nte")
+        nte2["daily"] = store._clean_daily({"timeout_min": 1}, "nte")
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+        result2 = self._run(nte2, clock2, handle2,
+                            os.path.join(self.tmp, "mxu2.log"))
+        self.assertEqual(result2["state"], daily.TIMEOUT)
+        self.assertTrue(handle2.terminated)
+
+    def test_maa_success_failure_attach(self):
+        maa, maa_log, _gui = _make_maa_daily(self.tmp)
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+        hotkeys = []
+
+        def launcher(exe, params, cwd):
+            _touch(maa_log)
+            return handle
+
+        def send_ok(hotkey):
+            hotkeys.append(hotkey)
+            _append_text(maa_log, "任务已全部完成！\n")
+            return True
+
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey", side_effect=send_ok), \
+                mock.patch.object(daily, "_maa_window_ready",
+                                  return_value=True), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result = daily.run(maa, launcher=launcher)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertEqual(len(hotkeys), 1)
+        self.assertTrue(handle.closed)
+
+        maa2, maa_log2, _gui2 = _make_maa_daily(os.path.join(self.tmp, "maa2"))
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+
+        def send_fail(hotkey):
+            _append_text(maa_log2, "任务出错: 开始唤醒\n")
+            return True
+
+        def launcher2(exe, params, cwd):
+            _touch(maa_log2)
+            return handle2
+        with mock.patch.object(daily, "_now", clock2.now), \
+                mock.patch.object(daily, "_sleep", clock2.sleep), \
+                mock.patch.object(daily, "send_hotkey", side_effect=send_fail), \
+                mock.patch.object(daily, "_maa_window_ready",
+                                  return_value=True), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result2 = daily.run(maa2, launcher=launcher2)
+        self.assertEqual(result2["state"], daily.FAILED)
+        self.assertIn("任务出错", result2["reason"])
+
+        # MAA 已在运行：attach 模式只发热键、不启动
+        maa3, maa_log3, _gui3 = _make_maa_daily(os.path.join(self.tmp, "maa3"))
+        clock3 = FakeClock()
+        hotkeys3 = []
+
+        def send_ok3(hotkey):
+            hotkeys3.append(hotkey)
+            _append_text(maa_log3, "任务已全部完成！\n")
+            return True
+
+        def fail_launcher(exe, params, cwd):
+            raise AssertionError("attach 模式不应启动 MAA")
+        with mock.patch.object(daily, "_now", clock3.now), \
+                mock.patch.object(daily, "_sleep", clock3.sleep), \
+                mock.patch.object(daily, "send_hotkey", side_effect=send_ok3), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=True), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value={"MAA.EXE"}):
+            result3 = daily.run(maa3, launcher=fail_launcher)
+        self.assertEqual(result3["state"], daily.FINISHED)
+        self.assertEqual(len(hotkeys3), 1)
+
+    def test_maa_hotkey_failure_and_not_ready(self):
+        maa, maa_log, _gui = _make_maa_daily(self.tmp)
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+
+        def launcher(exe, params, cwd):
+            _touch(maa_log)
+            return handle
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey", return_value=False), \
+                mock.patch.object(daily, "_maa_window_ready",
+                                  return_value=True), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result = daily.run(maa, launcher=launcher)
+        self.assertEqual(result["state"], daily.FAILED)
+        self.assertIn("热键", result["reason"])
+        self.assertTrue(handle.terminated)
+
+        maa2, maa_log2, _gui2 = _make_maa_daily(os.path.join(self.tmp, "maa2"))
+        clock2 = FakeClock()
+        handle2 = FakeHandle(clock2, exit_calls=None)
+
+        def launcher2(exe, params, cwd):
+            _touch(maa_log2)
+            return handle2
+        with mock.patch.object(daily, "_now", clock2.now), \
+                mock.patch.object(daily, "_sleep", clock2.sleep), \
+                mock.patch.object(daily, "_maa_window_ready",
+                                  return_value=False), \
+                mock.patch.object(daily, "send_hotkey",
+                                  side_effect=AssertionError("未就绪不应发热键")), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result2 = daily.run(maa2, launcher=launcher2)
+        self.assertEqual(result2["state"], daily.FAILED)
+        self.assertIn("未就绪", result2["reason"])
+
+    def test_maa_close_after_terminates_handle(self):
+        maa, maa_log, _gui = _make_maa_daily(self.tmp)
+        maa["daily"] = store._clean_daily({"close_after": True}, "maa")
+        clock = FakeClock()
+        handle = FakeHandle(clock, exit_calls=None)
+
+        def launcher(exe, params, cwd):
+            _touch(maa_log)
+            return handle
+
+        def send_ok(hotkey):
+            _append_text(maa_log, "任务已全部完成！\n")
+            return True
+        with mock.patch.object(daily, "_now", clock.now), \
+                mock.patch.object(daily, "_sleep", clock.sleep), \
+                mock.patch.object(daily, "send_hotkey", side_effect=send_ok), \
+                mock.patch.object(daily, "_maa_window_ready",
+                                  return_value=True), \
+                mock.patch.object(daily, "_script_running",
+                                  return_value=False), \
+                mock.patch.object(store, "snapshot_processes",
+                                  return_value=set()):
+            result = daily.run(maa, launcher=launcher)
+        self.assertEqual(result["state"], daily.FINISHED)
+        self.assertTrue(handle.terminated, "close_after=True 时应结束本次启动的 MAA")
+        self.assertTrue(handle.closed)
+
+    def test_run_precondition_error_and_dry_run(self):
+        maa, _log, _gui = _make_maa_daily(self.tmp, hotkey=False)
+        p1, p2, p3 = (
+            mock.patch.object(daily, "_script_running", return_value=False),
+            mock.patch.object(daily, "_game_running", return_value=True),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value=set()))
+        with p1, p2, p3:
+            result = daily.run(maa, launcher=lambda *a: (_ for _ in ()).throw(
+                AssertionError("前置失败时不应启动")))
+        self.assertEqual(result["state"], daily.FAILED)
+        self.assertIn("前置检查未通过", result["reason"])
+
+        result2 = daily.run(maa, dry_run=True)
+        self.assertEqual(result2["state"], daily.DRY_RUN)
+        self.assertEqual(result2["state_label"], "预演")
+        self.assertIn("plan", result2)
+
+    def test_state_labels(self):
+        expected = {daily.IDLE: "空闲", daily.STARTING: "启动中",
+                    daily.RUNNING: "运行中", daily.FINISHED: "已完成",
+                    daily.FAILED: "失败", daily.TIMEOUT: "超时",
+                    daily.STOPPED: "已停止", daily.SKIPPED: "已跳过",
+                    daily.DRY_RUN: "预演"}
+        for state, label in expected.items():
+            self.assertEqual(daily.STATE_LABELS.get(state), label)
+
+
+class DailyQueueTests(TempDirTest):
+    """顺序队列：顺序执行 / 禁用跳过 / 失败继续 / 停止剩余 / dry-run。"""
+
+    def _apps(self):
+        apps = []
+        for key, game in (("maa", "明日方舟"), ("nte", "异环"),
+                          ("wuwa", "鸣潮"), ("maaend", "终末地")):
+            exe = os.path.join(self.tmp, key, "script.exe")
+            os.makedirs(os.path.dirname(exe), exist_ok=True)
+            apps.append({"key": key, "game": game, "script_exe": exe,
+                         "daily": store._clean_daily({}, key)})
+        return apps
+
+    @staticmethod
+    def _fake_run(executed, state_by_key=None):
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            state = (state_by_key or {}).get(app["key"], daily.FINISHED)
+            return {"key": app["key"], "game": app["game"], "state": state,
+                    "state_label": daily.STATE_LABELS.get(state, state),
+                    "reason": "mock"}
+        return fake
+
+    def test_order_and_results(self):
+        apps = self._apps()
+        executed, events = [], []
+        with mock.patch.object(daily, "run",
+                               side_effect=self._fake_run(executed)):
+            queue = daily.DailyQueue(apps, ["wuwa", "maa"],
+                                     on_event=events.append)
+            self.assertTrue(queue.start())
+            queue._thread.join(timeout=5)
+        self.assertEqual(executed, ["wuwa", "maa"])
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["state"], daily.FINISHED)
+        self.assertEqual([item["key"] for item in snapshot["results"]],
+                         ["wuwa", "maa"])
+        self.assertTrue(any(event.get("type") == "queue" for event in events))
+        self.assertTrue(any(event.get("type") == "item" for event in events))
+
+    def test_disabled_skipped(self):
+        apps = self._apps()
+        apps[1]["daily"] = store._clean_daily({"enabled": False}, "nte")
+        executed = []
+        with mock.patch.object(daily, "run",
+                               side_effect=self._fake_run(executed)):
+            queue = daily.DailyQueue(apps, ["maa", "nte", "wuwa"])
+            queue.start()
+            queue._thread.join(timeout=5)
+        self.assertEqual(executed, ["maa", "wuwa"])
+        states = [item["state"] for item in queue.snapshot()["results"]]
+        self.assertEqual(states.count(daily.SKIPPED), 1)
+
+    def test_failure_continues(self):
+        apps = self._apps()
+        executed = []
+        with mock.patch.object(daily, "run", side_effect=self._fake_run(
+                executed, {"maa": daily.FAILED})):
+            queue = daily.DailyQueue(apps, ["maa", "nte", "wuwa"])
+            queue.start()
+            queue._thread.join(timeout=5)
+        self.assertEqual(executed, ["maa", "nte", "wuwa"])
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["state"], daily.FINISHED)
+        self.assertEqual(snapshot["results"][0]["state"], daily.FAILED)
+
+    def test_stop_marks_remaining_stopped(self):
+        apps = self._apps()
+        executed, holder = [], {}
+        clock = FakeClock()
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            executed.append(app["key"])
+            holder["queue"].stop()
+            return {"key": app["key"], "game": app["game"],
+                    "state": daily.STOPPED, "state_label": "已停止",
+                    "reason": "mock stop"}
+
+        queue = daily.DailyQueue(apps, ["maa", "nte", "wuwa"])
+        holder["queue"] = queue
+        with mock.patch.object(daily, "run", side_effect=fake):
+            queue.start()
+            queue._thread.join(timeout=5)
+        self.assertEqual(executed, ["maa"])
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["state"], daily.STOPPED)
+        states = [item["state"] for item in snapshot["results"]]
+        self.assertEqual(states.count(daily.STOPPED), 3)
+
+    def test_dry_run_flag_forwarded(self):
+        apps = self._apps()
+        flags, executed = [], []
+
+        def fake(app, settings=None, *, dry_run=False, stop_event=None,
+                 on_event=None, launcher=None):
+            flags.append(dry_run)
+            executed.append(app["key"])
+            return {"key": app["key"], "state": daily.DRY_RUN,
+                    "state_label": "预演", "reason": "mock"}
+
+        with mock.patch.object(daily, "run", side_effect=fake):
+            queue = daily.DailyQueue(apps, ["maa", "wuwa"], dry_run=True)
+            queue.start()
+            queue._thread.join(timeout=5)
+        self.assertEqual(executed, ["maa", "wuwa"])
+        self.assertEqual(flags, [True, True])
+
+
+class DailyLogConfigTests(TempDirTest):
+    """日志增量读取、daily 默认值、daily_order 与 config v4 往返。"""
+
+    def test_log_watcher_incremental_and_rotation(self):
+        path = _touch(os.path.join(self.tmp, "watch.log"), b"old line\n")
+        watcher = daily.LogWatcher(path)
+        self.assertEqual(watcher.read(), "")
+        _append_text(path, "new line 1\n")
+        self.assertIn("new line 1", watcher.read())
+        _append_text(path, "new line 2\n")
+        self.assertIn("new line 2", watcher.read())
+        self.assertIn("new line 1", watcher.tail(10))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("rotated\n")
+        watcher.offset = 0
+        self.assertIn("rotated", watcher.read())
+        self.assertEqual(daily.LogWatcher("").read(), "")
+
+    def test_daily_clean_defaults_and_limits(self):
+        wuwa = store._clean_daily(None, "wuwa")
+        self.assertEqual(wuwa["task"], "DailyTask")
+        self.assertEqual(wuwa["timeout_min"], 90)
+        self.assertTrue(wuwa["enabled"])
+        self.assertEqual(store._clean_daily(None, "maa")["close_after"], False)
+        self.assertEqual(store._clean_daily(None, "maaend")["timeout_min"], 150)
+        generic = store._clean_daily(None, "custom_qa")
+        self.assertFalse(generic["enabled"])
+        clamped = store._clean_daily({"timeout_min": 9999}, "maa")
+        self.assertEqual(clamped["timeout_min"], 600)
+        self.assertEqual(store._clean_daily({"timeout_min": 0}, "maa")
+                         ["timeout_min"], 1)
+        args = store._clean_daily({"extra_args": "--flag value"}, "maa")
+        self.assertEqual(args["extra_args"], ["--flag", "value"])
+        # QA-13 修复：只保留 str、strip 后丢弃 None/数字/空白/嵌套值
+        mixed = store._clean_daily({
+            "extra_args": [None, 3, " --x ", "", "  ", ["nested"], "--y z"]},
+            "maa")["extra_args"]
+        self.assertEqual(mixed, ["--x", "--y z"])
+        quoted = store._clean_daily({"extra_args": '"--flag value"'}, "maa")
+        self.assertEqual(quoted["extra_args"], ["--flag value"])
+        # 非 bool 的 enabled 不会被接受
+        self.assertTrue(store._clean_daily({"enabled": "false"}, "maa")["enabled"])
+
+    def test_daily_order_clean(self):
+        keys = ["maa", "nte", "wuwa", "maaend"]
+        self.assertEqual(store._clean_daily_order(["wuwa", "bogus", "wuwa"],
+                                                  keys),
+                         ["wuwa", "maa", "nte", "maaend"])
+        self.assertEqual(store._clean_daily_order(None, keys), keys)
+        self.assertEqual(store._clean_daily_order([], keys), keys)
+
+    def test_config_daily_roundtrip_and_legacy(self):
+        apps = []
+        for key, settings in (("maa", {"timeout_min": 30,
+                                       "extra_args": ["--flag"]}),
+                              ("wuwa", {"task": "DailyTask"})):
+            app = store.make_builtin(key, self.tmp)
+            app["daily"] = store._clean_daily(settings, key)
+            apps.append(app)
+        cfg = os.path.join(self.tmp, "config.json")
+        search_root = os.path.join(self.tmp, "search_root")
+        os.makedirs(search_root, exist_ok=True)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            self.assertTrue(store.save_state(apps, "", self.tmp,
+                                             daily_order=["wuwa", "maa"]))
+            raw = json.load(open(cfg, "r", encoding="utf-8"))
+            self.assertEqual(raw.get("version"), 4)
+            self.assertEqual(raw.get("daily_order"), ["wuwa", "maa"])
+            self.assertEqual(raw["apps"]["maa"]["daily"]["timeout_min"], 30)
+            loaded, _clash, _root, meta = store.load_state_full()
+        by_key = {app["key"]: app for app in loaded}
+        self.assertEqual(meta["daily_order"][:2], ["wuwa", "maa"])
+        self.assertEqual(sorted(meta["daily_order"]),
+                         sorted(store.DEFAULT_DAILY_ORDER))
+        self.assertEqual(by_key["maa"]["daily"]["timeout_min"], 30)
+        self.assertEqual(by_key["maa"]["daily"]["extra_args"], ["--flag"])
+        self.assertEqual(by_key["wuwa"]["daily"]["task"], "DailyTask")
+        self.assertTrue(by_key["maa"]["daily"]["enabled"])
+
+        # 旧 v4 配置没有 daily 字段 -> 自动补内置默认
+        legacy = {"version": 4, "root": self.tmp, "apps": {"maa": {}}}
+        _write_json(cfg, legacy)
+        with mock.patch.object(store, "CONFIG", cfg), \
+                mock.patch.object(store, "SEARCH_ROOT", search_root):
+            loaded2, _c, _r, meta2 = store.load_state_full()
+        maa = next(app for app in loaded2 if app["key"] == "maa")
+        self.assertEqual(maa["daily"]["enabled"], True)
+        self.assertEqual(maa["daily"]["timeout_min"], 120)
+        self.assertEqual(meta2["daily_order"], store.DEFAULT_DAILY_ORDER)
+
+
+class DailyQuotingTests(TempDirTest):
+    """QA-14：命令参数统一引号处理（ShellExecuteW 参数串 + Popen argv 列表）。"""
+
+    def _patch(self):
+        return (
+            mock.patch.object(daily, "_script_running", return_value=False),
+            mock.patch.object(daily, "_game_running", return_value=True),
+            mock.patch.object(store, "snapshot_processes",
+                              return_value=set()))
+
+    def test_quote_arg_rendering(self):
+        quote = daily._quote_arg
+        self.assertEqual(quote("plain"), "plain")
+        self.assertEqual(quote("--config"), "--config")
+        self.assertEqual(quote("a b"), '"a b"')
+        self.assertEqual(quote(""), '""')
+        self.assertEqual(quote('say "hi"'), '"say \\"hi\\""')
+        self.assertEqual(quote("plain", force=True), '"plain"')
+        # 结尾反斜杠按 2n 转义，避免吞掉收尾引号
+        self.assertEqual(quote("C:\\my dir\\"), '"C:\\my dir\\\\"')
+        # 单项去外层引号（UI shlex(posix=False) 写入的历史值）
+        self.assertEqual(daily._normalize_extra_arg('"--flag value"'),
+                         "--flag value")
+        self.assertEqual(daily._normalize_extra_arg("'x'"), "x")
+        self.assertEqual(daily._normalize_extra_arg("  "), "")
+        self.assertEqual(daily._extra_args(
+            {"extra_args": ['"a b"', " c ", ""]}), ["a b", "c"])
+        # 非 str 在 _clean_daily 阶段已丢弃（_extra_args 只处理已清洗值）
+        self.assertEqual(store._clean_daily(
+            {"extra_args": [3, None]}, "maa")["extra_args"], [])
+
+    def test_build_command_argv_and_params(self):
+        exe = r"C:\Program Files\X\MAA.exe"
+        config = 'My "Daily" Cfg'
+        command = daily._build_command(exe, ["--config", config],
+                                       force_quote={1})
+        self.assertEqual(command["argv"], [exe, "--config", config])
+        self.assertEqual(command["args"], ["--config", config])
+        self.assertEqual(command["params"],
+                         "--config " + daily._quote_arg(config, force=True))
+        self.assertTrue(command["params"].endswith('Cfg"'))
+        self.assertEqual(command["command_text"],
+                         daily._quote_arg(exe, force=True) + " "
+                         + command["params"])
+
+    def test_okww_task_with_space_and_quote(self):
+        task = 'Daily Task "X"'
+        app, _log = _make_okww_daily(self.tmp, {"task": task})
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(plan["ok"], plan["errors"])
+        self.assertEqual(plan["argv"],
+                         [plan["exe"], plan["args"][0], "-t", task, "-e"])
+        self.assertIn("-t " + daily._quote_arg(task), plan["params"])
+        self.assertIn('\\"X\\"', plan["params"])   # 内部引号被转义
+        self.assertTrue(plan["params"].rstrip().endswith("-e"))
+
+    def test_maa_config_with_space_and_quote(self):
+        config = 'My "Daily" Cfg'
+        app, _log, _gui = _make_maa_daily(self.tmp)
+        app["daily"] = store._clean_daily({
+            "config": config,
+            "extra_args": ["--path", r"C:\my dir\x"]}, "maa")
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(plan["ok"], plan["errors"])
+        self.assertEqual(plan["argv"], [
+            plan["exe"], "--skip-startup-auto-run", "--config", config,
+            "--path", r"C:\my dir\x"])
+        expected = ("--skip-startup-auto-run --config "
+                    + daily._quote_arg(config, force=True)
+                    + ' --path "C:\\my dir\\x"')
+        self.assertEqual(plan["params"], expected)
+        self.assertIn('\\"Daily\\"', plan["params"])
+        # argv 是原始 token（config 值本身含引号字符，未做手工引号拼接）
+        self.assertEqual(plan["argv"][2:4], ["--config", config])
+
+    def test_mxu_instance_with_space_and_quote(self):
+        name = 'Full "Daily" Run'
+        app = _make_mxu_daily(self.tmp, "nte", instances=[{
+            "name": name,
+            "tasks": [{"taskName": "DailyTask", "enabled": True}]}])
+        app["daily"] = store._clean_daily({
+            "instance": name, "extra_args": ["--opt=a b"]}, "nte")
+        p1, p2, p3 = self._patch()
+        with p1, p2, p3:
+            plan = daily.plan_for(app)
+        self.assertTrue(plan["ok"], plan["errors"])
+        self.assertEqual(plan["argv"], [
+            plan["exe"], "--autostart", "--instance", name,
+            "--quit-after-run", "--opt=a b"])
+        expected = ("--autostart --instance "
+                    + daily._quote_arg(name, force=True)
+                    + ' --quit-after-run "--opt=a b"')
+        self.assertEqual(plan["params"], expected)
+        self.assertIn('\\"Daily\\"', plan["params"])
 
 
 def main():
