@@ -1861,8 +1861,11 @@ class DailyPlanTests(TempDirTest):
                 side_effect=AssertionError("dry-run 不应启动进程")):
             plans = daily.dry_run(apps)
         by_key = {plan["key"]: plan for plan in plans}
+        # This fixture intentionally contains only the original four scripts.
+        fixture_keys = {app["key"] for app in apps}
         self.assertEqual([plan["key"] for plan in plans],
-                         store.DEFAULT_DAILY_ORDER)
+                         [key for key in store.DEFAULT_DAILY_ORDER
+                          if key in fixture_keys])
         self.assertTrue(all(plan["ok"] for plan in plans),
                         [(p["key"], p["errors"]) for p in plans])
         wuwa = by_key["wuwa"]
@@ -2747,7 +2750,9 @@ class SettingsConfigTests(TempDirTest):
         self.assertEqual(meta["settings"]["refresh_interval"], 2.0)
         self.assertEqual(meta["settings"]["close_action"], "minimize")
         self.assertEqual(meta["settings"]["daily_default_timeout"], 45)
-        self.assertEqual(meta["daily_order"], ["wuwa", "maa", "nte", "maaend"])
+        self.assertEqual(meta["daily_order"],
+                         ["wuwa", "maa"] + [key for key in store.DEFAULT_DAILY_ORDER
+                                             if key not in ("wuwa", "maa")])
         self.assertEqual(os.path.normpath(runtime_clash),
                          os.path.normpath(clash),
                          "运行期 clash 仍应还原为绝对路径")
@@ -4202,7 +4207,7 @@ class V0103ElevationTests(TempDirTest):
                        "r", encoding="utf-8").read()
         for mark in ("--elevation-check", "--no-elevate",
                      "should_elevate(", "relaunch_as_admin(",
-                     "not_admin_message(", "GAMEHUB_NO_ELEVATE"):
+                     "not_admin_message(", "setup_logging(APP_DIR)"):
             with self.subTest(mark=mark):
                 self.assertIn(mark, hub_src)
         elev_src = open(os.path.join(REPO_ROOT, "gamehub", "elevation.py"),
@@ -4732,12 +4737,13 @@ class V0110TrayTests(TempDirTest):
                                _tray_hidden=False)
         self.assertFalse(ui.GameHub._hide_to_tray(obj4))
         # minimize_window：托盘隐藏成功 -> 不 iconify；失败 -> iconify
-        win = SimpleNamespace(_hide_to_tray=lambda: True,
+        win = SimpleNamespace(_hide_to_tray=lambda: True, _tray_enabled=lambda: True,
                               root=self.FakeRoot())
         ui.GameHub.minimize_window(win)
         self.assertEqual(win.root.iconify_calls, 0)
-        win2 = SimpleNamespace(_hide_to_tray=lambda: False,
+        win2 = SimpleNamespace(_hide_to_tray=lambda: False, _tray_enabled=lambda: False,
                                root=self.FakeRoot())
+        win2._minimize_to_taskbar = win2.root.iconify
         ui.GameHub.minimize_window(win2)
         self.assertEqual(win2.root.iconify_calls, 1)
         # _show_from_tray 恢复窗口
@@ -4757,7 +4763,8 @@ class V0110TrayTests(TempDirTest):
         off = SimpleNamespace(tray=self.FakeTray(True),
                               settings={"minimize_to_tray": False},
                               _tray_hidden=True,
-                              _tray_enabled=lambda: False)
+                              _tray_enabled=lambda: False,
+                              _show_from_tray=lambda: None)
         ui.GameHub._sync_tray(off)
         self.assertEqual(off.tray.stops, 1)
         self.assertFalse(off._tray_hidden)
@@ -4767,7 +4774,9 @@ class V0110TrayTests(TempDirTest):
         root = self.FakeRoot()
         obj = SimpleNamespace(settings={"close_action": "minimize"},
                               _hide_to_tray=lambda: True, root=root,
-                              tray=tray_obj, _closing=False)
+                              tray=tray_obj, _closing=False,
+                              _choose_close_action=lambda: "tray")
+        obj._hide_to_tray = lambda **_kwargs: True
         ui.GameHub._on_close(obj)
         self.assertFalse(root.destroyed)
         self.assertEqual(tray_obj.stops, 0)
@@ -4775,7 +4784,9 @@ class V0110TrayTests(TempDirTest):
         obj2 = SimpleNamespace(settings={"close_action": "minimize"},
                                _hide_to_tray=lambda: False,
                                root=self.FakeRoot(),
-                               tray=self.FakeTray(True), _closing=False)
+                               tray=self.FakeTray(True), _closing=False,
+                               _choose_close_action=lambda: "taskbar")
+        obj2._minimize_to_taskbar = obj2.root.iconify
         ui.GameHub._on_close(obj2)
         self.assertEqual(obj2.root.iconify_calls, 1)
         self.assertFalse(obj2.root.destroyed)
@@ -4795,7 +4806,8 @@ class V0110TrayTests(TempDirTest):
         root4 = self.FakeRoot()
         obj4 = SimpleNamespace(settings={"close_action": "exit"},
                                _hide_to_tray=lambda: False, root=root4,
-                               tray=BadTray(), _closing=False)
+                               tray=BadTray(), _closing=False,
+                               _choose_close_action=lambda: "exit")
         ui.GameHub._on_close(obj4)
         self.assertTrue(root4.destroyed)
 

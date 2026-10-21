@@ -176,6 +176,10 @@ BUILTIN_RULES = {
 }
 
 
+# Both cards target the same game; their script process detection stays separate.
+BUILTIN_RULES["oknte"] = copy.deepcopy(BUILTIN_RULES["nte"])
+
+
 # ------------------------------------------------------------------ 小工具
 def _compile(pattern, default=None):
     text = str(pattern or "").strip()

@@ -31,7 +31,7 @@ body:
     attributes:
       label: GameHub 版本
       description: 界面右上角显示的版本号，或下载的 Release 版本
-      placeholder: v0.4.0
+      placeholder: v0.13.0
   - type: textarea
     id: environment
     attributes:
@@ -39,10 +39,11 @@ body:
       description: Windows 版本、Python 版本（如果源码运行）、涉及的脚本版本
       placeholder: Windows 11 24H2 / Python 3.13 / MAA v6.19.0
   - type: textarea
-    id: config
+    id: diagnostics
     attributes:
-      label: 相关配置（可选）
-      description: 删除其中涉及隐私的路径后，贴上 `config.json` 中出问题的卡片配置
+      label: Hub 诊断日志（可选）
+      description: 在 Hub 的「问题反馈 / Bug」中导出脱敏诊断 ZIP，检查内容后拖到此处；不要提交完整配置、账号、密码或令牌。脱敏不保证完全匿名，公开前请自行核对。
+      placeholder: 可附加诊断 ZIP，并注明问题发生的大致时间。
   - type: textarea
     id: screenshots
     attributes:

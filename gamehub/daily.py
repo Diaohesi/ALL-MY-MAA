@@ -27,6 +27,7 @@ import urllib.request
 from ctypes import wintypes
 
 from . import detector, store
+from .runtime_log import log_event, get_logger
 
 # ------------------------------------------------------------------ 状态
 IDLE = "idle"
@@ -250,10 +251,15 @@ def _read_json(path):
 
 
 def okww_paths(app):
-    """返回鸣潮 ok-ww 的 {exe, script, cwd, launcher, log, daily_config}。"""
+    """Backward-compatible entry point for ok-ww callers."""
+    return ok_script_paths(app)
+
+
+def ok_script_paths(app):
+    """Read-only paths for the installed OK script; task/log names are app-specific."""
     spec = app.get("launch")
     if not isinstance(spec, dict) or not spec.get("exe"):
-        spec = store.build_okww_launch(app) or {}
+        spec = store.build_pyappify_launch(app) or {}
     cwd = spec.get("cwd") or ""
     return {
         "exe": spec.get("exe") or "",
@@ -261,7 +267,8 @@ def okww_paths(app):
         "cwd": cwd,
         "launcher": spec.get("launcher_exe") or app.get("script_exe", ""),
         "log": os.path.join(cwd, "logs", "ok-script.log") if cwd else "",
-        "daily_config": os.path.join(cwd, "configs", "DailyTask.json") if cwd else "",
+        "daily_config": os.path.join(cwd, "configs", "DailyRoutineTask.json"
+                                     if app.get("key") == "oknte" else "DailyTask.json") if cwd else "",
     }
 
 
@@ -726,7 +733,7 @@ def _app_snapshot_names():
 def _script_running(app):
     key = app.get("key", "")
     names = _app_snapshot_names()
-    if key == "wuwa":
+    if key in store.PYAPPIFY_APPS:
         try:
             return store.launch_spec_running(app)
         except Exception:
@@ -744,28 +751,37 @@ def _game_running(app):
 
 
 def _plan_okww(app, settings, plan):
+    """Shared OK task plan; retain historical mode/function names for callers."""
     paths = okww_paths(app)
+    script_name = "ok-nte" if app.get("key") == "oknte" else "ok-ww"
     for field, label in (("exe", "pythonw.exe"), ("script", "main.py")):
         if not paths[field] or not os.path.isfile(paths[field]):
             plan["errors"].append(
-                f"未找到 ok-ww 正式脚本的 {label}（{paths[field] or '路径未知'}）")
+                f"未找到 {script_name} 正式脚本的 {label}（{paths[field] or '路径未知'}）")
     if not paths["cwd"] or not os.path.isdir(paths["cwd"]):
-        plan["errors"].append("未找到 ok-ww 的 working 目录")
+        plan["errors"].append(f"未找到 {script_name} 的 working/repo 目录")
     if paths["daily_config"] and not os.path.isfile(paths["daily_config"]):
         plan["warnings"].append(
-            "ok-ww 的 DailyTask.json 不存在：请先在 ok-ww 界面里配置并保存「每日任务」"
+            f"{script_name} 的 {os.path.basename(paths['daily_config'])} 不存在："
+            f"请先在 {script_name} 界面里配置并保存「每日任务」"
             "（可点卡片「启动脚本」打开脚本界面）")
     if _script_running(app):
         plan["errors"].append(
-            "ok-ww 正式脚本已在运行（同目录多实例会被强杀）。请先关闭脚本，或直接用当前实例操作")
-    task = str(settings.get("task") or "DailyTask").strip() or "DailyTask"
+            f"{script_name} 正式脚本已在运行（同目录多实例会被强杀）。请先关闭脚本，或直接用当前实例操作")
+    default_task = "DailyRoutineTask" if app.get("key") == "oknte" else "DailyTask"
+    task = str(settings.get("task") or default_task).strip() or default_task
     plan.update({
         "mode": "okww",
         "exe": paths["exe"],
         "cwd": paths["cwd"],
         "log_path": paths["log"],
         "success_patterns": [OKWW_SUCCESS_MARKER],
-        "failure_patterns": [],
+        # The framework emits its exit marker even if a routine subtask failed.
+        "failure_patterns": (["DailyRoutineTask:任务失败:",
+                              "DailyRoutineTask:DailyRoutineTask error",
+                              "执行结束, 存在失败", "Finished with failures",
+                              "状态: ❌ 异常中断", "Status: ❌ Interrupted"]
+                             if app.get("key") == "oknte" else []),
         "settle_seconds": 0,
     })
     # QA-14：统一用列表 + _quote_arg 构建，-t 值含空格/引号也能正确转义
@@ -776,9 +792,12 @@ def _plan_okww(app, settings, plan):
     plan["args"] = command["args"]
     plan["command_text"] = command["command_text"]
     plan["notes"].append(f"完成判定：进程退出 + 日志出现「{OKWW_SUCCESS_MARKER}」")
-    plan["notes"].append("将以管理员权限启动（UAC）；不注入环境变量（与 ok-ww 官方计划任务一致）")
+    if app.get("key") == "oknte":
+        plan["notes"].append(
+            "会识别已知的日常任务失败日志；外层结束标记仍不能保证每个子任务成功，请核对 ok-nte 日常任务报告")
+    plan["notes"].append(f"将以管理员权限启动（UAC）；不注入环境变量（与 {script_name} 官方计划任务一致）")
     if not settings.get("close_after", True):
-        plan["notes"].append("（-e 为完成判定所需，任务成功后 ok-ww 仍会关闭游戏与自身）")
+        plan["notes"].append(f"（-e 为完成判定所需，任务成功后 {script_name} 仍会关闭游戏与自身）")
 
 
 def _plan_maa(app, settings, plan):
@@ -985,7 +1004,7 @@ def plan_for(app, settings=None):
     plan["timeout_min"] = int(plan["settings"].get("timeout_min") or 120)
     plan["close_after"] = bool(plan["settings"].get("close_after"))
     key = app.get("key", "")
-    if key == "wuwa":
+    if key in store.PYAPPIFY_APPS:
         _plan_okww(app, plan["settings"], plan)
     elif key == "maa":
         _plan_maa(app, plan["settings"], plan)
@@ -1036,6 +1055,20 @@ def dry_run(apps, order=None, include_disabled=True):
 
 # ------------------------------------------------------------------ 执行
 def _emit(on_event, **event):
+    # Deliberate allowlist: never copy plans, config, external log tails or notes.
+    kind = event.get("type")
+    if kind == "done":
+        result = event.get("result") or {}
+        state = result.get("state")
+        fields = {name: result.get(name) for name in
+                  ("key", "state", "pid", "started_at", "ended_at", "duration")}
+        fields["success"] = state == FINISHED
+        log_event("daily_result", **fields)
+        if state in (STOPPED, TIMEOUT):
+            log_event("daily_" + state, **fields)
+    elif kind == "state":
+        log_event("daily_state", **{name: event.get(name)
+                                    for name in ("key", "state", "pid")})
     if not on_event:
         return
     try:
@@ -1102,6 +1135,7 @@ def _run_okww(plan, stop_event, on_event, launcher):
           pid=handle.pid, game=plan.get("game"))
     seen_success = False
     error_line = ""
+    seen_failure = False
     deadline = _now() + plan["timeout_min"] * 60
     result = None
     try:
@@ -1109,6 +1143,8 @@ def _run_okww(plan, stop_event, on_event, launcher):
             text = watcher.read()
             if OKWW_SUCCESS_MARKER in text:
                 seen_success = True
+            if _read_success(text, plan.get("failure_patterns") or []):
+                seen_failure = True
             if not error_line:
                 for line in text.splitlines():
                     if re.search(r"\bERROR\b|Traceback", line):
@@ -1122,13 +1158,16 @@ def _run_okww(plan, stop_event, on_event, launcher):
                                       log_watcher=watcher)
                 break
             if wait == "exit":
-                watcher.read()
-                if seen_success or OKWW_SUCCESS_MARKER in watcher.tail(30):
+                final_text = watcher.read()
+                seen_failure = seen_failure or _read_success(
+                    final_text, plan.get("failure_patterns") or [])
+                if not seen_failure and (seen_success or OKWW_SUCCESS_MARKER in watcher.tail(30)):
                     result = _base_result(plan, FINISHED, "每日任务已完成",
                                           pid=handle.pid, started=started,
                                           log_watcher=watcher)
                 else:
-                    reason = "脚本已退出，但日志未出现成功标记"
+                    reason = ("日常任务包含失败项，请检查脚本日志" if seen_failure
+                              else "脚本已退出，但日志未出现成功标记")
                     if error_line:
                         reason += f"（{error_line[:120]}）"
                     result = _base_result(plan, FAILED, reason, pid=handle.pid,
@@ -1562,6 +1601,11 @@ def run(app, settings=None, *, dry_run=False, stop_event=None, on_event=None,
         launcher=None):
     """执行单个游戏的清日常；dry_run=True 时只返回计划，不启动进程。"""
     plan = plan_for(app, settings)
+    log_event("daily_plan", key=plan.get("key"), mode=plan.get("mode"),
+              command_path=plan.get("exe"), timeout_min=plan.get("timeout_min"),
+              dry_run=bool(dry_run), success=bool(plan.get("ok")),
+              error_count=len(plan.get("errors") or []),
+              warning_count=len(plan.get("warnings") or []))
     if dry_run:
         return {
             "key": plan["key"], "game": plan["game"], "state": DRY_RUN,
@@ -1578,6 +1622,8 @@ def run(app, settings=None, *, dry_run=False, stop_event=None, on_event=None,
           game=plan.get("game"))
     launcher = launcher or launch_elevated
     mode = plan.get("mode")
+    log_event("daily_start", key=plan.get("key"), mode=mode,
+              command_path=plan.get("exe"))
     try:
         if mode == "okww":
             return _run_okww(plan, stop_event, on_event, launcher)
@@ -1588,6 +1634,7 @@ def run(app, settings=None, *, dry_run=False, stop_event=None, on_event=None,
         if mode == "mxu_ui":
             return _run_mxu_ui(plan, stop_event, on_event, launcher)
     except Exception as exc:       # 兜底：执行层异常不静默崩溃
+        get_logger("daily").exception("daily_exception")
         result = _base_result(plan, FAILED, f"执行异常：{exc}")
         _emit(on_event, type="done", result=result)
         return result

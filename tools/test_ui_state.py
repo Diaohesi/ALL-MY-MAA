@@ -108,18 +108,18 @@ def test_settings_roundtrip(tmp):
     check("重载 refresh", meta["settings"]["refresh_interval"], 2.0)
     check("重载 close_action", meta["settings"]["close_action"], "minimize")
     check("重载 daily_order", meta["daily_order"],
-          ["wuwa", "maa", "maaend", "nte"])
+          ["wuwa", "maa", "maaend", "nte", "oknte"])
     by_key = {app["key"]: app for app in loaded}
     check("旧 daily enabled 保留", by_key["maa"]["daily"]["enabled"], True)
     check("禁用项保留", by_key["nte"]["daily"]["enabled"], False)
 
     # 勾选过滤 / 顺序
     check("ordered keys", daily.ordered_daily_keys(
-        loaded, meta["daily_order"]), ["wuwa", "maa", "maaend", "nte"])
+        loaded, meta["daily_order"]), ["wuwa", "maa", "maaend", "nte", "oknte"])
     check("enabled keys", daily.enabled_daily_keys(
         loaded, meta["daily_order"]), ["wuwa", "maa", "maaend"])
     check("过滤无效 key 并补齐缺失", daily.ordered_daily_keys(
-        loaded, ["bogus", "nte"]), ["nte", "maa", "wuwa", "maaend"])
+        loaded, ["bogus", "nte"]), ["nte", "maa", "oknte", "wuwa", "maaend"])
 
     # 默认超时设置只作用于未显式写 timeout 的 daily
     legacy = {"version": 4, "root": tmp, "settings": {

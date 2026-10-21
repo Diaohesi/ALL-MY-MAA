@@ -65,6 +65,14 @@ DEFAULT_APPS = [
          github="https://github.com/1bananachicken/MaaNTE",
          release="https://github.com/1bananachicken/MaaNTE/releases/latest",
          download="https://yh.wanmei.com/"),
+    dict(key="oknte", game="异环", script="ok-nte", builtin=True,
+         script_exe_name="ok-nte.exe", default_dir="ok-nte",
+         script_procs=["OK-NTE.EXE"], game_exe="", game_procs=[],
+         accent="#b98bff", fallback_version="v1.4.15",
+         site="https://ok-script.com/ok-nte",
+         github="https://github.com/BnanZ0/ok-nte",
+         release="https://github.com/BnanZ0/ok-nte/releases/latest",
+         download="https://yh.wanmei.com/"),
     dict(key="wuwa", game="鸣潮", script="ok-ww", builtin=True,
          script_exe_name="ok-ww.exe", default_dir="WuwaMAA/ok-ww",
          script_procs=["OK-WW.EXE"], game_exe="", game_procs=[],
@@ -83,13 +91,14 @@ DEFAULT_APPS = [
          download="https://endfield.hypergryph.com/"),
 ]
 
-ICON_FILES = {"maa": "maa.png", "nte": "nte.png", "wuwa": "wuwa.png",
+ICON_FILES = {"maa": "maa.png", "nte": "nte.png", "oknte": "nte.png", "wuwa": "wuwa.png",
               "maaend": "maaend.png"}
 
 # 内置游戏的「游戏本体」进程名（v4 迁移时替换旧的启动器进程名误配）
 BUILTIN_GAME_PROCS = {
     "maa": ["ARKNIGHTS.EXE"],
     "nte": ["HTGAME.EXE"],
+    "oknte": ["HTGAME.EXE"],
     "wuwa": ["CLIENT-WIN64-SHIPPING.EXE"],
     "maaend": ["ENDFIELD.EXE"],
 }
@@ -108,12 +117,14 @@ BUILTIN_DAILY = {
             "timeout_min": 120, "extra_args": [], "close_after": False},
     "nte": {"enabled": True, "task": "", "instance": "", "config": "",
             "timeout_min": 120, "extra_args": [], "close_after": True},
+    "oknte": {"enabled": False, "task": "DailyRoutineTask", "instance": "", "config": "",
+              "timeout_min": 120, "extra_args": [], "close_after": True},
     "wuwa": {"enabled": True, "task": "DailyTask", "instance": "", "config": "",
              "timeout_min": 90, "extra_args": [], "close_after": True},
     "maaend": {"enabled": True, "task": "", "instance": "", "config": "",
                "timeout_min": 150, "extra_args": [], "close_after": True},
 }
-DEFAULT_DAILY_ORDER = ["maa", "nte", "wuwa", "maaend"]
+DEFAULT_DAILY_ORDER = ["maa", "nte", "oknte", "wuwa", "maaend"]
 
 # v0.8 顶层 settings（config.json 可选字段）；加载时缺省补默认、非法值清洗
 DEFAULT_SETTINGS = {
@@ -373,6 +384,8 @@ def _game_profile(app):
     """
     app = app or {}
     key = str(app.get("key") or "")
+    if key == "oknte":
+        key = "nte"     # Same game/launcher; never infer a direct HTGame launch.
     if key in GAME_KEYWORDS:
         return key, GAME_KEYWORDS[key], GAME_EXE_HINTS.get(key, ())
     game = str(app.get("game") or "").strip()
@@ -758,7 +771,7 @@ def resolve_game_exe(app, deadline_seconds=1.9):
     if not isinstance(app, dict):
         return ""
     current = str(app.get("game_exe") or "").strip()
-    if str(app.get("key") or "") != "nte":
+    if str(app.get("key") or "") not in ("nte", "oknte"):
         return current
     if current and os.path.isfile(current) \
             and os.path.basename(current).lower() == \
@@ -792,6 +805,7 @@ def _migrate_nte_game_exe(apps):
 GAME_LAUNCH_TIMEOUTS = {
     "wuwa": 120,
     "nte": 180,
+    "oknte": 180,
     "maaend": 180,
     "maa": 120,
 }
@@ -1073,7 +1087,7 @@ def build_game_launch(app):
                         [{"type": "user_pick",
                           "reason": "未找到 Wuthering Waves.exe"}],
         }
-    if key == "nte":
+    if key in ("nte", "oknte"):
         launcher = current if current and os.path.isfile(current) \
             and os.path.basename(current).lower() == "ntelauncher.exe" else ""
         if not launcher:
@@ -1297,8 +1311,8 @@ def read_version(app):
                 v = _version_text(json.load(f).get("version"))
             if v:
                 return v if v.startswith("v") else "v" + v
-        elif app.get("key") == "wuwa":
-            with open(os.path.join(folder, "data", "apps", "ok-ww", "app.json"),
+        elif app.get("key") in PYAPPIFY_APPS:
+            with open(os.path.join(folder, "data", "apps", PYAPPIFY_APPS[app["key"]], "app.json"),
                       "r", encoding="utf-8") as f:
                 v = _version_text(json.load(f).get("current_version"))
             if v:
@@ -1753,6 +1767,12 @@ def load_state_full():
             app["daily_explicit"] = False
         apps.append(app)
 
+    # The additional NTE script shares the configured game launcher, not script settings.
+    nte_app = next((app for app in apps if app.get("key") == "nte"), {})
+    for app in apps:
+        if app.get("key") == "oknte" and not app.get("game_exe"):
+            app["game_exe"] = nte_app.get("game_exe", "")
+
     # 内置应用：路径没找到时自动扫描
     for app in apps:
         if not os.path.isfile(app.get("script_exe", "")):
@@ -1778,8 +1798,8 @@ def load_state_full():
     # 保存后持久化到 config.json，便于其它应用复用同一结构。
     for app in apps:
         saved_launch = _clean_launch(saved_launch_specs.get(app.get("key", "")), root)
-        if app.get("key") == "wuwa":
-            app["launch"] = _merge_launch_spec(saved_launch, build_okww_launch(app))
+        if app.get("key") in PYAPPIFY_APPS:
+            app["launch"] = _merge_launch_spec(saved_launch, build_pyappify_launch(app))
         elif saved_launch:
             app["launch"] = saved_launch
 
@@ -2143,6 +2163,7 @@ LAUNCH_ENV_CLEAR = ("PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV", "PYTHONPATH",
                     "PYAPPIFY_PID")
 LAUNCH_ENV_SET = {"PYTHONNOUSERSITE": "1", "PYTHONIOENCODING": "utf-8",
                   "PYTHONUNBUFFERED": "1"}
+PYAPPIFY_APPS = {"wuwa": "ok-ww", "oknte": "ok-nte"}
 OKWW_APP_SUBDIR = ("data", "apps", "ok-ww")
 _LAUNCH_PATH_FIELDS = ("exe", "script", "cwd", "launcher_exe")
 
@@ -2241,19 +2262,25 @@ def _portable_launch(value, root):
 
 
 def build_okww_launch(app):
-    """从内置鸣潮卡片的 ok-ww 安装目录推导「直接运行正式脚本」的启动规格。
+    """Backward-compatible ok-ww helper (including keyless fixture callers)."""
+    return build_pyappify_launch(app, app_name="ok-ww")
 
-    目录布局：<ok-ww>\\data\\apps\\ok-ww\\python\\pythonw.exe + working\\main.py。
-    布局缺失时仍返回规格（launch_app 会回退启动器）。
-    """
+
+def build_pyappify_launch(app, app_name=None):
+    """Discover bundled Python + working/main.py (repo fallback) without running it."""
     app = app or {}
     launcher = _launch_text(app.get("script_exe"))
     install_dir = os.path.dirname(launcher)
     if not install_dir:
         return None
-    app_dir = os.path.join(install_dir, *OKWW_APP_SUBDIR)
+    app_name = app_name or PYAPPIFY_APPS.get(app.get("key"), "ok-ww")
+    app_dir = os.path.join(install_dir, "data", "apps", app_name)
     python_dir = os.path.join(app_dir, "python")
     working = os.path.join(app_dir, "working")
+    repo = os.path.join(app_dir, "repo")
+    if not os.path.isfile(os.path.join(working, "main.py")) \
+            and os.path.isfile(os.path.join(repo, "main.py")):
+        working = repo
     spec = {
         "type": "python",
         "exe": os.path.join(python_dir, "pythonw.exe"),
@@ -2321,8 +2348,8 @@ def refresh_launch_spec(app):
     """脚本路径变化后重新推导启动规格（内置鸣潮）；返回是否有规格。"""
     if not isinstance(app, dict):
         return False
-    if str(app.get("key") or "") == "wuwa":
-        spec = build_okww_launch(app)
+    if str(app.get("key") or "") in PYAPPIFY_APPS:
+        spec = build_pyappify_launch(app)
         if spec:
             app["launch"] = spec
         return bool(spec)
@@ -2416,7 +2443,8 @@ def launch_running_pids(app):
         if not path:
             continue
         lower = os.path.normpath(path).lower()
-        if any(lower == item or lower.startswith(item + os.sep) for item in dirs):
+        if os.path.basename(lower) in {name.lower() for name in names} \
+                and os.path.dirname(lower) in dirs:
             matched.add(pid)
     return matched
 

@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import VERSION, daily, detector, render, store, tray
+from . import VERSION, daily, detector, feedback, render, runtime_log, store, tray, window_state
 from . import theme as T
 
 TITLE = "All-My-Maa · 游戏脚本中心"
@@ -1079,8 +1079,13 @@ class GameHub:
     def __init__(self, root):
         global _FONT_SCALE
         self.root = root
+        self.root.report_callback_exception = self._report_callback_exception
+        runtime_log.log_event("ui.initialize", version=VERSION)
         self.apps, self.clash_exe, self.search_root, meta = store.load_state_full()
         self.settings = store._clean_settings(meta.get("settings"))
+        runtime_log.log_event("config.loaded", app_count=len(self.apps),
+                              app_keys=[app.get("key") for app in self.apps],
+                              admin=store.hub_is_elevated())
         # v0.10：没有显式 accent 时使用淡紫新默认；旧用户选择保留
         if not meta.get("settings_explicit_accent"):
             self.settings["accent"] = store.NEW_DEFAULT_ACCENT
@@ -1173,6 +1178,7 @@ class GameHub:
     def _save_config(self):
         saved = store.save_state(self.apps, self.clash_exe, self.search_root,
                                  self.daily_order, self.settings)
+        runtime_log.log_event("config.saved", ok=saved, app_count=len(self.apps))
         if not saved:
             self._toast("配置文件无法写入，本次修改无法保存")
         return saved
@@ -1339,6 +1345,7 @@ class GameHub:
         _dark_titlebar(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.overrideredirect(True)
+        self.root.bind("<Map>", lambda event: window_state.restore_from_taskbar(self.root, event), add="+")
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(1, weight=1)
         self._build_titlebar()
@@ -1490,38 +1497,50 @@ class GameHub:
                     self.root.winfo_screenheight())
 
     def minimize_window(self):
+        runtime_log.log_event("window.minimize_requested", target="tray" if self._tray_enabled() else "taskbar")
         if self._hide_to_tray():
             return
+        self._minimize_to_taskbar()
+
+    def _minimize_to_taskbar(self):
+        ok = window_state.minimize_to_taskbar(self.root)
+        runtime_log.log_event("window.taskbar_minimize", ok=ok,
+                              error=getattr(self.root, "_gamehub_window_state_error", ""))
+        if not ok:
+            self._toast("最小化失败，窗口保持打开；可重试或查看 Hub 日志")
+        return ok
+
+    def _report_callback_exception(self, exc_type, exc_value, exc_tb):
+        runtime_log.get_logger("ui").error(
+            "tk_callback_exception", exc_info=(exc_type, exc_value, exc_tb))
         try:
-            self.root.iconify()
+            self._toast("界面操作出现异常，已记录到 Hub 日志；请通过问题反馈导出诊断包")
         except Exception:
-            try:
-                hwnd = ctypes.windll.user32.GetAncestor(
-                    self.root.winfo_id(), 2)
-                ctypes.windll.user32.ShowWindow(hwnd, 6)
-            except Exception:
-                pass
+            pass
 
     def _tray_enabled(self):
         return bool(self.settings.get("minimize_to_tray", True))
 
-    def _hide_to_tray(self):
-        if not (self.tray and bool(
-                self.settings.get("minimize_to_tray", True))):
+    def _hide_to_tray(self, force=False):
+        if not (self.tray and (force or bool(
+                self.settings.get("minimize_to_tray", True)))):
             return False
         try:
             if not self.tray.start():
                 return False
             self.root.withdraw()
             self._tray_hidden = True
+            runtime_log.log_event("window.hidden_to_tray")
             return True
         except Exception:
             return False
 
     def _show_from_tray(self):
+        runtime_log.log_event("window.restore_from_tray")
         self._tray_hidden = False
         try:
             self.root.deiconify()
+            window_state.apply_taskbar_style(self.root)
             self.root.lift()
             self.root.focus_force()
         except Exception:
@@ -1537,6 +1556,8 @@ class GameHub:
             if self._tray_enabled():
                 self.tray.start()
             else:
+                if self._tray_hidden:
+                    self._show_from_tray()
                 self.tray.stop()
                 self._tray_hidden = False
         except Exception:
@@ -1642,6 +1663,8 @@ class GameHub:
         self._button(about_buttons, "关于软件", self.open_about,
                      kind="ghost", anchor="w",
                      photo=about_icon).pack(fill="x", pady=1)
+        self._button(about_buttons, "问题反馈 / Bug", self.open_feedback,
+                     kind="ghost", anchor="w").pack(fill="x", pady=1)
         self._button(about_buttons, "检查软件更新", self.check_software_update,
                      kind="ghost", anchor="w").pack(fill="x", pady=1)
 
@@ -2019,7 +2042,10 @@ class GameHub:
         if icon is not None:
             icon_label.image = icon
         icon_label.grid(row=0, column=1, padx=(0, 10))
-        name = tk.Label(line1, text=app.get("game", ""), bg=T.UI_PANEL,
+        display_name = app.get("game", "")
+        if app.get("key") in ("nte", "oknte"):
+            display_name = f"{display_name} · {app.get('script', '')}"
+        name = tk.Label(line1, text=display_name, bg=T.UI_PANEL,
                         fg=T.UI_TEXT, font=self.f_name, anchor="w")
         name.grid(row=0, column=2, sticky="w")
         status = tk.StringVar(value="空闲")
@@ -2264,6 +2290,17 @@ class GameHub:
 
     def _daily_manager_event(self, event):
         self.daily_events.put(event)
+        if event.get("type") not in ("log", "queue"):
+            result = event.get("result") or {}
+            state = event.get("state")
+            if isinstance(state, dict):
+                state = state.get("state")
+            if not isinstance(state, str):
+                state = result.get("state") if isinstance(result.get("state"), str) else None
+            runtime_log.log_event("daily.ui_event", event_type=event.get("type"),
+                                  key=event.get("key") or result.get("key"),
+                                  state=state, pid=result.get("pid"),
+                                  duration=result.get("duration"))
 
     def _append_daily_log(self, line):
         self.daily_log.append(time.strftime("%H:%M:%S ") + line)
@@ -2378,6 +2415,10 @@ class GameHub:
                     hint.configure(text=reason, fg="#ffce6b")
                 elif key == "nte":
                     hint.configure(text=daily.MXU_UI_NOTE, fg=T.UI_TEXT_3)
+                elif key == "oknte":
+                    hint.configure(
+                        text="ok-nte：DailyRoutineTask；建议与 MaaNTE 二选一勾选，避免重复执行异环日常",
+                        fg=T.UI_TEXT_3)
                 else:
                     hint.configure(text="", fg=T.UI_TEXT_3)
 
@@ -2489,7 +2530,7 @@ class GameHub:
                     bg=T.UI_PANEL).pack(side="left")
         row2 = tk.Frame(launcher, bg=T.UI_PANEL)
         row2.pack(anchor="w", pady=2)
-        self._label(row2, "关闭窗口：", color=T.UI_TEXT_2, font=self.f_small,
+        self._label(row2, "旧版关闭偏好（现会弹出确认）：", color=T.UI_TEXT_2, font=self.f_small,
                     bg=T.UI_PANEL).pack(side="left")
         self.close_action_var = tk.StringVar(
             value=self.settings.get("close_action", "exit"))
@@ -2503,14 +2544,14 @@ class GameHub:
                            font=self.f_small).pack(side="left", padx=(0, 12))
         self.minimize_to_tray_var = tk.BooleanVar(
             value=bool(self.settings.get("minimize_to_tray", True)))
-        tk.Checkbutton(launcher, text="最小化到系统托盘（关闭窗口选「最小化」时也隐藏到托盘）",
+        tk.Checkbutton(launcher, text="标题栏最小化按钮隐藏到托盘（关闭则最小化到任务栏）",
                        variable=self.minimize_to_tray_var,
                        bg=T.UI_PANEL, fg=T.UI_TEXT_2, selectcolor=T.UI_PANEL,
                        activebackground=T.UI_PANEL,
                        activeforeground=T.UI_TEXT,
                        font=self.f_small).pack(anchor="w", pady=2)
         self._label(launcher,
-                    "关闭后可从托盘左键恢复或右键菜单退出；退出时会清理托盘图标。",
+                    "点击 × 总会询问：任务栏、托盘、退出或取消；任务运行时退出会先停止任务。",
                     color=T.UI_TEXT_3, font=self.f_aux, bg=T.UI_PANEL,
                     wraplength=440, justify="left").pack(anchor="w")
 
@@ -2586,6 +2627,7 @@ class GameHub:
         about_links = (
             ("关于软件", self.open_about, "primary"),
             ("检查软件更新", self.check_software_update, "normal"),
+            ("问题反馈 / Bug", self.open_feedback, "normal"),
             ("更新日志", self._open_changelog, "ghost"),
             ("GitHub", lambda: self._open_url(PROJECT_GITHUB, "GitHub"),
              "ghost"),
@@ -2607,11 +2649,141 @@ class GameHub:
             self._toast(f"脚本目录不存在：{folder}")
 
     def open_log_dir(self):
-        folder = _log_directory(store.APP_DIR)
+        log_path = runtime_log.current_log_path()
+        folder = os.path.dirname(log_path) if log_path else _log_directory(store.APP_DIR)
         if store.open_path(folder):
             self._toast("已打开日志目录")
         else:
             self._toast(f"日志目录不存在：{folder}")
+
+    def open_feedback(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("问题反馈 / Bug 报告 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 760, 730)
+        dialog.minsize(620, 560)
+        dialog.rowconfigure(1, weight=1)
+        dialog.columnconfigure(0, weight=1)
+        self._label(dialog, "问题反馈 / Bug 报告", font=self.f_title,
+                    bg=T.UI_BG).grid(row=0, column=0, sticky="w", padx=20, pady=(14, 8))
+        area, body = self._scroll_area(dialog)
+        area.grid(row=1, column=0, sticky="nsew", padx=20)
+        self._label(body,
+                    "报告会提交至公开的 GitHub Issues，需要登录 GitHub 并由你确认提交。\n"
+                    "不会自动上传日志或配置；请勿填写密码、令牌、账号及个人路径。",
+                    font=self.f_aux, color=T.UI_WARNING, bg=T.UI_BG,
+                    justify="left", wraplength=660).pack(anchor="w", pady=(0, 10))
+        kind = tk.StringVar(value="Bug")
+        line = tk.Frame(body, bg=T.UI_BG)
+        line.pack(fill="x")
+        self._label(line, "反馈类型", bg=T.UI_BG).pack(side="left")
+        tk.OptionMenu(line, kind, "Bug", "问题反馈", "功能建议").pack(side="left", padx=8)
+        self._label(body, "标题（必填）", bg=T.UI_BG).pack(anchor="w", pady=(8, 2))
+        title = self._entry(body, "")
+        title.pack(fill="x")
+        self._label(body, "相关功能 / 脚本（例如：托盘、ok-nte 清日常）",
+                    bg=T.UI_BG).pack(anchor="w", pady=(8, 2))
+        component = self._entry(body, "Hub")
+        component.pack(fill="x")
+        fields = {}
+        for field, label in (("description", "问题描述（必填）"),
+                             ("steps", "复现步骤"), ("expected", "预期结果"),
+                             ("actual", "实际结果 / 错误提示")):
+            self._label(body, label, bg=T.UI_BG).pack(anchor="w", pady=(8, 2))
+            widget = tk.Text(body, height=3, wrap="word", bg=T.UI_PANEL_2,
+                             fg=T.UI_TEXT, insertbackground=T.UI_TEXT,
+                             font=self.f_small, relief="flat", highlightthickness=1,
+                             highlightbackground=T.UI_BORDER)
+            widget.pack(fill="x")
+            fields[field] = widget
+        include_env = tk.BooleanVar(value=True)
+        tk.Checkbutton(body, text="附带 Hub / 系统 / Python 版本（不含个人路径）",
+                       variable=include_env, bg=T.UI_BG, fg=T.UI_TEXT_2,
+                       activebackground=T.UI_BG, activeforeground=T.UI_TEXT,
+                       selectcolor=T.UI_PANEL_2).pack(anchor="w", pady=10)
+        status = tk.StringVar(value="可先预览或复制报告，再打开 GitHub 提交。")
+        footer = tk.Frame(dialog, bg=T.UI_BG)
+        footer.grid(row=2, column=0, sticky="ew", padx=20, pady=12)
+        self._label(footer, textvariable=status, font=self.f_aux,
+                    bg=T.UI_BG, wraplength=660, justify="left").pack(anchor="w", pady=(0, 8))
+        actions = tk.Frame(footer, bg=T.UI_BG)
+        actions.pack(fill="x")
+
+        def report():
+            try:
+                return feedback.build_report(
+                    kind=kind.get(), title=title.get(), component=component.get(),
+                    include_environment=include_env.get(),
+                    **{name: widget.get("1.0", "end-1c") for name, widget in fields.items()})
+            except ValueError as exc:
+                messagebox.showwarning("请填写反馈", str(exc), parent=dialog)
+                return None
+
+        def copy_report(text):
+            try:
+                dialog.clipboard_clear()
+                dialog.clipboard_append(text)
+                dialog.update_idletasks()
+                status.set("完整报告已复制。请确认内容中没有敏感信息。")
+                return True
+            except tk.TclError:
+                status.set("复制失败，请使用预览窗口手动复制。")
+                return False
+
+        def preview():
+            text = report()
+            if text is not None:
+                self._show_text_window("反馈报告预览", text)
+
+        def copy():
+            text = report()
+            if text is not None:
+                copy_report(text)
+
+        def submit():
+            text = report()
+            if text is None:
+                return
+            if not messagebox.askyesno(
+                    "公开反馈提醒", "将打开 GitHub 新建 Issue 页面，报告内容公开可见。\n"
+                    "请确认未包含敏感信息；浏览器中仍需你点击提交。是否继续？", parent=dialog):
+                return
+            url, included = feedback.issue_url(title.get(), text)
+            if not included:
+                if not copy_report(text):
+                    return
+                messagebox.showinfo("报告较长", "完整报告已复制，请在 GitHub 正文中粘贴后提交。", parent=dialog)
+            try:
+                opened = webbrowser.open(url)
+            except Exception:
+                opened = False
+            status.set("已打开 GitHub，请核对内容后提交。" if opened else
+                       "浏览器未能打开。可复制报告后访问 github.com/Diaohesi/All-My-Maa/issues")
+
+        def export_logs():
+            destination = filedialog.asksaveasfilename(
+                parent=dialog, title="导出脱敏 Hub 诊断包", defaultextension=".zip",
+                initialfile="All-My-Maa-diagnostics-" + time.strftime("%Y%m%d-%H%M%S") + ".zip",
+                filetypes=[("ZIP 诊断包", "*.zip")])
+            if not destination:
+                return
+            try:
+                runtime_log.export_diagnostics(destination)
+                runtime_log.log_event("feedback.diagnostics_exported")
+                status.set("诊断包已保存。请检查内容后手动附加到 GitHub Issue；不会自动上传。")
+            except Exception:
+                runtime_log.get_logger("ui").exception("feedback.diagnostics_export_failed")
+                messagebox.showerror("导出失败", "无法导出诊断包，请检查目标目录权限后重试。", parent=dialog)
+
+        self._button(footer, "导出脱敏诊断包（手动附加到 Issue）", export_logs,
+                     kind="normal").pack(anchor="w", pady=(0, 8), before=actions)
+        for label, command, style in (("预览报告", preview, "normal"),
+                                      ("复制报告", copy, "normal"),
+                                      ("去 GitHub 提交", submit, "primary")):
+            self._button(actions, label, command, kind=style).pack(side="left", padx=(0, 8))
+        self._button(actions, "关闭", dialog.destroy, kind="ghost").pack(side="right")
+        title.focus_set()
 
     def open_about(self):
         dialog = tk.Toplevel(self.root)
@@ -2670,6 +2842,9 @@ class GameHub:
         footer.pack(fill="x", pady=(T.SPACE_UI_SM, 0))
         self._button(footer, "检查软件更新", self.check_software_update,
                      kind="primary").pack(side="left")
+        self._button(footer, "问题反馈 / Bug",
+                     lambda: (dialog.destroy(), self.open_feedback()),
+                     kind="normal").pack(side="left", padx=8)
         self._button(footer, "关闭", dialog.destroy).pack(side="right")
         dialog.grab_set()
         self.root.wait_window(dialog)
@@ -3019,7 +3194,7 @@ class GameHub:
         try:
             subprocess.Popen([sys.executable, hub], cwd=store.APP_DIR,
                              creationflags=0x00000008 | 0x00000200)
-            self._on_close()
+            self._on_close(force=True)
         except Exception as exc:
             self._toast(f"重启失败：{exc}")
 
@@ -3400,10 +3575,12 @@ class GameHub:
         if self._app_state(app) == "missing":
             self._choose_script_path(key)
             return
+        runtime_log.log_event("script.launch_requested", key=key, script=app.get("script"))
         try:
             ok, error, mode = store.launch_app(app)
         except Exception as exc:
             ok, error, mode = False, str(exc), "none"
+        runtime_log.log_event("script.launch_result", key=key, ok=ok, mode=mode, error=error)
         if not ok:
             self._toast(f"启动 {app.get('game')} 失败：{error}")
             return
@@ -3424,6 +3601,7 @@ class GameHub:
         return True
 
     def launch_game(self, key):
+        runtime_log.log_event("game.launch_requested", key=key)
         app = self._app_by_key(key)
         if app is None:
             return
@@ -3484,9 +3662,9 @@ class GameHub:
             app["game_procs"] = store.proc_names_for_exe(spec["exe"])
             saved = self._save_config()
             self._rebuild_home()
-        if app.get("key") == "nte" and spec.get("exe"):
-            if os.path.basename(spec["exe"]).lower() != "htgame.exe":
-                self._toast("未找到异环游戏本体 HTGame.exe，将使用启动器")
+        if app.get("key") in ("nte", "oknte") and spec.get("exe"):
+            if os.path.basename(spec["exe"]).lower() == "ntelauncher.exe":
+                self._toast("正在打开异环启动器，请登录并点击开始游戏")
         if not spec.get("exe") and spec.get("strategy") != "maa_adb":
             self._toast(f"未找到 {app.get('game')} 的启动程序")
             return
@@ -3524,6 +3702,8 @@ class GameHub:
             except queue.Empty:
                 return
             self.game_launching.pop(key, None)
+            runtime_log.log_event("game.launch_result", key=key, ok=result.get("ok"),
+                                  reason=result.get("reason"))
             app = self._app_by_key(key)
             game = app.get("game") if app else key
             if result.get("ok"):
@@ -3904,6 +4084,7 @@ class GameHub:
 
     # ---------------------------------------------------------- 其他
     def _toast(self, text):
+        runtime_log.log_event("ui.notice", text_length=len(str(text or "")))
         if not hasattr(self, "toast_var"):
             return
         self.toast_var.set(str(text or ""))
@@ -3914,15 +4095,94 @@ class GameHub:
                 pass
         self._toast_after = self.root.after(6000, lambda: self.toast_var.set(""))
 
+    def _choose_close_action(self):
+        if getattr(self, "_close_dialog_open", False):
+            return "cancel"
+        self._close_dialog_open = True
+        dialog = tk.Toplevel(self.root)
+        dialog.title("关闭窗口 · All-My-Maa")
+        dialog.configure(bg=T.UI_BG)
+        dialog.transient(self.root)
+        self._place_dialog(dialog, 600, 300)
+        result = {"action": "cancel"}
+        panel = RoundPanel(dialog, fill=T.UI_PANEL, border=T.UI_BORDER, pad=20)
+        panel.pack(fill="both", expand=True, padx=12, pady=12)
+        self._label(panel.inner, "希望如何处理窗口？", font=self.f_title,
+                    bg=T.UI_PANEL).pack(anchor="w", pady=(0, 10))
+        manager = getattr(self, "daily_manager", None)
+        busy = bool(manager and manager.snapshot().get("busy"))
+        text = ("清日常正在执行：最小化后仍会继续运行；选择退出将先请求停止任务。" if busy else
+                "最小化到任务栏或托盘不会退出 Hub；可以随时恢复窗口。")
+        self._label(panel.inner, text, bg=T.UI_PANEL, wraplength=510,
+                    justify="left").pack(anchor="w", pady=(0, 16))
+
+        def choose(action):
+            result["action"] = action
+            dialog.destroy()
+
+        actions = tk.Frame(panel.inner, bg=T.UI_PANEL)
+        actions.pack(fill="x")
+        for index, (label, action, kind) in enumerate((
+                ("最小化到任务栏", "taskbar", "primary"),
+                ("隐藏到托盘", "tray", "normal"),
+                ("退出程序", "exit", "danger"),
+                ("取消", "cancel", "ghost"))):
+            self._button(actions, label, lambda value=action: choose(value),
+                         kind=kind).grid(row=index // 2, column=index % 2,
+                                         sticky="ew", padx=4, pady=4)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+        dialog.bind("<Escape>", lambda _event: choose("cancel"))
+        dialog.grab_set()
+        try:
+            self.root.wait_window(dialog)
+        finally:
+            self._close_dialog_open = False
+        return result["action"]
+
     def _on_close(self, force=False):
-        if not force and self.settings.get("close_action") == "minimize":
-            if self._hide_to_tray():
+        if not force:
+            action = self._choose_close_action()
+            runtime_log.log_event("window.close_choice", action=action)
+            if action == "taskbar":
+                self._minimize_to_taskbar()
                 return
-            self.root.iconify()
-            return
+            if action == "tray":
+                if not self._hide_to_tray(force=True):
+                    self._toast("托盘暂不可用，已改为最小化到任务栏")
+                    self._minimize_to_taskbar()
+                return
+            if action != "exit":
+                return
+        manager = getattr(self, "daily_manager", None)
+        if manager and manager.snapshot().get("busy"):
+            if not getattr(self, "_exit_waiting", False):
+                self._exit_waiting = True
+                self._exit_wait_started = time.monotonic()
+                runtime_log.log_event("shutdown.wait_for_daily_stop")
+                manager.stop_all()
+            elapsed = time.monotonic() - getattr(self, "_exit_wait_started", time.monotonic())
+            if elapsed >= 15:
+                self._exit_waiting = False
+                self._exit_wait_after = None
+                runtime_log.log_event("shutdown.stop_wait_timeout", elapsed=elapsed)
+                abandon = messagebox.askyesno(
+                    "任务仍未停止", "停止请求已发出，但任务超过 15 秒仍未结束。\n\n"
+                    "是否仅退出 Hub？外部脚本或游戏可能继续运行，需要手动检查。\n"
+                    "选择「否」保留 Hub 窗口，稍后可重试退出。", parent=self.root)
+                if not abandon:
+                    self._toast("已取消退出；停止请求仍有效，请检查脚本状态")
+                    return
+            else:
+                self._toast("正在停止本次清日常，结束后退出 Hub…")
+                previous = getattr(self, "_exit_wait_after", None)
+                if previous:
+                    self.root.after_cancel(previous)
+                self._exit_wait_after = self.root.after(200, lambda: self._on_close(force=True))
+                return
+        runtime_log.log_event("shutdown.ui_close")
         self._closing = True
         for attr in ("_poll_after", "_toast_after", "_startup_check_after",
-                     "_startup_software_after"):
+                     "_startup_software_after", "_exit_wait_after"):
             after_id = getattr(self, attr, None)
             if after_id:
                 try:

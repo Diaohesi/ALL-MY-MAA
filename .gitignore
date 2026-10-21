@@ -12,8 +12,12 @@ user_icons/
 # 截图 / 调试产物
 docs/tmp-*.png
 tools/_*.py
+tools/_release_notes_*.md
+/logs/
+/All-My-Maa-diagnostics-*.zip
 
 # PyInstaller
+/GameHub.exe
 build/
 dist/
 *.spec

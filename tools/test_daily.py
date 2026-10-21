@@ -725,7 +725,7 @@ def test_config_roundtrip(tmp):
         loaded = store.load_state_full()
     apps2, _clash, _root, meta = loaded
     check("daily_order 持久化", meta["daily_order"],
-          ["wuwa", "maa", "nte", "maaend"])
+          ["wuwa", "maa", "nte", "maaend", "oknte"])
     by_key = {app["key"]: app for app in apps2}
     check("timeout_min 持久化", by_key["maa"]["daily"]["timeout_min"], 30)
     check("extra_args 持久化", by_key["maa"]["daily"]["extra_args"],

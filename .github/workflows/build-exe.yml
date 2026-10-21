@@ -26,6 +26,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pillow pyinstaller
 
+      - name: Run offline regression tests
+        run: |
+          $tests = @("regression_test.py", "test_oknte.py", "test_feedback.py", "test_runtime_log.py", "test_window_state.py", "test_close_prompt.py", "test_daily.py", "test_ui_state.py", "test_tray.py", "test_elevation.py")
+          foreach ($test in $tests) {
+            python -B "tools/$test"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Build single-file exe
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name GameHub --icon "assets/hub.ico" --add-data "assets;assets" hub.pyw
