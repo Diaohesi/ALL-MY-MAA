@@ -96,6 +96,17 @@ class RuntimeLogTests(unittest.TestCase):
         with self.assertRaises(OSError):
             logs.export_diagnostics(path)
 
+    def test_oversized_quoted_secret_is_omitted_before_export(self):
+        path = logs.setup_logging(self.root)
+        secret = 'password="' + 'PRIVATE_LONG_SECRET ' * 2500 + '"'
+        logs.log_event('long_input', message=secret)
+        self.assertNotIn('PRIVATE_LONG_SECRET', self.text())
+        Path(str(path) + '.1').write_text(json.dumps({'message':secret}), encoding='utf-8')
+        destination = logs.export_diagnostics(self.root / 'long.zip')
+        with zipfile.ZipFile(destination) as archive:
+            for name in archive.namelist():
+                self.assertNotIn(b'PRIVATE_LONG_SECRET', archive.read(name))
+
     def test_fallback_and_total_failure(self):
         blocked = self.root / "not-a-directory"
         blocked.write_text("blocked")

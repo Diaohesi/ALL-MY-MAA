@@ -41,6 +41,8 @@ def _text(value):
         text = re.sub(r"(https?://)[^/@]+@", r"\1[REDACTED]@", text, flags=re.I)
         text = re.sub(r"[?#].*", "?[REDACTED]", text)
         return text
+    if len(value) > 32768:
+        return "[oversized text omitted]"
     text = _URL.sub(url, value)
     text = _HOME.sub(lambda m: m.group(1) + _REDACTED, text)
     text = _BEARER.sub(_REDACTED, text)
@@ -55,7 +57,9 @@ def _redact(value, depth=0, seen=None):
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return _text(value[:32768])
+        # Never clip a credential before sanitizing: a missing closing quote
+        # could leave its tail outside the assignment match. Omit huge fields.
+        return "[oversized text omitted]" if len(value) > 32768 else _text(value)
     if isinstance(value, Path):
         return _text(os.fspath(value))
     seen = set() if seen is None else seen
