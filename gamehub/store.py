@@ -280,7 +280,11 @@ def pick_best_exe(paths):
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0
-        return (version_key(folder), mtime)
+        # Product prefixes such as MAA-v5.1.0 contain a hyphen that the
+        # generic version parser correctly treats as a prerelease delimiter.
+        # Extract the actual version before applying that parser.
+        match = re.search(r"(?i)(?:^|[-_ ])v?(\d+(?:\.\d+)+)", folder)
+        return (version_key(match.group(1) if match else folder), mtime)
     return max(paths, key=score) if paths else None
 
 
