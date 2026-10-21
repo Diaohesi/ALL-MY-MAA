@@ -76,7 +76,7 @@ def test_entry_check():
     except Exception:
         data = {}
     check("check 输出 admin", isinstance(data.get("admin"), bool), True)
-    check("check 输出 would_elevate", data.get("would_elevate"), True)
+    check("check 输出 would_elevate", data.get("would_elevate"), not data.get("admin"))
     check("check 不启动 GUI", "Traceback" not in proc.stderr, True)
 
     env["GAMEHUB_NO_ELEVATE"] = "1"
