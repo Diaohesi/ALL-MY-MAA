@@ -18,6 +18,7 @@ tools/_release_notes_*.md
 
 # PyInstaller
 /GameHub.exe
+/GameHub-v*.exe
 build/
 dist/
 *.spec

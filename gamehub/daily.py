@@ -7,7 +7,8 @@
 - 明日方舟 MAA：以管理员启动 `MAA.exe --skip-startup-auto-run`，等就绪后
   发送配置里的 LinkStart 全局热键，监控 `debug\\gui.log` 增量：
   `任务已全部完成！` 成功、`任务出错:` 失败、`已停止` 停止。
-- 异环 MaaNTE / 终末地 MaaEnd：`--autostart --instance "<实例名>" --quit-after-run`，
+- 异环 MaaNTE：打开正常 UI，等本次启动就绪后发送开始任务热键，HTTP/日志等待结束。
+- 终末地 MaaEnd：`--autostart --instance "<实例名>" --quit-after-run`，
   完成 = MXU 进程退出（不区分成败，日志只做启发式备注）。
 
 安全约定：
@@ -562,14 +563,31 @@ INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 
 
+# ULONG_PTR is an unsigned pointer-sized integer, not a pointer to a DWORD.
+ULONG_PTR = ctypes.c_size_t
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
                 ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+                ("dwExtraInfo", ULONG_PTR)]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD)]
 
 
 class _INPUTUNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
+    # The mouse member determines INPUT's size even for keyboard-only calls.
+    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT),
+                ("hi", HARDWAREINPUT)]
 
 
 class INPUT(ctypes.Structure):
@@ -638,9 +656,27 @@ def send_hotkey(hotkey):
         array[index].u.ki.wScan = 0
         array[index].u.ki.dwFlags = flags
         array[index].u.ki.time = 0
-        array[index].u.ki.dwExtraInfo = ctypes.pointer(wintypes.ULONG(0))
-    sent = user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
-    return sent == len(events)
+        array[index].u.ki.dwExtraInfo = 0
+    expected = len(events)
+    struct_size = ctypes.sizeof(INPUT)
+    ctypes.set_last_error(0)
+    try:
+        sent = user32.SendInput(expected, array, struct_size)
+    except Exception as exc:
+        last_error = ctypes.get_last_error()
+        log_event("hotkey_send_error", sent=0, expected=expected,
+                  struct_size=struct_size, last_error=last_error,
+                  error_type=type(exc).__name__)
+        return False
+    # Capture immediately: logging or another Win32 call could change the error.
+    last_error = ctypes.get_last_error()
+    log_event("hotkey_send", sent=sent, expected=expected,
+              struct_size=struct_size, last_error=last_error)
+    if sent != expected:
+        log_event("hotkey_send_error", sent=sent, expected=expected,
+                  struct_size=struct_size, last_error=last_error,
+                  error_type="incomplete_send")
+    return sent == expected
 
 
 # ------------------------------------------------------------------ 命令行拼装（QA-14）
@@ -1271,10 +1307,86 @@ def _mxu_marker_hit(text, markers):
     return ""
 
 
+class _MxuStartupReadiness:
+    """Snapshot BEFORE launch; only fresh debug bytes can establish readiness.
+
+    Keep the completion watcher at the consumed offset, including logs first
+    created after launch or a date rollover. No start/toggle hotkey is sent here.
+    """
+
+    def __init__(self, plan, watcher):
+        self.watcher = watcher
+        self.debug = os.path.join(plan.get("cwd") or "", "debug")
+        if watcher.path:
+            self.debug = os.path.dirname(watcher.path)
+        self.readers = {}
+        self.buffers = {}
+        self.seen = set()
+        for path in self._paths():
+            self.readers[path] = LogWatcher(path)
+        if watcher.path:
+            reader = LogWatcher(watcher.path)
+            reader.offset = watcher.offset
+            self.readers[watcher.path] = reader
+
+    def _paths(self):
+        try:
+            return [os.path.join(self.debug, name)
+                    for name in os.listdir(self.debug)
+                    if name.lower().endswith(".log")
+                    and not name.lower().startswith("maafw")
+                    and os.path.isfile(os.path.join(self.debug, name))]
+        except OSError:
+            return []
+
+    def poll(self):
+        for path in self._paths():
+            if path not in self.readers:
+                reader = LogWatcher(path)
+                reader.offset = 0  # new since the pre-launch snapshot
+                self.readers[path] = reader
+        for path, reader in self.readers.items():
+            text = reader.read()
+            if not text:
+                continue
+            text = self.buffers.get(path, "") + text
+            for marker in ("全局快捷键已注册", "加载完成"):
+                if marker in text:
+                    self.seen.add(marker)
+            self.buffers[path] = text[-128:]
+            # Transfer rather than reset: resetting here would discard bytes
+            # appended between the read and the eventual start hotkey.
+            self.watcher.path = path
+            self.watcher.offset = reader.offset
+            self.watcher.tail_lines = list(reader.tail_lines)
+        return len(self.seen) == 2
+
+    def wait(self, stop_event, on_event, grace=15, timeout=30):
+        """Return ready/fallback/stopped/timeout; polling is cancellable."""
+        started = _now()
+        _emit(on_event, type="log", text="等待 MaaNTE 本次启动的热键注册及加载完成日志")
+        while True:
+            if _stop_requested(stop_event):
+                return "stopped"
+            if self.poll():
+                _emit(on_event, type="log", text="MaaNTE 本次启动已就绪：全局快捷键已注册、加载完成")
+                return "ready"
+            elapsed = _now() - started
+            if not self.seen and elapsed >= grace:
+                _emit(on_event, type="log", text=(
+                    f"MaaNTE 未提供新的启动就绪标记；已等待 {grace} 秒，"
+                    "使用兼容宽限回退（未验证就绪），仅发送一次开始热键"))
+                return "fallback"
+            if elapsed >= timeout:
+                return "timeout"
+            _sleep(0.25)
+
+
 def _run_mxu_ui(plan, stop_event, on_event, launcher):
     """异环：打开 MaaNTE UI → 发送开始任务热键 → HTTP/日志等待结束。"""
     started = time.time()
     watcher = LogWatcher(plan.get("log_path"))
+    readiness = _MxuStartupReadiness(plan, watcher)
     app = plan.get("_app") or {}
     handle = None
     try:
@@ -1313,11 +1425,31 @@ def _run_mxu_ui(plan, stop_event, on_event, launcher):
                               pid=pid, started=started, log_watcher=watcher)
         _emit(on_event, type="done", result=result)
         return result
+    ready = readiness.wait(stop_event, on_event)
+    log_event("mxu_startup_readiness", key=plan.get("key"),
+              pid=pid, outcome=ready)
+    if ready in ("stopped", "timeout"):
+        handle.terminate()
+        handle.close()
+        result = _base_result(
+            plan, STOPPED if ready == "stopped" else FAILED,
+            "用户停止" if ready == "stopped" else
+            "MaaNTE 启动就绪超时：未同时检测到热键注册和加载完成；未发送开始热键",
+            pid=pid, started=started, log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
     try:
         detector.focus_window(window.get("hwnd"))
     except Exception:
         pass
     _sleep(0.4)
+    if _stop_requested(stop_event):
+        handle.terminate()
+        handle.close()
+        result = _base_result(plan, STOPPED, "用户停止", pid=pid,
+                              started=started, log_watcher=watcher)
+        _emit(on_event, type="done", result=result)
+        return result
     hotkey = plan.get("hotkey")
     sent = False
     if hotkey:
